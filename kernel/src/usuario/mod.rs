@@ -1971,6 +1971,14 @@ pub enum NaoLancou {
     /// — ver [`codigo`]. Vai à auditoria como o desfecho: `ERROR` com o
     /// motivo da leitura, `DENY_POLICY` com o da procedência.
     Codigo(codigo::Recusa),
+    /// A imagem se leu e não se carrega: não é um ELF64 deste processador,
+    /// um segmento fora do lugar ou que invade a pilha, o manifesto que não
+    /// se lê ([`programa::conferir_a_imagem`]). Conferida antes de o fio
+    /// nascer — antes, o fio nascia, o nascimento ia à auditoria como
+    /// "processo N lancado", e o fio novo morria com o erro só no log (a
+    /// nona do lote A3 do #448; o #467, no lote A4). Vai à auditoria como o
+    /// desfecho, `ERROR` com o motivo, como a leitura que falha.
+    Imagem(&'static str),
     /// O fio não nasceu: as vagas do escalonador, a memória da pilha, ou o
     /// escalonamento congelado depois de uma falha fatal. Não é recusa de
     /// ninguém, e vai à auditoria como o desfecho, `ERROR` com o motivo.
@@ -1991,10 +1999,18 @@ pub enum NaoLancou {
     /// o comando: o código e o motivo, já gravados. Antes de o código ser
     /// lido — o journal recusado, quem pede encerrado ou contido, o editor
     /// em quem o papel não confia, o papel que falta, a cota esgotada
-    /// ([`crate::autorizacao::permitir_processo`]) —; na cota, contada de
-    /// novo ao reservar a vaga ([`crate::fios::COTA_ESGOTADA`]); ou na
-    /// última palavra, quem pediu acabou ou tem o fim pedido
-    /// ([`crate::contencao::PROCESSO_ENCERRADO`]).
+    /// ([`crate::autorizacao::permitir_processo_com_o_detalhe`]) —; na
+    /// cota, contada de novo ao reservar a vaga
+    /// ([`crate::fios::COTA_ESGOTADA`]); ou na última palavra, quem pediu
+    /// acabou ou tem o fim pedido ([`crate::contencao::PROCESSO_ENCERRADO`]).
+    ///
+    /// Já gravados: nas perguntas do começo e na cota, a recusa do gate,
+    /// como ele a grava — `process.run`, com quem pede — e, dentro de um
+    /// comando, o desfecho do `user.run`, a execução da decisão dele com o
+    /// mesmo código e o mesmo detalhe — o editor pelo nome, a contagem da
+    /// cota —, para o `ALLOW` não ficar sem desfecho (o #466, no lote A4);
+    /// fora de um comando, só a do gate. Na última palavra, a recusa já é a
+    /// execução da decisão, gravada uma vez (ver `lancar_por`).
     ///
     /// À parte de [`NaoLancou::Recusado`] porque quem responde não as
     /// explica: a explicação de uma recusa depois do gate lê a decisão do
@@ -2012,7 +2028,10 @@ impl NaoLancou {
     pub fn motivo(&self) -> &str {
         match self {
             NaoLancou::Codigo(r) => r.motivo(),
-            NaoLancou::Fio(m) | NaoLancou::Recusado(_, m) | NaoLancou::PorQuemPede(_, m) => m,
+            NaoLancou::Imagem(m)
+            | NaoLancou::Fio(m)
+            | NaoLancou::Recusado(_, m)
+            | NaoLancou::PorQuemPede(_, m) => m,
         }
     }
 
@@ -2022,15 +2041,25 @@ impl NaoLancou {
         match self {
             NaoLancou::Codigo(codigo::Recusa::Leitura(e)) => e.motivo(),
             NaoLancou::Codigo(codigo::Recusa::Procedencia(f, _)) => f.motivo(),
-            NaoLancou::Fio(m) | NaoLancou::Recusado(_, m) | NaoLancou::PorQuemPede(_, m) => m,
+            NaoLancou::Imagem(m)
+            | NaoLancou::Fio(m)
+            | NaoLancou::Recusado(_, m)
+            | NaoLancou::PorQuemPede(_, m) => m,
         }
     }
 }
 
-/// O que o fio novo recebe: o código já lido e conferido, e quem o selou.
+/// O que o fio novo recebe: o código já lido e conferido — também como
+/// imagem —, quem o selou, e o desfecho do lançamento, para o que falhar
+/// depois do nascimento.
 struct Carga {
-    imagem: alloc::vec::Vec<u8>,
+    /// Os bytes conferidos; emprestados, no exemplo embutido.
+    imagem: alloc::borrow::Cow<'static, [u8]>,
     editor: Option<[u8; 32]>,
+    /// A execução do comando que lançou — ou o kernel —, guardada no fio do
+    /// comando: no fio novo, a procura pelo comando deste fio não acha nada
+    /// (ver [`crate::autorizacao::DesfechoDoLancamento`]).
+    desfecho: crate::autorizacao::DesfechoDoLancamento,
 }
 
 /// O lançamento do `user.run`: o comando em execução neste fio, que o gate
@@ -2067,7 +2096,9 @@ pub fn lancar_conferido(
 /// O fio recebe os bytes **já conferidos** — ver [`codigo::obter`] —, num
 /// ponteiro: [`crate::fios::criar`] carrega um `u64` até a função de
 /// entrada, e é nele que vai a [`Carga`] vazada de propósito; o fio a
-/// reconstrói e a larga. Zero significa "o exemplo".
+/// reconstrói e a larga ([`carregar_a_carga`]). A carga vai sempre numa
+/// caixa, também a do exemplo embutido, com os bytes emprestados: o fio
+/// novo tem sempre o desfecho do lançamento.
 ///
 /// Antes, o fio lia o arquivo sozinho, depois de nascer: o lançamento
 /// respondia "lançado" para um caminho que não existia, e — com o código
@@ -2075,54 +2106,33 @@ pub fn lancar_conferido(
 /// nasceu, longe de quem pediu e da resposta a ele. Lendo aqui, quem pediu
 /// ouve a recusa, e o que roda é exatamente o que foi conferido: ninguém
 /// relê o arquivo.
+///
+/// E a imagem é conferida aqui também — o ELF, os segmentos, o manifesto
+/// ([`programa::conferir_a_imagem`]) —, antes de o fio nascer: a que não se
+/// carrega é recusada a quem pediu, com o desfecho, e não nasce. O fio novo
+/// só faz o que pede o espaço dele — criá-lo, mapear os segmentos e a pilha
+/// —, e o que falha ali vai à auditoria como o desfecho do lançamento,
+/// depois do nascimento, em nome de quem o gate decidiu (o #467, no lote
+/// A4).
 fn lancar_por(
     caminho: Option<&str>,
     autoridade: crate::autorizacao::Autoridade,
     lancador: crate::autorizacao::Lancador,
 ) -> Result<u64, NaoLancou> {
-    extern "C" fn hospedar(argumento: u64) -> ! {
-        let (imagem, editor) = if argumento == 0 {
-            (alloc::borrow::Cow::Borrowed(exemplo::bytes()), None)
-        } else {
-            // SAFETY: o ponteiro veio do `Box::into_raw` logo abaixo, este fio
-            // é o único que o recebeu, e ele o reconstrói uma vez só.
-            let carga = unsafe { alloc::boxed::Box::from_raw(argumento as *mut Carga) };
-            let Carga { imagem, editor } = *carga;
-            (alloc::borrow::Cow::Owned(imagem), editor)
-        };
-
-        // Carregar e entrar em dois passos, com a imagem largada no meio: ver
-        // `programa::entrar` sobre o vazamento que isto fecha.
-        let carregado = programa::carregar(&imagem, editor);
-        drop(imagem);
-        match carregado.and_then(programa::entrar) {
-            Ok(_) => unreachable!("entrar nao retorna em caso de sucesso"),
-            Err(falha) => {
-                crate::log_error!(
-                    "usuario",
-                    "nao foi possivel entrar em userspace: {}",
-                    falha.motivo()
-                );
-                crate::fios::terminar()
-            }
-        }
-    }
-
     limpar_ultima_saida();
 
     // O recurso do lançamento na auditoria: o caminho, ou o exemplo.
     let recurso = caminho.unwrap_or("<exemplo embutido>");
     // O desfecho de um lançamento que o gate permitiu e que não acontece —
     // o código que não prova de onde veio, o arquivo que não se lê, a
-    // última palavra que recusa, o fio que não nasce —: como o que a
-    // execução fez da decisão — o `user.run`, com o número dela —, ou, fora
-    // de um comando, em nome do kernel. Um `ALLOW` não fica sem desfecho na
-    // cadeia, como no `exec` (ver `executar`).
-    let gravar_o_desfecho = |codigo: politica::Codigo, motivo: &str| {
-        if crate::autorizacao::auditar_execucao(recurso, codigo, motivo) == 0 {
-            crate::autorizacao::auditar_do_kernel("process.run", recurso, codigo, motivo);
-        }
-    };
+    // imagem que não se carrega, a última palavra que recusa, o fio que não
+    // nasce, a imagem que não se mapeia no fio novo e, dentro de um
+    // comando, as recusas sobre quem pede —: como o que a execução fez da
+    // decisão — o `user.run`, com o número dela —, ou, fora de um comando,
+    // em nome do kernel. Um `ALLOW` não fica sem desfecho na cadeia, como no
+    // `exec` (ver `executar`). Guardado aqui, no fio do comando, para valer
+    // também no fio novo (ver `autorizacao::DesfechoDoLancamento`).
+    let desfecho = crate::autorizacao::desfecho_do_lancamento(recurso);
 
     // O lançamento é o do comando — a autoridade e um dos caminhos dele —,
     // ou o do kernel por conta própria, fora de um comando, até o trinco do
@@ -2139,35 +2149,41 @@ fn lancar_por(
     if let Err((codigo, motivo)) =
         crate::autorizacao::conferir_o_lancamento(lancador, autoridade, caminho)
     {
-        gravar_o_desfecho(codigo, motivo);
+        desfecho.gravar(codigo, motivo);
         return Err(NaoLancou::Recusado(codigo, motivo));
     }
 
     // As perguntas do gate sobre quem pede o processo, e a cota de
     // processos do papel de quem lança: contada antes de nascer, e de novo
-    // ao nascer — ver `fios::criar_processo`. A recusa já está na
-    // auditoria, e quem pediu ouve o código e o motivo dela — a cota, a
-    // contenção, o editor, o papel —, e não um texto só para todas; sem a
-    // explicação do comando, que não é ela (ver `NaoLancou::PorQuemPede`).
+    // ao nascer — ver `fios::criar_processo`. Quem pediu ouve o código e o
+    // motivo da recusa — a cota, a contenção, o editor, o papel —, e não um
+    // texto só para todas; sem a explicação do comando, que não é ela (ver
+    // `NaoLancou::PorQuemPede`).
+    //
+    // A recusa já está na auditoria como o gate a grava — `process.run`,
+    // com quem pede —, e é ela que conta como a recusa. Dentro de um
+    // comando, o `ALLOW` dele ganha também o desfecho: a execução da
+    // decisão, com o mesmo código e o mesmo detalhe que o gate gravou — o
+    // editor pelo nome, a contagem da cota —, como a última palavra grava as
+    // mesmas perguntas feitas de novo. Antes, a cadeia ficava com o
+    // `user.run` permitido sem nada que o citasse (o #466, no lote A4).
+    // Fora de um comando, só a recusa do gate: não há `ALLOW` a fechar.
     #[cfg(feature = "modo-teste")]
     crate::autorizacao::gancho_do_gate_do_lancamento();
-    let cota = match crate::autorizacao::permitir_processo(autoridade, "process.run") {
+    let cota = match crate::autorizacao::permitir_processo_com_o_detalhe(autoridade, "process.run")
+    {
         Ok(cota) => cota,
-        Err((codigo, motivo)) => return Err(NaoLancou::PorQuemPede(codigo, motivo)),
+        Err((codigo, ouvido, gravado)) => {
+            desfecho.gravar_no_comando(codigo, &gravado);
+            return Err(NaoLancou::PorQuemPede(codigo, ouvido));
+        }
     };
 
     // O código, lido e conferido antes de o fio nascer.
-    let (argumento, selo) = match caminho {
-        None => (0, None),
+    let (imagem, selo): (alloc::borrow::Cow<'static, [u8]>, _) = match caminho {
+        None => (alloc::borrow::Cow::Borrowed(exemplo::bytes()), None),
         Some(caminho) => match codigo::obter(caminho, autoridade) {
-            Ok(c) => {
-                let editor = c.selo.as_ref().map(|s| s.editor);
-                let carga = alloc::boxed::Box::new(Carga {
-                    imagem: c.imagem,
-                    editor,
-                });
-                (alloc::boxed::Box::into_raw(carga) as u64, c.selo)
-            }
+            Ok(c) => (alloc::borrow::Cow::Owned(c.imagem), c.selo),
             Err(recusa) => {
                 // O que o código não prova, e o arquivo que não se lê, vão
                 // para a auditoria como o que a execução fez da decisão —
@@ -2177,11 +2193,11 @@ fn lancar_por(
                 // a leitura que falhava só ia ao log, e um `user.run`
                 // permitido de um caminho que não existe deixava o `ALLOW`
                 // sem desfecho (o item 5 do lote A3 do #448).
-                let desfecho = match recusa {
+                let codigo_do_desfecho = match recusa {
                     codigo::Recusa::Procedencia(..) => politica::Codigo::DenyPolicy,
                     codigo::Recusa::Leitura(_) => politica::Codigo::Error,
                 };
-                gravar_o_desfecho(desfecho, recusa.motivo());
+                desfecho.gravar(codigo_do_desfecho, recusa.motivo());
                 crate::log_warn!(
                     "usuario",
                     "`{}` nao foi lancado: {}",
@@ -2192,6 +2208,31 @@ fn lancar_por(
             }
         },
     };
+
+    // A imagem, conferida antes de o fio nascer: o ELF — o cabeçalho, a
+    // máquina, os segmentos, `W^X` —, as páginas dos segmentos, que não se
+    // dividem nem invadem a pilha, e o manifesto. É a conta pura do
+    // primeiro passo da carga (`programa::conferir_a_imagem`), sobre os
+    // mesmos bytes que o fio vai carregar: ninguém relê o arquivo. Antes, só
+    // o fio novo a fazia, depois do nascimento — e a imagem que não é ELF,
+    // ou o manifesto que não se lê, ia à auditoria como "processo N
+    // lancado", quem pediu ouvia `launched: true`, e o erro ficava só no log
+    // (o #467, no lote A4). Recusada, o desfecho — `ERROR`, com o motivo,
+    // como a leitura que falha e como o `exec` grava a imagem que falha
+    // antes do ponto sem volta —, e quem pediu ouve o motivo. Vale também
+    // para o exemplo embutido: a conta é a mesma, e não custa nada.
+    if let Err(motivo) = programa::conferir_a_imagem(&imagem) {
+        desfecho.gravar(politica::Codigo::Error, motivo);
+        crate::log_warn!("usuario", "`{}` nao foi lancado: {}", recurso, motivo);
+        return Err(NaoLancou::Imagem(motivo));
+    }
+
+    let carga = alloc::boxed::Box::new(Carga {
+        imagem,
+        editor: selo.as_ref().map(|s| s.editor),
+        desfecho: desfecho.clone(),
+    });
+    let argumento = alloc::boxed::Box::into_raw(carga) as u64;
 
     // A última palavra antes de o processo poder rodar: o comando que o
     // pediu, decidido de novo — quem pediu, a sessão, a revogação, o papel,
@@ -2241,7 +2282,7 @@ fn lancar_por(
                    gravado: &str,
                    ouvido: &'static str|
      -> Result<(), &'static str> {
-        gravar_o_desfecho(codigo, gravado);
+        desfecho.gravar(codigo, gravado);
         recusa.set(Some((codigo, ouvido)));
         Err(ouvido)
     };
@@ -2272,6 +2313,8 @@ fn lancar_por(
         );
         Ok(())
     };
+    #[cfg(feature = "modo-teste")]
+    crate::autorizacao::gancho_do_nascimento_do_lancamento();
     match crate::fios::criar_processo(
         crate::fios::NOME_DO_PROCESSO,
         hospedar,
@@ -2282,14 +2325,19 @@ fn lancar_por(
     ) {
         Ok(id) => Ok(id.numero()),
         Err(nao) => {
+            // A cota contada de novo ao nascer: a recusa dela, como o gate a
+            // grava, e — dentro de um comando — o desfecho do `user.run`, com
+            // o mesmo detalhe (o #466, no lote A4).
             let pela_cota = match nao {
                 crate::fios::NaoNasceu::Cota(ocupacao) => {
-                    Some(crate::autorizacao::recusar_pela_cota(
+                    let (codigo, detalhe) = crate::autorizacao::recusar_pela_cota(
                         autoridade,
                         "process.run",
                         ocupacao,
                         cota,
-                    ))
+                    );
+                    desfecho.gravar_no_comando(codigo, &detalhe);
+                    Some(codigo)
                 }
                 _ => None,
             };
@@ -2297,12 +2345,11 @@ fn lancar_por(
             // aqui é obrigatório: sem isto, cada lançamento recusado — e eles
             // acontecem: a tabela do escalonador tem um teto, `MAX_FIOS`, e
             // a cota do papel de quem lança, outro — deixaria a imagem
-            // inteira no heap para sempre.
-            if argumento != 0 {
-                // SAFETY: o ponteiro veio do `into_raw` acima e não foi
-                // entregue a ninguém, porque `criar` falhou.
-                drop(unsafe { alloc::boxed::Box::from_raw(argumento as *mut Carga) });
-            }
+            // inteira, e o desfecho, no heap para sempre.
+            //
+            // SAFETY: o ponteiro veio do `into_raw` acima e não foi entregue
+            // a ninguém, porque `criar` falhou.
+            drop(unsafe { alloc::boxed::Box::from_raw(argumento as *mut Carga) });
             // A recusa da cota no nascimento e a da última palavra, já
             // gravadas: quem pediu ouve o código delas. A cota e quem pediu
             // que acabou são perguntas sobre quem pede, e não sobre o
@@ -2328,10 +2375,85 @@ fn lancar_por(
                 // ficariam sem desfecho.
                 _ => {
                     let motivo = nao.motivo();
-                    gravar_o_desfecho(politica::Codigo::Error, motivo);
+                    desfecho.gravar(politica::Codigo::Error, motivo);
                     Err(NaoLancou::Fio(motivo))
                 }
             }
+        }
+    }
+}
+
+/// O fio novo de um lançamento: carrega a imagem que o lançamento conferiu
+/// e entra nela. Nunca volta.
+extern "C" fn hospedar(argumento: u64) -> ! {
+    // A carga sai inteira antes de entrar — ver `carregar_a_carga`.
+    let programa = carregar_a_carga(argumento);
+    match programa::entrar(programa) {
+        Ok(nunca) => match nunca {},
+        // Não acontece num fio de `fios::criar_processo`, que tem a pilha de
+        // kernel dele (ver `programa::entrar`); e o desfecho já saiu com a
+        // carga — guardá-lo até aqui o vazaria a cada lançamento que dá
+        // certo. Só o log.
+        Err(falha) => {
+            crate::log_error!(
+                "usuario",
+                "nao foi possivel entrar em userspace: {}",
+                falha.motivo()
+            );
+            crate::fios::terminar()
+        }
+    }
+}
+
+/// O primeiro passo do fio novo: reconstrói a carga, carrega a imagem e
+/// larga tudo o que veio nela — os bytes e o desfecho — antes de voltar.
+///
+/// # Por que numa função à parte
+///
+/// `programa::entrar` não volta quando dá certo, e `fios::terminar` não
+/// volta nunca: o que estivesse vivo no quadro de quem os chama ficaria no
+/// heap do kernel para sempre — a imagem, um `Vec` do tamanho do programa
+/// (por isso carregar e entrar são dois passos, com a imagem largada no
+/// meio), e o desfecho, com quem o gate decidiu e o recurso. Aqui a carga é
+/// consumida inteira: no caminho que dá certo, tudo sai na volta da função;
+/// no que falha, antes de `terminar`. A suíte confere pela conta dos
+/// desfechos vivos (`autorizacao::desfechos_vivos_de_teste`).
+///
+/// # O que falha aqui
+///
+/// Só a memória do espaço novo — criá-lo, mapear os segmentos e a pilha
+/// —: a imagem foi conferida antes do nascimento, e a conta de novo, no
+/// primeiro passo da carga, é a mesma, sobre os mesmos bytes. Quem pediu já
+/// ouviu `launched: true`; o desfecho vai à auditoria depois do `processo N
+/// lancado`, como o do `exec` que falha depois do ponto sem volta —
+/// `ERROR`, com o motivo, em nome de quem o gate decidiu, citando a
+/// decisão; fora de um comando, em nome do kernel —, e o processo acaba
+/// sem rodar (o #467, no lote A4).
+fn carregar_a_carga(argumento: u64) -> programa::Programa {
+    let Carga {
+        imagem,
+        editor,
+        desfecho,
+    } = {
+        // SAFETY: o ponteiro veio do `Box::into_raw` de `lancar_por`, este
+        // fio é o único que o recebeu, e ele o reconstrói uma vez só. A
+        // caixa sai ao fim deste bloco, com o que ela levava já fora dela.
+        let carga = unsafe { alloc::boxed::Box::from_raw(argumento as *mut Carga) };
+        *carga
+    };
+    let carregado = programa::carregar(&imagem, editor);
+    drop(imagem);
+    match carregado {
+        Ok(programa) => programa,
+        Err(falha) => {
+            desfecho.gravar(politica::Codigo::Error, falha.motivo());
+            drop(desfecho);
+            crate::log_error!(
+                "usuario",
+                "nao foi possivel entrar em userspace: {}",
+                falha.motivo()
+            );
+            crate::fios::terminar()
         }
     }
 }

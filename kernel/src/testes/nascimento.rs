@@ -55,6 +55,19 @@
 //! existe, e o fio que não nasce, com a tabela de fios cheia —; e o kernel
 //! que não lança mais por conta própria depois do boot, que um comando
 //! ainda lança.
+//!
+//! E os do lote A4 (o #466 e o #467), no fim do arquivo: a recusa das
+//! perguntas sobre quem pede dentro de um `user.run` ganha o desfecho do
+//! comando — a execução da decisão, com o mesmo código e o mesmo detalhe,
+//! além da recusa do gate, que continua como era —, também a da cota
+//! contada de novo no nascimento, pelo gancho de antes dele
+//! (`autorizacao::antes_do_nascimento_do_lancamento_de_teste`); fora de um
+//! comando, só a do gate. A imagem que se lê e não se carrega — o que não é
+//! ELF, o manifesto que não se lê — é recusada antes de o fio nascer, com o
+//! desfecho. E a que não se mapeia no fio novo — a falha armada do
+//! mapeamento, pelo gancho do meio do nascimento — grava o desfecho depois
+//! do `processo N lancado`, em nome de quem o gate decidiu; nenhum desfecho
+//! guardado fica vivo depois (`autorizacao::desfechos_vivos_de_teste`).
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 
@@ -1743,19 +1756,68 @@ pub(super) fn contencao_a_politica_nova_no_meio_do_user_run_nao_lanca() -> Resul
     resultado
 }
 
+/// O desfecho do `user.run` de `caminho` na auditoria, depois de `cabeca`:
+/// a decisao do comando (`ALLOW`) uma vez, e uma execucao dela com `codigo`
+/// e o detalhe `<pelo: >gravado; decisao D` ([`so_a_recusa_do_user_run`]),
+/// que cita essa decisao — nem outra, nem a seguinte —; e nenhum `processo
+/// N lancado`.
+fn o_desfecho_do_user_run(
+    cabeca: u64,
+    caminho: &str,
+    codigo: politica::Codigo,
+    pelo: Option<&str>,
+    gravado: &str,
+) -> Resultado {
+    use politica::Codigo;
+    so_a_recusa_do_user_run(cabeca, caminho, codigo, pelo, gravado)?;
+    let decisoes = registros_depois(cabeca, |ev| {
+        ev.metodo == "user.run"
+            && ev.recurso == caminho
+            && ev.codigo == Codigo::Allow
+            && super::decisao_executada(&ev.detalhe).is_none()
+    });
+    let execucoes = registros_depois(cabeca, |ev| {
+        ev.metodo == "user.run"
+            && ev.recurso == caminho
+            && ev.codigo == codigo
+            && e_a_execucao_de(ev, pelo, gravado)
+    });
+    match (&decisoes[..], &execucoes[..]) {
+        ([(d, _)], [(e, ev)]) if super::decisao_executada(&ev.detalhe) == Some(*d) && d < e => {
+            Ok(())
+        }
+        _ => {
+            crate::log_error!(
+                "teste",
+                "{} decisao(oes) do user.run; execucoes {:?}",
+                decisoes.len(),
+                execucoes
+                    .iter()
+                    .map(|(n, ev)| (n, &ev.detalhe))
+                    .collect::<alloc::vec::Vec<_>>()
+            );
+            Err("o desfecho do user.run nao cita a decisao do comando")
+        }
+    }
+}
+
 /// O `user.run` de `quem`, com `gancho` antes das perguntas do gate sobre
 /// quem pede um processo (`autorizacao::antes_do_gate_do_lancamento_de_teste`):
 /// recusado ali, depois do gate do comando. A resposta diz que nada foi
 /// lancado, com o `code` e o `error` da recusa de verdade, e sem a
-/// explicacao do comando ([`sem_a_explicacao`]); e a recusa vai uma vez a
-/// auditoria como as perguntas a gravam — `process.run`, com quem pede e o
-/// detalhe que termina em `auditado`.
+/// explicacao do comando ([`sem_a_explicacao`]); a recusa vai uma vez a
+/// auditoria como as perguntas a gravam — `process.run`, com quem pede
+/// (`pelo`, se e um processo) na frente do detalhe `gravado` —; e, desde o
+/// lote A4 (o #466), o `ALLOW` do comando ganha o desfecho: uma execucao da
+/// decisao do `user.run`, com o mesmo codigo e o mesmo detalhe — o editor
+/// pelo nome, a contagem da cota —, citando-a ([`o_desfecho_do_user_run`]).
 fn recusado_nas_perguntas_do_gate(
     quem: crate::autorizacao::Chamador,
     gancho: Option<fn()>,
     codigo: politica::Codigo,
     motivo: &str,
-    auditado: &str,
+    pelo: Option<&str>,
+    gravado: &str,
 ) -> Resultado {
     let caminho = caminho_do_encerravel();
     let cabeca = crate::autorizacao::ultimo_registro();
@@ -1777,8 +1839,11 @@ fn recusado_nas_perguntas_do_gate(
         return Err("o user.run recusado no gate nao respondeu o codigo e o motivo da recusa");
     }
     sem_a_explicacao(&r)?;
+    // A recusa do gate, como ele a grava: o detalhe como o kernel o compoe
+    // — quem pede na frente, abreviado so acima do teto —, inteiro.
+    let auditado = politica::auditoria::detalhe_composto(pelo, gravado, "");
     let gravadas = registros_depois(cabeca, |ev| {
-        ev.metodo == "process.run" && ev.codigo == codigo && ev.detalhe.ends_with(auditado)
+        ev.metodo == "process.run" && ev.codigo == codigo && ev.detalhe == auditado
     });
     if gravadas.len() != 1 {
         crate::log_error!(
@@ -1790,7 +1855,9 @@ fn recusado_nas_perguntas_do_gate(
         );
         return Err("a recusa das perguntas do gate nao foi gravada uma vez");
     }
-    Ok(())
+    // E o desfecho do `user.run` (o #466).
+    o_desfecho_do_user_run(cabeca, &caminho, codigo, pelo, gravado)
+        .map_err(|_| "a recusa de quem pede no user.run ficou sem o desfecho")
 }
 
 /// O item 4 do pedido: o `user.run` recusado nas perguntas do gate sobre
@@ -1814,6 +1881,12 @@ fn recusado_nas_perguntas_do_gate(
 ///   papel nao confia no editor" — a auditoria leva o nome dele;
 /// - a cota esgotada: `DENY_POLICY`, a cota esgotada — a auditoria leva a
 ///   contagem.
+///
+/// E, desde o lote A4 (o #466), cada recusa vai a auditoria duas vezes,
+/// cada registro uma vez: a do gate, como ele a grava — `process.run`, com
+/// quem pede —, e o desfecho do `user.run` — a execucao da decisao do
+/// comando, com o mesmo codigo e o mesmo detalhe, citando-a. Antes, o
+/// `ALLOW` do comando ficava sem nada que o citasse.
 pub(super) fn contencao_a_recusa_do_user_run_no_gate_diz_o_codigo() -> Resultado {
     use politica::Codigo;
     fn sair() {
@@ -1855,6 +1928,7 @@ pub(super) fn contencao_a_recusa_do_user_run_no_gate_diz_o_codigo() -> Resultado
             Some(sair),
             Codigo::DenyRole,
             "sem papel, nenhum processo",
+            None,
             "sem papel, nenhum processo",
         )?;
         // A credencial suspensa.
@@ -1870,6 +1944,7 @@ pub(super) fn contencao_a_recusa_do_user_run_no_gate_diz_o_codigo() -> Resultado
             Some(suspender),
             Codigo::DenyCredential,
             "credencial suspensa",
+            None,
             "credencial suspensa",
         )?;
         // O journal recusado.
@@ -1879,6 +1954,7 @@ pub(super) fn contencao_a_recusa_do_user_run_no_gate_diz_o_codigo() -> Resultado
             Some(recusar_o_journal),
             Codigo::DenyNotAuthenticated,
             "journal recusado: as revogacoes nao se sabem",
+            None,
             "journal recusado: as revogacoes nao se sabem",
         );
         devolver_o_journal();
@@ -1896,7 +1972,8 @@ pub(super) fn contencao_a_recusa_do_user_run_no_gate_diz_o_codigo() -> Resultado
             Some(pedir_o_fim),
             encerrado,
             motivo,
-            &detalhe_por(&pelo, motivo),
+            Some(&pelo),
+            motivo,
         )?;
         crate::log_info!(
             "teste",
@@ -1918,10 +1995,8 @@ pub(super) fn contencao_a_recusa_do_user_run_no_gate_diz_o_codigo() -> Resultado
                 Some(tirar_a_confianca),
                 Codigo::DenyPolicy,
                 "o papel nao confia no editor",
-                &detalhe_por(
-                    &pelo,
-                    &politica::procedencia::nao_confiado(super::EDITOR_DO_CASO.1),
-                ),
+                Some(&pelo),
+                &politica::procedencia::nao_confiado(super::EDITOR_DO_CASO.1),
             )
         })?;
         // A cota esgotada: com a cota do operador em um, o primeiro processo
@@ -1935,6 +2010,7 @@ pub(super) fn contencao_a_recusa_do_user_run_no_gate_diz_o_codigo() -> Resultado
                 None,
                 Codigo::DenyPolicy,
                 crate::fios::COTA_ESGOTADA,
+                None,
                 "cota de processos do papel: 1 de 1",
             )
         })
@@ -2234,7 +2310,7 @@ fn lancar_no_comando_errado(caminho: &str) {
         Some(match r {
             Ok(fio) => Ok(fio),
             Err(NaoLancou::Recusado(c, m) | NaoLancou::PorQuemPede(c, m)) => Err((c, m)),
-            Err(NaoLancou::Fio(m)) => Err((politica::Codigo::Error, m)),
+            Err(NaoLancou::Fio(m) | NaoLancou::Imagem(m)) => Err((politica::Codigo::Error, m)),
             Err(NaoLancou::Codigo(_)) => Err((politica::Codigo::Error, "o codigo nao se leu")),
         })
     };
@@ -2372,7 +2448,10 @@ const CAMINHO_QUE_NAO_EXISTE: &str = "/bin/nao-existe";
 fn ouvido_de(r: Result<u64, crate::usuario::NaoLancou>) -> Result<u64, &'static str> {
     use crate::usuario::NaoLancou;
     r.map_err(|n| match n {
-        NaoLancou::Recusado(_, m) | NaoLancou::PorQuemPede(_, m) | NaoLancou::Fio(m) => m,
+        NaoLancou::Recusado(_, m)
+        | NaoLancou::PorQuemPede(_, m)
+        | NaoLancou::Fio(m)
+        | NaoLancou::Imagem(m) => m,
         NaoLancou::Codigo(_) => "o codigo nao se leu",
     })
 }
@@ -2943,6 +3022,463 @@ pub(super) fn contencao_depois_do_boot_o_kernel_nao_lanca_por_conta_propria() ->
     })();
     crate::autorizacao::reabrir_os_lancamentos_do_kernel_de_teste();
     encerrar_os_encerraveis();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+// ---------------------------------------------------------------------------
+// O lote A4: o desfecho das recusas sobre quem pede, dentro de um `user.run`
+// (o #466), e o da imagem que nao se carrega — antes do nascimento — ou que
+// nao se mapeia — depois dele (o #467)
+// ---------------------------------------------------------------------------
+
+/// O titular cuja cota o gancho de antes do nascimento ocupa, e o fio que a
+/// ocupa ate o caso solta-lo.
+static TITULAR_DA_COTA: crate::trava::Mutex<Option<crate::autorizacao::Autoridade>> =
+    crate::trava::Mutex::new(None);
+/// Se o processo que ocupa a cota pode sair.
+static SOLTAR_A_COTA: AtomicBool = AtomicBool::new(true);
+/// O processo que ocupa a cota, ou zero.
+static OCUPANTE_DA_COTA: AtomicU64 = AtomicU64::new(0);
+
+/// O processo que ocupa a cota do titular: cede ate o caso solta-lo.
+extern "C" fn ocupante_da_cota(_argumento: u64) -> ! {
+    while !SOLTAR_A_COTA.load(SeqCst) {
+        crate::fios::ceder();
+    }
+    crate::fios::terminar()
+}
+
+/// O gancho de antes do nascimento do lancamento: um processo do mesmo
+/// titular nasce — com uma cota folgada, para ele nascer —, e a conta do
+/// nascimento do lancado, com a cota do gate, acha a cota cheia.
+fn ocupar_a_cota() {
+    let Some(titular) = crate::arch::sem_interrupcoes(|| *TITULAR_DA_COTA.lock()) else {
+        return;
+    };
+    SOLTAR_A_COTA.store(false, SeqCst);
+    match crate::fios::criar_processo(
+        crate::fios::NOME_DO_PROCESSO,
+        ocupante_da_cota,
+        0,
+        titular,
+        64,
+        &|_| Ok(()),
+    ) {
+        Ok(id) => OCUPANTE_DA_COTA.store(id.numero(), SeqCst),
+        Err(_) => SOLTAR_A_COTA.store(true, SeqCst),
+    }
+}
+
+/// Solta o processo que ocupava a cota de `titular`, e espera a cota dele
+/// voltar a zero — o morto recolhido.
+fn soltar_a_cota(titular: crate::autorizacao::Autoridade) -> Resultado {
+    SOLTAR_A_COTA.store(true, SeqCst);
+    OCUPANTE_DA_COTA.store(0, SeqCst);
+    esperar_ate(|| crate::fios::ocupacao_na_cota(titular, 1).is_none(), 600)
+        .map_err(|_| "o processo que ocupava a cota nao saiu, ou nao foi recolhido")
+}
+
+/// O #466 na cota contada de novo no nascimento: com a cota do operador em
+/// um, a pessoa pede o `user.run` do `encerravel`; o gate do comando deixa,
+/// as perguntas sobre quem pede passam — nenhum processo dela —, e o gancho
+/// de antes do nascimento faz nascer um processo do mesmo titular. A conta
+/// do nascimento recusa (`NaoNasceu::Cota`): quem pediu ouve `DENY_POLICY`,
+/// a cota esgotada, sem a explicacao do comando; a auditoria grava a recusa
+/// da cota uma vez, como o gate a grava (`process.run`, "cota de processos
+/// do papel: 1 de 1"), e o desfecho do `user.run` uma vez, com o mesmo
+/// detalhe, citando a decisao; nada nasce. Fora de um comando — o
+/// lancamento pelo kernel, com a autoridade da pessoa e o mesmo gancho —,
+/// so a recusa da cota: nenhum registro em nome do kernel, porque nao ha
+/// `ALLOW` a fechar. Antes do lote A4, o `user.run` ficava sem desfecho.
+pub(super) fn contencao_a_cota_contada_de_novo_no_nascimento_do_user_run_grava_o_desfecho()
+-> Resultado {
+    use politica::Codigo;
+    const COTA: &str = "cota de processos do papel: 1 de 1";
+    crate::pessoas::esquecer_registradas();
+    let caminho = caminho_do_encerravel();
+    let um = super::politica_trocada(&[("processos operador 8", "processos operador 1")])?;
+    let resultado = super::com_a_politica(um, || {
+        let quem = operador_que_lanca(176, "cota-no-nascimento");
+        let crate::autorizacao::Chamador::Pessoa(sessao) = quem else {
+            return Err("quem lanca no caso nao e uma pessoa");
+        };
+        let titular = crate::autorizacao::Autoridade::Pessoa { sessao };
+        crate::arch::sem_interrupcoes(|| *TITULAR_DA_COTA.lock() = Some(titular));
+        let livres = crate::fios::vagas_livres_de_teste();
+
+        // Dentro de um comando: a recusa do gate e o desfecho do `user.run`.
+        let cabeca = crate::autorizacao::ultimo_registro();
+        crate::autorizacao::antes_do_nascimento_do_lancamento_de_teste(Some(ocupar_a_cota));
+        let r = fs_pedir(
+            quem,
+            "user.run",
+            &alloc::format!(r#"{{"path":"{caminho}"}}"#),
+        );
+        crate::autorizacao::antes_do_nascimento_do_lancamento_de_teste(None);
+        let ocupou = OCUPANTE_DA_COTA.load(SeqCst) != 0;
+        crate::log_info!(
+            "teste",
+            "contencao: o user.run com a cota ocupada antes do nascimento: {}",
+            r
+        );
+        soltar_a_cota(titular)?;
+        if !ocupou {
+            return Err("o gancho nao ocupou a cota antes do nascimento");
+        }
+        nao_lancou_com(&r, "DENY_POLICY", crate::fios::COTA_ESGOTADA)?;
+        sem_a_explicacao(&r)?;
+        let do_gate = registros_depois(cabeca, |ev| {
+            ev.metodo == "process.run" && ev.codigo == Codigo::DenyPolicy && ev.detalhe == COTA
+        });
+        if do_gate.len() != 1 {
+            crate::log_error!("teste", "{} recusa(s) da cota", do_gate.len());
+            return Err("a recusa da cota no nascimento nao foi gravada uma vez");
+        }
+        o_desfecho_do_user_run(cabeca, &caminho, Codigo::DenyPolicy, None, COTA)
+            .map_err(|_| "a cota contada de novo no nascimento deixou o user.run sem o desfecho")?;
+
+        // Fora de um comando: so a recusa do gate.
+        let cabeca = crate::autorizacao::ultimo_registro();
+        crate::autorizacao::antes_do_nascimento_do_lancamento_de_teste(Some(ocupar_a_cota));
+        let fora = crate::usuario::lancar_pelo_kernel(Some(&caminho), titular);
+        crate::autorizacao::antes_do_nascimento_do_lancamento_de_teste(None);
+        let ocupou = OCUPANTE_DA_COTA.load(SeqCst) != 0;
+        soltar_a_cota(titular)?;
+        if !ocupou {
+            return Err("o gancho nao ocupou a cota antes do nascimento do kernel");
+        }
+        if !matches!(
+            fora,
+            Err(crate::usuario::NaoLancou::PorQuemPede(Codigo::DenyPolicy, m))
+                if m == crate::fios::COTA_ESGOTADA
+        ) {
+            crate::log_error!("teste", "{:?}", fora);
+            return Err("o lancamento do kernel com a cota cheia no nascimento nao ouviu a cota");
+        }
+        let do_gate = registros_depois(cabeca, |ev| {
+            ev.metodo == "process.run" && ev.codigo == Codigo::DenyPolicy && ev.detalhe == COTA
+        });
+        let do_kernel = registros_depois(cabeca, |ev| {
+            ev.agente == "kernel" && ev.metodo == "process.run"
+        });
+        let lancados = registros_depois(cabeca, |ev| ev.detalhe.contains(" lancado"));
+        if do_gate.len() != 1 || !do_kernel.is_empty() || !lancados.is_empty() {
+            crate::log_error!(
+                "teste",
+                "{} recusa(s) da cota, {} registro(s) em nome do kernel, {} lancamento(s)",
+                do_gate.len(),
+                do_kernel.len(),
+                lancados.len()
+            );
+            return Err(
+                "a recusa de quem pede fora de um comando ganhou um registro em nome do kernel",
+            );
+        }
+        if esperar_ate(|| crate::fios::vagas_livres_de_teste() >= livres, 600).is_err() {
+            return Err("as vagas do caso da cota nao voltaram");
+        }
+        Ok(())
+    });
+    crate::autorizacao::antes_do_nascimento_do_lancamento_de_teste(None);
+    crate::arch::sem_interrupcoes(|| *TITULAR_DA_COTA.lock() = None);
+    SOLTAR_A_COTA.store(true, SeqCst);
+    OCUPANTE_DA_COTA.store(0, SeqCst);
+    encerrar_os_encerraveis();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Um `user.run` de `caminho` por `quem`, recusado antes do nascimento com
+/// `motivo`: a resposta — a decisao do comando, nada lancado, o motivo —, e
+/// na auditoria a decisao (`ALLOW`) e uma execucao dela, `ERROR` com o
+/// motivo, citando-a; nenhum `processo N lancado`.
+fn nao_carrega(quem: crate::autorizacao::Chamador, caminho: &str, motivo: &str) -> Resultado {
+    let cabeca = crate::autorizacao::ultimo_registro();
+    let r = fs_pedir(
+        quem,
+        "user.run",
+        &alloc::format!(r#"{{"path":"{caminho}"}}"#),
+    );
+    crate::log_info!("teste", "contencao: o user.run de `{}`: {}", caminho, r);
+    if super::decisao_do_envelope(&r) != "ALLOW"
+        || fs_numero(&r, "thread_id").is_some()
+        || !r.contains(r#""launched":false"#)
+        || fs_texto(&r, "error").as_deref() != Some(motivo)
+    {
+        crate::log_error!("teste", "esperava `{}`: {}", motivo, r);
+        return Err("o user.run de uma imagem que nao se carrega lancou");
+    }
+    o_desfecho_do_user_run(cabeca, caminho, politica::Codigo::Error, None, motivo)
+        .map_err(|_| "o user.run de uma imagem que nao se carrega ficou sem o desfecho")?;
+    let lancados = registros_depois(cabeca, |ev| ev.detalhe.contains(" lancado"));
+    if !lancados.is_empty() {
+        return Err("o user.run de uma imagem que nao se carrega gravou um nascimento");
+    }
+    Ok(())
+}
+
+/// O `ola` da imagem com o primeiro byte do texto do manifesto trocado: o
+/// cabecalho deixa de ser o desta versao, e o manifesto nao se le.
+fn ola_de_manifesto_estragado() -> Result<alloc::vec::Vec<u8>, &'static str> {
+    let ola = super::ola_da_imagem()?;
+    let inicio = {
+        let elf = crate::usuario::elf::validar(&ola)?;
+        let texto = elf.manifesto().ok_or("o ola nao tem manifesto")?;
+        texto.as_ptr() as usize - ola.as_ptr() as usize
+    };
+    let mut estragado = ola.clone();
+    estragado[inicio] ^= 0x20;
+    Ok(estragado)
+}
+
+/// O #467, antes do nascimento: a imagem que se le e nao se carrega. Com
+/// os editores do caso, no armazem: o `ola` selado lanca e sai (o
+/// controle); oitenta bytes que nao sao ELF, selados pelo editor do caso —
+/// a procedencia passa, a imagem nao —, e o `ola` com o cabecalho do
+/// manifesto estragado, selado, nao lancam: `launched: false`, com o motivo
+/// do carregador, e a auditoria com a decisao e o desfecho, `ERROR`,
+/// citando-a; nada nasce. Fora de um comando, o lancamento pelo kernel
+/// ouve `NaoLancou::Imagem` e grava o desfecho em nome dele. Antes do lote
+/// A4, o fio nascia, o nascimento ia a auditoria como "processo N lancado",
+/// quem pediu ouvia `launched: true`, e o fio novo morria com o erro so no
+/// log.
+pub(super) fn contencao_o_user_run_de_uma_imagem_que_nao_se_carrega_grava_o_desfecho() -> Resultado
+{
+    use politica::Codigo;
+    const NAO_E_ELF: &str = "nao e um ELF64 little-endian";
+    let manifesto_ruim = politica::manifesto::Erro::Cabecalho.motivo();
+    crate::pessoas::esquecer_registradas();
+    let livres = crate::fios::vagas_livres_de_teste();
+    let resultado = super::com_editores_do_caso(|| {
+        let selado = |bytes: &[u8]| sigilo::codigo::selar(bytes, &super::EDITOR_DO_CASO.0);
+        let quem = operador_que_lanca(177, "imagem-que-nao-carrega");
+
+        // O controle: o `ola` selado lanca e sai com o codigo dele.
+        let bom = alloc::format!("{}/ola-que-carrega", super::CODIGO_INSTALADO);
+        super::gravar_codigo(&bom, &selado(&super::ola_da_imagem()?))?;
+        let desde = crate::log::total_emitidos();
+        let r = fs_pedir(quem, "user.run", &alloc::format!(r#"{{"path":"{bom}"}}"#));
+        if fs_numero(&r, "thread_id").is_none() {
+            crate::log_error!("teste", "{}", r);
+            return Err("o ola selado do caso nao lancou");
+        }
+        super::saida_do_processo(desde, super::SAIDA_DO_OLA)?;
+
+        // O que nao e ELF.
+        let nao_elf = alloc::format!("{}/nao-e-elf", super::CODIGO_INSTALADO);
+        super::gravar_codigo(&nao_elf, &selado(&[b'x'; 80]))?;
+        nao_carrega(quem, &nao_elf, NAO_E_ELF)?;
+
+        // O manifesto que nao se le.
+        let ruim = alloc::format!("{}/ola-de-manifesto-ruim", super::CODIGO_INSTALADO);
+        super::gravar_codigo(&ruim, &selado(&ola_de_manifesto_estragado()?))?;
+        nao_carrega(quem, &ruim, manifesto_ruim)?;
+
+        // Fora de um comando: em nome do kernel.
+        let cabeca = crate::autorizacao::ultimo_registro();
+        let fora = crate::usuario::lancar_pelo_kernel(
+            Some(&nao_elf),
+            crate::autorizacao::Autoridade::Sistema,
+        );
+        if !matches!(&fora, Err(crate::usuario::NaoLancou::Imagem(m)) if *m == NAO_E_ELF) {
+            crate::log_error!("teste", "{:?}", fora);
+            return Err("o lancamento do kernel de uma imagem que nao e ELF nao foi recusado");
+        }
+        let do_kernel = registros_depois(cabeca, |ev| {
+            ev.metodo == "process.run"
+                && ev.recurso == nao_elf
+                && ev.agente == "kernel"
+                && ev.codigo == Codigo::Error
+                && ev.detalhe == NAO_E_ELF
+        });
+        let lancados = registros_depois(cabeca, |ev| ev.detalhe.contains(" lancado"));
+        if do_kernel.len() != 1 || !lancados.is_empty() {
+            crate::log_error!(
+                "teste",
+                "{} registro(s) em nome do kernel, {} lancamento(s)",
+                do_kernel.len(),
+                lancados.len()
+            );
+            return Err("a imagem recusada fora de um comando nao foi gravada em nome do kernel");
+        }
+        Ok(())
+    });
+    let vagas = esperar_ate(|| crate::fios::vagas_livres_de_teste() >= livres, 600)
+        .map_err(|_| "as vagas do caso da imagem que nao se carrega nao voltaram");
+    crate::pessoas::esquecer_registradas();
+    resultado.and(vagas)
+}
+
+/// O gancho do meio do nascimento: a falha do mapeamento armada para o fio
+/// que nasce — `programa::Trocada::mapear` a pergunta, no fio novo.
+fn falhar_o_mapeamento(fio: u64) {
+    crate::usuario::falha_da_troca_de_teste::armar(
+        fio,
+        crate::usuario::falha_da_troca_de_teste::Etapa::Mapeamento,
+    );
+    NASCENDO.store(fio, SeqCst);
+}
+
+/// O #467, depois do nascimento: a memoria que falta ao mapear a imagem no
+/// fio novo — a falha armada no gancho do meio do nascimento, para o fio
+/// que nasce. O `user.run` do `ola` pela pessoa ja respondeu `launched:
+/// true`; o fio N morre sem rodar, e a auditoria tem a decisao, o
+/// nascimento de N e o desfecho — `ERROR`, o motivo do mapeamento, em nome
+/// de quem o gate decidiu, citando a decisao —, nessa ordem, como o `exec`
+/// que falha depois do ponto sem volta. Fora de um comando, o nascimento e
+/// o desfecho em nome do kernel. E nenhum desfecho guardado fica vivo: nem
+/// o dos dois que falharam, nem o de um `ola` que entra e sai. Antes do
+/// lote A4, nada se gravava: o erro ficava so no log.
+pub(super) fn contencao_o_user_run_cuja_imagem_nao_se_mapeia_grava_o_desfecho() -> Resultado {
+    use crate::usuario::falha_da_troca_de_teste::{MAPEAMENTO, desarmar};
+    use politica::Codigo;
+    crate::pessoas::esquecer_registradas();
+    let vivos = crate::autorizacao::desfechos_vivos_de_teste();
+    let caminho = caminho_do_ola();
+    let resultado = (|| -> Resultado {
+        // Dentro de um comando: em nome de quem o gate decidiu.
+        let quem = operador_que_lanca(178, "imagem-que-nao-mapeia");
+        let cabeca = crate::autorizacao::ultimo_registro();
+        armar(falhar_o_mapeamento, 0);
+        let r = fs_pedir(
+            quem,
+            "user.run",
+            &alloc::format!(r#"{{"path":"{caminho}"}}"#),
+        );
+        crate::fios::no_meio_do_nascimento_de_teste(None);
+        crate::log_info!(
+            "teste",
+            "contencao: o user.run do ola que nao se mapeia: {}",
+            r
+        );
+        let fio = fs_numero(&r, "thread_id").ok_or("o user.run do ola nao nasceu")?;
+        if NASCENDO.load(SeqCst) != fio {
+            return Err("o gancho nao armou a falha do mapeamento para o fio que nasceu");
+        }
+        esperar_ate(|| !crate::fios::vivo(fio), 600)
+            .map_err(|_| "o fio que nao mapeou nao morreu")?;
+        let decisoes = registros_depois(cabeca, |ev| {
+            ev.metodo == "user.run"
+                && ev.recurso == caminho
+                && ev.codigo == Codigo::Allow
+                && super::decisao_executada(&ev.detalhe).is_none()
+        });
+        let nasceu = alloc::format!("processo {fio} lancado");
+        let nascimentos = registros_depois(cabeca, |ev| {
+            ev.metodo == "user.run"
+                && ev.codigo == Codigo::Allow
+                && e_a_execucao_de(ev, None, &nasceu)
+        });
+        let execucoes = registros_depois(cabeca, |ev| {
+            ev.metodo == "user.run"
+                && ev.recurso == caminho
+                && ev.codigo == Codigo::Error
+                && e_a_execucao_de(ev, None, MAPEAMENTO)
+        });
+        let certo = match (&decisoes[..], &nascimentos[..], &execucoes[..]) {
+            ([(d, _)], [(n, nev)], [(e, ev)]) => {
+                super::decisao_executada(&nev.detalhe) == Some(*d)
+                    && super::decisao_executada(&ev.detalhe) == Some(*d)
+                    && d < n
+                    && n < e
+            }
+            _ => false,
+        };
+        if !certo {
+            crate::log_error!(
+                "teste",
+                "{} decisao(oes), {} nascimento(s), {} execucao(oes) `ERROR`",
+                decisoes.len(),
+                nascimentos.len(),
+                execucoes.len()
+            );
+            for (seq, ev) in registros_depois(cabeca, |ev| ev.recurso == caminho) {
+                crate::log_error!(
+                    "teste",
+                    "registro {}: {} {} {} {}",
+                    seq,
+                    ev.agente,
+                    ev.metodo,
+                    ev.codigo.nome(),
+                    ev.detalhe
+                );
+            }
+            return Err(
+                "o user.run cuja imagem nao se mapeou ficou sem o desfecho depois do nascimento",
+            );
+        }
+
+        // Fora de um comando: em nome do kernel, depois do nascimento.
+        let cabeca = crate::autorizacao::ultimo_registro();
+        armar(falhar_o_mapeamento, 0);
+        let fora = crate::usuario::lancar_pelo_kernel(
+            Some(&caminho),
+            crate::autorizacao::Autoridade::Sistema,
+        );
+        crate::fios::no_meio_do_nascimento_de_teste(None);
+        let fio = fora.map_err(|n| {
+            crate::log_error!("teste", "{:?}", n);
+            "o lancamento do kernel do ola nao nasceu"
+        })?;
+        if NASCENDO.load(SeqCst) != fio {
+            return Err("o gancho nao armou a falha do mapeamento para o fio do kernel");
+        }
+        esperar_ate(|| !crate::fios::vivo(fio), 600)
+            .map_err(|_| "o fio do kernel que nao mapeou nao morreu")?;
+        let do_kernel = registros_depois(cabeca, |ev| {
+            ev.metodo == "process.run" && ev.recurso == caminho && ev.agente == "kernel"
+        });
+        let nasceu = alloc::format!("processo {fio} lancado");
+        let em_ordem = matches!(
+            &do_kernel[..],
+            [(_, n), (_, e)] if n.codigo == Codigo::Allow
+                && n.detalhe == nasceu
+                && e.codigo == Codigo::Error
+                && e.detalhe == MAPEAMENTO
+        );
+        if !em_ordem {
+            for (seq, ev) in &do_kernel {
+                crate::log_error!(
+                    "teste",
+                    "registro {} do kernel: {} {}",
+                    seq,
+                    ev.codigo.nome(),
+                    ev.detalhe
+                );
+            }
+            return Err(
+                "a imagem que nao se mapeou fora de um comando nao foi gravada em nome do kernel",
+            );
+        }
+
+        // E um `ola` que entra e sai: nenhum desfecho fica vivo — nem o dos
+        // dois que falharam, nem o dele.
+        let desde = crate::log::total_emitidos();
+        let r = fs_pedir(
+            quem,
+            "user.run",
+            &alloc::format!(r#"{{"path":"{caminho}"}}"#),
+        );
+        let fio = fs_numero(&r, "thread_id").ok_or("o ola do controle nao lancou")?;
+        super::saida_do_processo(desde, super::SAIDA_DO_OLA)?;
+        esperar_ate(|| !crate::fios::vivo(fio), 600).map_err(|_| "o ola do controle nao saiu")?;
+        let agora = crate::autorizacao::desfechos_vivos_de_teste();
+        if agora != vivos {
+            crate::log_error!(
+                "teste",
+                "desfechos vivos: {} antes, {} depois",
+                vivos,
+                agora
+            );
+            return Err(
+                "o desfecho do lancamento ficou vivo depois de o processo entrar ou morrer",
+            );
+        }
+        Ok(())
+    })();
+    crate::fios::no_meio_do_nascimento_de_teste(None);
+    desarmar();
     crate::pessoas::esquecer_registradas();
     resultado
 }

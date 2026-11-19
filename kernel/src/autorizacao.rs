@@ -1965,17 +1965,168 @@ impl Autorizado {
 /// de um comando autorizado não registra nada e devolve zero — quem chama
 /// trata zero como recusa: uma mudança sem o registro do que foi feito não
 /// acontece.
+///
+/// # A exceção do lançamento
+///
+/// O comando é procurado **neste fio**, agora. O lançamento de um processo
+/// tem um desfecho que acontece noutro fio, depois de o comando responder —
+/// a imagem que não se mapeia no fio novo —, e guarda a execução do comando
+/// no começo, no fio dele, para gravá-la de lá: o
+/// [`DesfechoDoLancamento`], com a mesma conta ([`Execucao`]). É a única
+/// execução gravada depois de o comando acabar, e só o lançamento a guarda
+/// — o `xtask` confere quem nomeia o tipo.
 pub fn auditar_execucao(recurso: &str, codigo: Codigo, detalhe: &str) -> u64 {
-    let Some((mut quem, metodo, decisao)) = do_comando_deste_fio(|c| {
-        c.decidido
+    Execucao::deste_fio().map_or(0, |e| e.gravar(recurso, codigo, detalhe))
+}
+
+/// A execução do comando em execução num fio: quem o gate decidiu, como a
+/// auditoria o gravou, o método do comando e o número da decisão — o que
+/// [`auditar_execucao`] cita. Guardada, grava a execução da mesma decisão
+/// em nome do mesmo principal, sem montá-lo de novo, como a
+/// [`DecisaoDoProcesso`] guarda a de uma chamada de sistema.
+#[derive(Clone)]
+struct Execucao {
+    quem: Quem,
+    metodo: &'static str,
+    decisao: u64,
+}
+
+impl Execucao {
+    /// A do comando que este fio executa, se o gate o decidiu.
+    fn deste_fio() -> Option<Execucao> {
+        do_comando_deste_fio(|c| {
+            c.decidido.as_ref().map(|d| Execucao {
+                quem: d.quem.clone(),
+                metodo: d.metodo,
+                decisao: d.decisao,
+            })
+        })
+        .flatten()
+    }
+
+    /// Grava o que a execução fez da decisão: o detalhe com quem pediu na
+    /// frente e a decisão citada no fim ([`citando`]). Devolve o número do
+    /// registro.
+    fn gravar(mut self, recurso: &str, codigo: Codigo, detalhe: &str) -> u64 {
+        let detalhe = citando(&mut self.quem, detalhe, self.decisao);
+        auditar(&self.quem, self.metodo, recurso, codigo, &[], &detalhe)
+    }
+}
+
+/// O desfecho de um lançamento que o gate permitiu e que não acontece —
+/// ver `usuario::lancar_por` —, num lugar só: como o que a execução fez da
+/// decisão do comando que lança — o `user.run`, com o número dela —, ou,
+/// fora de um comando, em nome do kernel (`process.run`).
+///
+/// # Por que guardado, e não procurado na hora
+///
+/// [`auditar_execucao`] procura o comando **deste fio**, e o lançamento tem
+/// um desfecho que acontece noutro: a imagem que não se mapeia no fio novo,
+/// depois do nascimento, quando o comando já respondeu `launched: true` — a
+/// memória do espaço novo, dos segmentos, da pilha. Ali a procura não acha
+/// comando nenhum, e a falha cairia em nome do kernel mesmo no `user.run`
+/// de um operador. Guardado no começo do lançamento, no fio do comando, o
+/// desfecho vai em nome de quem o gate decidiu, citando a decisão, como o
+/// `exec` grava a imagem que não se mapeia depois do ponto sem volta
+/// ([`auditar_execucao_do_processo`]): nem em nome do kernel, nem do
+/// programa que não rodou uma instrução (o F2 do adversário do AE-1). No
+/// fio do comando, do começo ao fim do lançamento, é a mesma conta de
+/// [`auditar_execucao`].
+///
+/// # Só o lançamento o guarda
+///
+/// É a única execução gravada depois de o comando acabar. O `xtask` confere
+/// que, fora deste arquivo, onde se define, só o `usuario/mod.rs` o nomeia
+/// (`NOMES_PROTEGIDOS`): nenhum outro handler grava em nome de uma decisão
+/// depois de responder. Não autoriza nada, e não é credencial: grava, na
+/// mesma cadeia, em nome de quem o gate já decidiu.
+#[derive(Clone)]
+pub struct DesfechoDoLancamento {
+    /// A execução do comando que lança; `None` fora de um comando decidido
+    /// — o kernel por conta própria, no boot e na suíte —: em nome do
+    /// kernel.
+    execucao: Option<Execucao>,
+    /// O recurso do lançamento na auditoria: o caminho, ou o exemplo.
+    recurso: String,
+    /// Só na suíte: a conta dos desfechos vivos — ver
+    /// [`desfechos_vivos_de_teste`].
+    #[cfg(feature = "modo-teste")]
+    _vivo: VivoDeTeste,
+}
+
+/// O [`DesfechoDoLancamento`] do lançamento de `recurso` pelo comando que
+/// este fio executa — ou pelo kernel, fora de um.
+pub fn desfecho_do_lancamento(recurso: &str) -> DesfechoDoLancamento {
+    DesfechoDoLancamento {
+        execucao: Execucao::deste_fio(),
+        recurso: recurso.to_string(),
+        #[cfg(feature = "modo-teste")]
+        _vivo: VivoDeTeste::novo(),
+    }
+}
+
+impl DesfechoDoLancamento {
+    /// Grava o desfecho: a execução da decisão do comando, ou, fora de um,
+    /// em nome do kernel. Devolve o número do registro.
+    pub fn gravar(&self, codigo: Codigo, detalhe: &str) -> u64 {
+        match &self.execucao {
+            Some(e) => e.clone().gravar(&self.recurso, codigo, detalhe),
+            None => auditar_do_kernel("process.run", &self.recurso, codigo, detalhe),
+        }
+    }
+
+    /// Grava o desfecho só dentro de um comando: o `ALLOW` dele não fica sem
+    /// desfecho. Fora de um, nada — é o caso das perguntas sobre quem pede
+    /// (ver [`permitir_processo_com_o_detalhe`]): a recusa delas já está na
+    /// auditoria, como o gate a grava, e não há `ALLOW` a fechar; um registro
+    /// em nome do kernel diria duas vezes a mesma recusa. Devolve o número
+    /// do registro, ou zero.
+    pub fn gravar_no_comando(&self, codigo: Codigo, detalhe: &str) -> u64 {
+        self.execucao
             .as_ref()
-            .map(|d| (d.quem.clone(), d.metodo, d.decisao))
-    })
-    .flatten() else {
-        return 0;
-    };
-    let detalhe = citando(&mut quem, detalhe, decisao);
-    auditar(&quem, metodo, recurso, codigo, &[], &detalhe)
+            .map_or(0, |e| e.clone().gravar(&self.recurso, codigo, detalhe))
+    }
+}
+
+/// Só para a suíte: quantos [`DesfechoDoLancamento`] estão vivos — o do
+/// lançador, até ele voltar, e o do fio novo, até ele largar a carga. Um
+/// desfecho que ficasse vivo até `programa::entrar`, que não volta, ou até
+/// `fios::terminar`, que também não, vazaria a cada lançamento: o caso do
+/// mapeamento confere que a conta volta ao que era.
+#[cfg(feature = "modo-teste")]
+static DESFECHOS_VIVOS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Só para a suíte: a marca que conta um [`DesfechoDoLancamento`] vivo —
+/// na criação e no clone — e o desconta quando ele sai.
+#[cfg(feature = "modo-teste")]
+struct VivoDeTeste;
+
+#[cfg(feature = "modo-teste")]
+impl VivoDeTeste {
+    fn novo() -> VivoDeTeste {
+        DESFECHOS_VIVOS.fetch_add(1, Ordering::AcqRel);
+        VivoDeTeste
+    }
+}
+
+#[cfg(feature = "modo-teste")]
+impl Clone for VivoDeTeste {
+    fn clone(&self) -> VivoDeTeste {
+        VivoDeTeste::novo()
+    }
+}
+
+#[cfg(feature = "modo-teste")]
+impl Drop for VivoDeTeste {
+    fn drop(&mut self) {
+        DESFECHOS_VIVOS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Só para a suíte: ver [`DESFECHOS_VIVOS`].
+#[cfg(feature = "modo-teste")]
+pub fn desfechos_vivos_de_teste() -> usize {
+    DESFECHOS_VIVOS.load(Ordering::Acquire)
 }
 
 /// O detalhe de uma execução, com quem pediu na frente e a decisão `decisao`
@@ -2309,11 +2460,11 @@ pub fn gancho_da_reconfirmacao() {
 
 /// Só para a suíte: o que roda no lançamento de um processo pelo
 /// `user.run`, antes das perguntas do gate sobre quem pede
-/// ([`permitir_processo`]) — entre o gate do comando e elas. É a janela em
-/// que a contenção, a saída da pessoa, a confiança no editor tirada, o
-/// journal recusado ou o fim pedido de quem pede chegam depois de o gate
-/// decidir o comando; o caso `contencao: a recusa do user.run no gate diz o
-/// codigo` a abre, uma de cada vez. Uma vez: quem passa a toma.
+/// ([`permitir_processo_com_o_detalhe`]) — entre o gate do comando e elas.
+/// É a janela em que a contenção, a saída da pessoa, a confiança no editor
+/// tirada, o journal recusado ou o fim pedido de quem pede chegam depois de
+/// o gate decidir o comando; o caso `contencao: a recusa do user.run no
+/// gate diz o codigo` a abre, uma de cada vez. Uma vez: quem passa a toma.
 #[cfg(feature = "modo-teste")]
 static ANTES_DO_GATE_DO_LANCAMENTO: Mutex<Option<fn()>> = Mutex::new(None);
 
@@ -2326,10 +2477,40 @@ pub fn antes_do_gate_do_lancamento_de_teste(f: Option<fn()>) {
 
 /// Só para a suíte: roda, uma vez, o que
 /// [`antes_do_gate_do_lancamento_de_teste`] pôs — chamada pelo lançamento,
-/// logo antes de [`permitir_processo`].
+/// logo antes de [`permitir_processo_com_o_detalhe`].
 #[cfg(feature = "modo-teste")]
 pub fn gancho_do_gate_do_lancamento() {
     if let Some(f) = crate::arch::sem_interrupcoes(|| ANTES_DO_GATE_DO_LANCAMENTO.lock().take()) {
+        f();
+    }
+}
+
+/// Só para a suíte: o que roda no lançamento de um processo depois das
+/// perguntas do gate sobre quem pede ([`permitir_processo_com_o_detalhe`]),
+/// da leitura do código e da conferência da imagem, logo antes do
+/// nascimento — entre a conta da cota do gate e a do nascimento. É a janela
+/// em que outro processo do mesmo titular nasce, e a cota, contada de novo
+/// ao reservar a vaga, recusa (`fios::NaoNasceu::Cota`); o caso `contencao:
+/// a cota contada de novo no nascimento do user.run grava o desfecho` a
+/// abre. Uma vez: quem passa a toma.
+#[cfg(feature = "modo-teste")]
+static ANTES_DO_NASCIMENTO_DO_LANCAMENTO: Mutex<Option<fn()>> = Mutex::new(None);
+
+/// Só para a suíte: põe (ou tira) o que roda logo antes do próximo
+/// nascimento de um lançamento — ver [`ANTES_DO_NASCIMENTO_DO_LANCAMENTO`].
+#[cfg(feature = "modo-teste")]
+pub fn antes_do_nascimento_do_lancamento_de_teste(f: Option<fn()>) {
+    crate::arch::sem_interrupcoes(|| *ANTES_DO_NASCIMENTO_DO_LANCAMENTO.lock() = f);
+}
+
+/// Só para a suíte: roda, uma vez, o que
+/// [`antes_do_nascimento_do_lancamento_de_teste`] pôs — chamada pelo
+/// lançamento, logo antes de `fios::criar_processo`.
+#[cfg(feature = "modo-teste")]
+pub fn gancho_do_nascimento_do_lancamento() {
+    if let Some(f) =
+        crate::arch::sem_interrupcoes(|| ANTES_DO_NASCIMENTO_DO_LANCAMENTO.lock().take())
+    {
         f();
     }
 }
@@ -4193,19 +4374,47 @@ pub fn auditar_aperto_do_pareamento(chave: Option<[u8; 32]>, codigo: Codigo, det
 ///
 /// A recusa devolve o código e o motivo, como quem pediu os ouve: o da
 /// auditoria, menos o que é só deste caso — o nome do editor, a contagem
-/// da cota ([`crate::fios::COTA_ESGOTADA`]) —, que a auditoria guarda.
+/// da cota ([`crate::fios::COTA_ESGOTADA`]) —, que a auditoria guarda. Com
+/// o detalhe que ela gravou, [`permitir_processo_com_o_detalhe`].
 pub fn permitir_processo(
     autoridade: Autoridade,
     metodo: &str,
 ) -> Result<usize, (Codigo, &'static str)> {
+    permitir_processo_com_o_detalhe(autoridade, metodo)
+        .map_err(|(codigo, ouvido, _)| (codigo, ouvido))
+}
+
+/// Uma recusa das perguntas sobre quem pede um processo: o código; o motivo
+/// como quem pediu o ouve — sem o que é só deste caso, o nome do editor, a
+/// contagem da cota —; e o detalhe como a auditoria o gravou, com eles. É o
+/// detalhe que o desfecho do `user.run` repete (`usuario::lancar_por`).
+pub type RecusaDeQuemPede = (Codigo, &'static str, Cow<'static, str>);
+
+/// [`permitir_processo`], com o detalhe que a auditoria gravou na recusa —
+/// para o lançamento gravar, dentro de um comando, o desfecho do `user.run`
+/// com ele (ver `usuario::lancar_por`).
+///
+/// # A recusa, gravada como o gate a grava
+///
+/// A recusa vai à auditoria aqui, como sempre foi: `process.run` — ou
+/// `process.fork` —, o recurso vazio, quem pede de agora e o detalhe. É a
+/// decisão do gate sobre quem pede, e continua sem citar a decisão do
+/// comando que lança. O desfecho do `user.run` é outro registro, que quem
+/// lança grava: a execução da decisão do comando, com o mesmo código e o
+/// mesmo detalhe, em nome de quem o gate decidiu (o lote A4, #466).
+pub fn permitir_processo_com_o_detalhe(
+    autoridade: Autoridade,
+    metodo: &str,
+) -> Result<usize, RecusaDeQuemPede> {
     let (quem, cota) = perguntar_por_quem_pede(autoridade, metodo)?;
     if let Some(ocupacao) = crate::fios::cota_cheia(autoridade, cota) {
         let crate::fios::Ocupacao {
             ocupados,
             mortos_por_recolher,
         } = ocupacao;
-        let codigo = recusar_pela_cota_com(quem, metodo, ocupados, mortos_por_recolher, cota);
-        return Err((codigo, crate::fios::COTA_ESGOTADA));
+        let (codigo, detalhe) =
+            recusar_pela_cota_com(quem, metodo, ocupados, mortos_por_recolher, cota);
+        return Err((codigo, crate::fios::COTA_ESGOTADA, Cow::Owned(detalhe)));
     }
     Ok(cota)
 }
@@ -4287,33 +4496,36 @@ fn quem_pede_um_processo(autoridade: Autoridade) -> QuemPede {
 /// cota: quem pede é sabido; as revogações que o journal não perdeu; quem
 /// pede, se é um processo, vivo e sem o fim pedido; a contenção; a
 /// confiança no editor; e o papel, que diz a cota. Cada recusa vai para a
-/// auditoria com quem pede (ver [`QuemPede`]) e volta o código e o motivo,
-/// como quem pediu os ouve (ver [`permitir_processo`]); passando, voltam
-/// quem pede e a cota.
+/// auditoria com quem pede (ver [`QuemPede`]) e volta o código, o motivo
+/// como quem pediu os ouve (ver [`permitir_processo`]) e o detalhe que a
+/// auditoria gravou ([`RecusaDeQuemPede`]); passando, voltam quem pede e a
+/// cota.
 fn perguntar_por_quem_pede(
     autoridade: Autoridade,
     metodo: &str,
-) -> Result<(Quem, usize), (Codigo, &'static str)> {
+) -> Result<(Quem, usize), RecusaDeQuemPede> {
     let QuemPede {
         quem,
         fio,
         programa,
     } = quem_pede_um_processo(autoridade);
+    // As recusas de texto fixo: o que quem pediu ouve é o que a auditoria
+    // grava.
+    let recusar = |(codigo, motivo): (Codigo, &'static str)| -> RecusaDeQuemPede {
+        auditar(&quem, metodo, "", codigo, &[], motivo);
+        (codigo, motivo, Cow::Borrowed(motivo))
+    };
     // O pedido de um processo sem o programa que o gate decidiu: não se
     // pergunta mais nada sobre quem não se sabe.
     let Some(programa) = programa else {
-        let (codigo, motivo) = FORA_DE_UM_COMANDO;
-        auditar(&quem, metodo, "", codigo, &[], motivo);
-        return Err(FORA_DE_UM_COMANDO);
+        return Err(recusar(FORA_DE_UM_COMANDO));
     };
     // Um journal recusado: nenhuma credencial vale — a pergunta do gate de
     // todo comando e de toda chamada de sistema, que a reconfirmação refaz.
     // Sem ela aqui, o processo de uma chave ou de uma pessoa bifurcava com
     // o journal recusado: o `fork` não passa por outro gate.
     if credenciada(autoridade) && crate::persistencia::revogacoes_desconhecidas().is_some() {
-        let (codigo, motivo) = REVOGACOES_DESCONHECIDAS;
-        auditar(&quem, metodo, "", codigo, &[], motivo);
-        return Err(REVOGACOES_DESCONHECIDAS);
+        return Err(recusar(REVOGACOES_DESCONHECIDAS));
     }
     // Quem pede, se é um processo, ainda pede: o que acabou, ou tem o fim
     // pedido, é o isolado que vai acabar — o código da contenção, logo
@@ -4322,13 +4534,11 @@ fn perguntar_por_quem_pede(
     // `fios::encerrado` e `contencao::PROCESSO_ENCERRADO`). Um fio do kernel
     // não é processo: o titular pede por ele.
     if programa != Programa::Kernel && crate::fios::encerrado(fio) {
-        let (codigo, motivo) = crate::contencao::PROCESSO_ENCERRADO;
-        auditar(&quem, metodo, "", codigo, &[], motivo);
-        return Err(crate::contencao::PROCESSO_ENCERRADO);
+        return Err(recusar(crate::contencao::PROCESSO_ENCERRADO));
     }
     // Quem está contido não lança nem bifurca: o filho de um processo
     // isolado nasceria livre.
-    if let Some((codigo, motivo)) = crate::contencao::recusa(
+    if let Some(recusa) = crate::contencao::recusa(
         Chamador::Processo {
             fio,
             autoridade,
@@ -4336,8 +4546,7 @@ fn perguntar_por_quem_pede(
         },
         autoridade,
     ) {
-        auditar(&quem, metodo, "", codigo, &[], motivo);
-        return Err((codigo, motivo));
+        return Err(recusar(recusa));
     }
     // O código de fora da imagem em cujo editor o papel não confia mais
     // também não lança nem bifurca: o filho levaria o mesmo programa, e
@@ -4345,7 +4554,7 @@ fn perguntar_por_quem_pede(
     // editor; quem pediu ouve a falta.
     if let Some((falta, motivo)) = sem_confianca_no_editor(&programa, quem.papel.as_deref()) {
         auditar(&quem, metodo, "", Codigo::DenyPolicy, &[], &motivo);
-        return Err((Codigo::DenyPolicy, falta.motivo()));
+        return Err((Codigo::DenyPolicy, falta.motivo(), Cow::Owned(motivo)));
     }
     // Sem papel — a sessão de pessoa que acabou, a chave revogada —, nada
     // nasce.
@@ -4355,8 +4564,7 @@ fn perguntar_por_quem_pede(
         .and_then(|papel| com_politica(|p| p.papel(papel).map(|r| r.processos)));
     let Some(cota) = cota else {
         const SEM_PAPEL: (Codigo, &str) = (Codigo::DenyRole, "sem papel, nenhum processo");
-        auditar(&quem, metodo, "", SEM_PAPEL.0, &[], SEM_PAPEL.1);
-        return Err(SEM_PAPEL);
+        return Err(recusar(SEM_PAPEL));
     };
     Ok((quem, cota as usize))
 }
@@ -4391,8 +4599,14 @@ fn perguntar_por_quem_pede(
 /// Uma mudança depois destas perguntas acha o filho já na tabela,
 /// nascendo, como um filho nascido um instante antes dela: o isolamento é
 /// de um processo, e não da árvore.
+///
+/// A recusa gravada aqui é o registro dela, e o único: o gate do `fork` é
+/// este, e não há decisão de um comando a fechar — o desfecho que o
+/// `user.run` grava das mesmas perguntas não vale aqui.
 pub fn reconfirmar_bifurcacao(autoridade: Autoridade) -> Result<(), (Codigo, &'static str)> {
-    perguntar_por_quem_pede(autoridade, BIFURCACAO).map(|_| ())
+    perguntar_por_quem_pede(autoridade, BIFURCACAO)
+        .map(|_| ())
+        .map_err(|(codigo, ouvido, _)| (codigo, ouvido))
 }
 
 /// Quem lança um processo, para a última palavra do nascimento — ver
@@ -4600,12 +4814,17 @@ pub fn reabrir_os_lancamentos_do_kernel_de_teste() {
 /// distingue da do gate. Os mortos por recolher são os da conta do
 /// nascimento — `ocupacao`, tirada na mesma seção crítica que recusou —,
 /// no máximo M.
+///
+/// Devolve o código e o detalhe que gravou — `cota de processos do papel:
+/// M de M[, …]` —, para o lançamento gravar, dentro de um comando, o
+/// desfecho do `user.run` com ele (ver `usuario::lancar_por`). O `fork` não
+/// o usa: o gate dele é este registro.
 pub fn recusar_pela_cota(
     autoridade: Autoridade,
     metodo: &str,
     ocupacao: crate::fios::Ocupacao,
     cota: usize,
-) -> Codigo {
+) -> (Codigo, String) {
     recusar_pela_cota_com(
         quem_pede_um_processo(autoridade).quem,
         metodo,
@@ -4621,22 +4840,17 @@ pub fn recusar_pela_cota(
 /// nativa — diz também o processo, o fio e o programa, como o registro da
 /// bifurcação permitida ([`auditar_bifurcacao`]). O titular é o mesmo de
 /// antes; o processo vai no detalhe, como em todo pedido de um processo.
+/// Devolve o código e o detalhe gravado, sem quem pede na frente.
 fn recusar_pela_cota_com(
     quem: Quem,
     metodo: &str,
     ocupados: usize,
     mortos_por_recolher: usize,
     cota: usize,
-) -> Codigo {
-    auditar(
-        &quem,
-        metodo,
-        "",
-        Codigo::DenyPolicy,
-        &[],
-        &detalhe_da_cota(ocupados, mortos_por_recolher, cota),
-    );
-    Codigo::DenyPolicy
+) -> (Codigo, String) {
+    let detalhe = detalhe_da_cota(ocupados, mortos_por_recolher, cota);
+    auditar(&quem, metodo, "", Codigo::DenyPolicy, &[], &detalhe);
+    (Codigo::DenyPolicy, detalhe)
 }
 
 /// O texto da recusa da cota: `cota de processos do papel: N de M` — N, o
@@ -5137,5 +5351,7 @@ pub unsafe fn destravar() {
         ANTES_DA_RECONFIRMACAO.force_unlock();
         #[cfg(feature = "modo-teste")]
         ANTES_DO_GATE_DO_LANCAMENTO.force_unlock();
+        #[cfg(feature = "modo-teste")]
+        ANTES_DO_NASCIMENTO_DO_LANCAMENTO.force_unlock();
     }
 }

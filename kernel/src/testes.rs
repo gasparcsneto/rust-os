@@ -42311,6 +42311,20 @@ static CASOS: &[Caso] = &[
         nome: "contencao: depois do boot o kernel nao lanca por conta propria",
         f: nascimento::contencao_depois_do_boot_o_kernel_nao_lanca_por_conta_propria,
     },
+    // O lote A4: os quatro juntos, no fim — nenhum caso de antes muda de
+    // parte.
+    Caso {
+        nome: "contencao: a cota contada de novo no nascimento do user.run grava o desfecho",
+        f: nascimento::contencao_a_cota_contada_de_novo_no_nascimento_do_user_run_grava_o_desfecho,
+    },
+    Caso {
+        nome: "contencao: o user.run de uma imagem que nao se carrega grava o desfecho",
+        f: nascimento::contencao_o_user_run_de_uma_imagem_que_nao_se_carrega_grava_o_desfecho,
+    },
+    Caso {
+        nome: "contencao: o user.run cuja imagem nao se mapeia grava o desfecho depois do nascimento",
+        f: nascimento::contencao_o_user_run_cuja_imagem_nao_se_mapeia_grava_o_desfecho,
+    },
 ];
 
 /// A cauda da suíte: os casos que rodam em **toda** parte, depois da fatia

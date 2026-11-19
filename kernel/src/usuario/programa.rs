@@ -243,13 +243,22 @@ pub(super) struct Preparada<'a> {
     espaco: crate::paginacao::Espaco,
 }
 
-/// O primeiro passo de [`carregar`]: a imagem conferida — o ELF, as faixas
-/// de página dos segmentos, o manifesto —, o programa que ela é, e o espaço
-/// novo, criado e ainda não adotado. Um erro aqui deixa o processo intacto.
-pub(super) fn preparar(
-    imagem: &[u8],
-    editor: Option<[u8; 32]>,
-) -> Result<Preparada<'_>, &'static str> {
+/// O que a conferência pura de uma imagem acha: o ELF, as faixas de página
+/// dos segmentos e o manifesto. Privada deste arquivo: só o primeiro passo
+/// da carga a usa para seguir — quem está fora dele sabe só se a imagem se
+/// confere ([`conferir_a_imagem`]).
+struct Conferida<'a> {
+    elf: super::elf::Imagem<'a>,
+    faixas: [(u64, u64); super::elf::MAX_SEGMENTOS],
+    manifesto: Option<politica::manifesto::Manifesto>,
+}
+
+/// A conferência pura de uma imagem — só os bytes e as constantes do mapa
+/// do processo, sem espaço de endereços e sem memória de página: o ELF
+/// ([`super::elf::validar`]), as faixas de página de cada segmento, que não
+/// se dividem nem invadem a pilha, e o manifesto, que se lê ou recusa a
+/// imagem.
+fn conferida(imagem: &[u8]) -> Result<Conferida<'_>, &'static str> {
     let elf = super::elf::validar(imagem)?;
 
     // As faixas de página de cada segmento, conferidas antes de qualquer
@@ -272,13 +281,62 @@ pub(super) fn preparar(
         }
     }
 
-    // O programa que a imagem é: o manifesto que ela declara — lido aqui,
-    // onde recusar ainda deixa o processo intacto — e o resumo dela. Um
-    // manifesto que não se lê recusa a imagem: não é um manifesto vazio.
+    // O manifesto que a imagem declara — lido aqui, onde recusar ainda
+    // deixa o processo intacto. Um manifesto que não se lê recusa a imagem:
+    // não é um manifesto vazio.
     let manifesto = match elf.manifesto() {
         Some(texto) => Some(politica::manifesto::ler(texto).map_err(|e| e.motivo())?),
         None => None,
     };
+    Ok(Conferida {
+        elf,
+        faixas,
+        manifesto,
+    })
+}
+
+/// Se `imagem` se carrega, pelo que dá para saber sem um espaço de
+/// endereços: a conferência pura do primeiro passo da carga — o ELF, os
+/// segmentos, o manifesto. O que sobra para o primeiro passo é só a
+/// memória do espaço novo ([`preparar`]); e, depois da troca, a dos
+/// segmentos e da pilha ([`Trocada::mapear`]).
+///
+/// # Para quem
+///
+/// As duas portas a fazem antes do que pede memória. O lançamento
+/// (`usuario::lancar_por`), antes de o fio nascer: a imagem que não é um
+/// ELF deste processador, com um segmento fora do lugar ou com o manifesto
+/// que não se lê é recusada a quem pediu, com o desfecho na auditoria, em
+/// vez de nascer e morrer no fio novo com o erro só no log (o #467). E o
+/// `executar` (`usuario::executar`), antes do espaço novo: a imagem que não
+/// se confere ouve `PROGRAMA_DESCONHECIDO`, e só a memória que falta,
+/// `SEM_MEMORIA` (o #471). É a mesma conta que o primeiro passo faz de
+/// novo, sobre os mesmos bytes: a conferida é a que se carrega.
+///
+/// Pura: não é um carregador — não cria espaço, não mapeia, não entra —, e
+/// não está nas guardas dos carregadores do `xtask`. Só o módulo `usuario`
+/// a alcança, como eles.
+pub(super) fn conferir_a_imagem(imagem: &[u8]) -> Result<(), &'static str> {
+    conferida(imagem).map(|_| ())
+}
+
+/// O primeiro passo de [`carregar`]: a imagem conferida — a conta pura de
+/// [`conferir_a_imagem`]: o ELF, as faixas de página dos segmentos, o
+/// manifesto —, o programa que ela é, e o espaço novo, criado e ainda não
+/// adotado. Um erro aqui deixa o processo intacto; depois da conferência,
+/// o que falha é só a memória do espaço novo.
+pub(super) fn preparar(
+    imagem: &[u8],
+    editor: Option<[u8; 32]>,
+) -> Result<Preparada<'_>, &'static str> {
+    let Conferida {
+        elf,
+        faixas,
+        manifesto,
+    } = conferida(imagem)?;
+
+    // O programa que a imagem é: o manifesto que ela declara e o resumo
+    // dela.
     let programa = crate::autorizacao::Programa::Imagem {
         manifesto,
         resumo: politica::manifesto::resumo_da_imagem(imagem),

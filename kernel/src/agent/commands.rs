@@ -7177,17 +7177,23 @@ fn user_run(params: Json, w: &mut JsonWriter) -> fmt::Result {
         // journal recusado, quem pede encerrado ou contido, o editor em quem
         // o papel não confia, o papel que falta, a cota esgotada, também a
         // contada de novo ao nascer —: o código e o motivo de verdade, já
-        // gravados, e nenhuma explicação. A explicação lê a decisão do
-        // comando — o papel e a permissão com que o gate o decidiu —, e estas
-        // recusas não são ela: a cota sairia "o seu papel não permite
-        // process.run", a sessão que acabou com o papel de antes, o
-        // encerrado com "um administrador pode liberá-la". Ver
+        // gravados — a recusa do gate, e o desfecho deste comando, a execução
+        // da decisão dele com o mesmo código e o mesmo detalhe; na última
+        // palavra, só o desfecho —, e nenhuma explicação. A explicação lê a
+        // decisão do comando — o papel e a permissão com que o gate o
+        // decidiu —, e estas recusas não são ela: a cota sairia "o seu
+        // papel não permite process.run", a sessão que acabou com o papel
+        // de antes, o encerrado com "um administrador pode liberá-la". Ver
         // `usuario::NaoLancou::PorQuemPede`.
         Err(crate::usuario::NaoLancou::PorQuemPede(codigo, motivo)) => {
             w.field_bool("launched", false)?;
             w.field_str("code", codigo.nome())?;
             w.field_str("error", motivo)?;
         }
+        // O arquivo que não se lê, a imagem que não se carrega — não é um
+        // ELF deste processador, um segmento fora do lugar, o manifesto que
+        // não se lê —, o fio que não nasce: o motivo, já gravado como o
+        // desfecho do comando.
         Err(outro) => {
             w.field_bool("launched", false)?;
             w.field_str("error", outro.motivo())?;

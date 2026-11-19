@@ -3006,3 +3006,90 @@ fn o_que_nao_diz_o_numero_nao_anda_a_leitura() {
     }
     assert_eq!(m.contadores.perdidos, 0);
 }
+
+/// O desfecho de uma recusa de quem pede no `user.run` (o #466, no lote
+/// A4): a recusa do gate — `process.run`, sem citação — é uma decisão; o
+/// desfecho — a execução da decisão do `user.run`, com o mesmo código e o
+/// mesmo detalhe — é uma execução. A recusa conta uma vez, pela decisão, no
+/// risco, nos contadores e no perfil: os três só contam decisões — o perfil
+/// também (`Ueba::observar`: as execuções já foram contadas na decisão).
+/// O plano do lote esperava o perfil com a recusa duas vezes, e a forma
+/// escolhida — dois registros — não a dobra em lugar nenhum: escrito aqui
+/// para a conta não mudar sem ninguém ver. Nenhum nascimento.
+#[test]
+fn a_recusa_de_quem_pede_com_o_desfecho_conta_uma_vez() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    let caminho = "/programas/x86_64/encerravel";
+    let cota = "cota de processos do papel: 1 de 1";
+    let d = a.gravar(do_agente("user.run", caminho, Codigo::Allow, ""));
+    a.gravar(do_agente("process.run", "", Codigo::DenyPolicy, cota));
+    let desfecho = format!("{cota}; decisao {d}");
+    a.gravar(do_agente(
+        "user.run",
+        caminho,
+        Codigo::DenyPolicy,
+        &desfecho,
+    ));
+    ler(&mut m, &a);
+
+    let tipos: Vec<Tipo> = m.eventos().map(|e| e.tipo).collect();
+    assert_eq!(tipos, [Tipo::Decisao, Tipo::Decisao, Tipo::Execucao]);
+    assert_eq!(m.eventos().last().and_then(|e| e.decisao), Some(d));
+    assert_eq!((m.contadores.decisoes, m.contadores.recusas), (2, 1));
+
+    let principal = format!("agent:{}", hex(&CHAVE));
+    let risco = m.risco(&principal);
+    let recusas = risco
+        .fatores
+        .iter()
+        .find(|f| f.nome == "denials")
+        .expect("o fator das recusas");
+    assert_eq!(
+        recusas.motivo,
+        "1 pedidos distintos recusados na janela (1 recusas)"
+    );
+
+    // O perfil: a decisão do comando e a recusa do gate; o desfecho, não.
+    let perfil = m.ueba.perfil(&principal).expect("o perfil de quem pediu");
+    assert_eq!((perfil.pedidos, perfil.recusas), (2, 1));
+}
+
+/// A imagem que não se mapeia depois do nascimento (o #467, no lote A4): o
+/// `user.run` grava o nascimento e, depois, o desfecho — `ERROR`, citando a
+/// mesma decisão. O NSF lê uma decisão, um nascimento e uma execução: o
+/// processo continua com o criador dele, o `ERROR` não é recusa, e o
+/// nascimento não se desfaz.
+#[test]
+fn o_desfecho_depois_do_nascimento_nao_desfaz_a_proveniencia() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    let caminho = "/programas/x86_64/ola";
+    let d = a.gravar(do_agente("user.run", caminho, Codigo::Allow, ""));
+    let nasceu = format!("processo 12 lancado; decisao {d}");
+    a.gravar(do_agente("user.run", caminho, Codigo::Allow, &nasceu));
+    let falhou = format!("o mapeamento da imagem falhou de proposito; decisao {d}");
+    a.gravar(do_agente("user.run", caminho, Codigo::Error, &falhou));
+    ler(&mut m, &a);
+
+    let tipos: Vec<Tipo> = m.eventos().map(|e| e.tipo).collect();
+    assert_eq!(
+        tipos,
+        [
+            Tipo::Decisao,
+            Tipo::Nascimento { filho: 12 },
+            Tipo::Execucao
+        ]
+    );
+    assert_eq!(m.eventos().last().and_then(|e| e.decisao), Some(d));
+    let prov = m.grafo.proveniencia(0, 12);
+    assert!(prov.completa());
+    assert_eq!(
+        prov.raiz.as_deref(),
+        Some(format!("agent:{}", hex(&CHAVE)).as_str())
+    );
+
+    let principal = format!("agent:{}", hex(&CHAVE));
+    assert_eq!(m.ueba.perfil(&principal).map(|p| p.recusas), Some(0));
+    assert_eq!((m.contadores.decisoes, m.contadores.recusas), (1, 0));
+}
