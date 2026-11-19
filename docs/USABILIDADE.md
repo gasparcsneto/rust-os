@@ -209,8 +209,14 @@ entre ele e o relógio do kernel desde o boot: a mesma conta nas duas
 arquiteturas, sem conhecer a frequência. No ARM, até o #455, o relógio do
 kernel atrasava — a bancada de tempo o media a -12 681 ppm do contador —,
 e as medidas em nanossegundos saíam pouco mais de 1% menores; rearmado
-pelo prazo, ele anda com o contador (a bancada: -24 ppm, como os -25 do
-x86). Cada medida é `{samples, avg, max}`. Os contadores são atômicos,
+pelo prazo, ele anda com o contador (a bancada: -24 ppm). No x86, até o
+#455-B, cada núcleo tinha a sua grade de tiques, e o período era o do APIC
+calibrado contra o PIT: a bancada media o relógio de -808 a +10 082 ppm do
+contador nas CIs 512 a 522, e as medidas em nanossegundos saíam até 1%
+maiores. Desde o #455-B os núcleos têm uma grade só, e o período é o do
+próprio TSC, com a mesma medida da régua do civil. A bancada de tempo
+reprova o relógio a mais de 100 ppm à frente do contador, ou a mais de
+3 000 atrás. Cada medida é `{samples, avg, max}`. Os contadores são atômicos,
 sem trava, e **nada daqui volta a uma decisão**: o gate escreve, só a
 consulta lê.
 
