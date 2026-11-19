@@ -1081,7 +1081,7 @@ entrega o endereço da RSDP junto com o mapa da memória — e cada núcleo
 acorda por INIT-SIPI-SIPI num trampolim de modo real abaixo de 1 MiB. No ARM
 ela vem do device tree, e cada núcleo acorda pelo `CPU_ON` do PSCI. Os dois
 caminhos terminam no mesmo lugar: um fio ocioso próprio, o timer do núcleo
-ligado com a contagem que o primeiro mediu, e o escalonador.
+armado na grade do primeiro, e o escalonador.
 
 ```
 [   41]  2450ms info  smp  4 nucleo(s) descrito(s) pelo hardware
@@ -1153,12 +1153,14 @@ contou 40" —: com vários núcleos o relógio não sentia essa parte, porque
 outro o anda no lugar; com um núcleo só, sentia, e todo prazo que mede
 nele também. Desde
 o #455 cada núcleo tem uma grade, no `CNTP_CVAL_EL0` (`gic::PRAZO`) — e,
-desde o #455-B, a mesma para todos, ver abaixo —: o primeiro prazo parte
-do contador de agora — no boot e ao acordar —, e cada
+desde o #455-B, a mesma para todos, ver abaixo —: o primeiro prazo é o
+primeiro ponto da grade depois do contador de agora — no boot e ao
+acordar —, e cada
 um dos seguintes é o que venceu mais um intervalo. Um atraso menor que um
 período não custa tique; um maior não vira rajada — o timer guarda o
 nível, e não a conta —: os prazos perdidos são pulados, e o próximo é o
-primeiro da grade ainda no futuro, como no APIC periódico do x86. Os casos
+primeiro da grade ainda no futuro, como no timer do x86 — o APIC periódico
+até o #455-B, e desde então o disparo único pela grade do TSC. Os casos
 `smp: o pulso nao perde tique com o nucleo mascarado em trechos de 6 ms` e
 `smp: mascarado por mais de um periodo, o timer volta com um disparo, sem
 rajada` o conferem nas duas arquiteturas, e `smp: o prazo do timer do ARM
@@ -1218,7 +1220,9 @@ a distância convertida, e a conversão erra — só rearma. As três
 propriedades que a regra pede estão em `tempo::avancar`: todo tique no
 ponto dele ou depois, o rearme pulando todo ponto que não está no futuro, e
 uma grade só. O relógio anda no máximo uma vez por ponto: nunca à frente do
-contador; atrás, numa parada do hospedeiro, sim. Depois da correção, nas
+contador; atrás, numa parada do hospedeiro, sim. No boot do x86, até o
+#455-C, o PIT e o APIC o andavam juntos enquanto um era conferido contra o
+outro — ver o #455-C, abaixo. Depois da correção, nas
 mesmas condições, o caso passou nas seis rodadas: o relógio andou 301, 301
 e 301 no ARM, contra 301, 301 e 300 períodos, e 300, 301 e 300 no x86,
 contra 300, 301 e 300; o maior pulso, 301 em todas.
@@ -1231,9 +1235,10 @@ boots da suíte, contra o 1 GHz do emulador. O caso `smp: o tique do x86 vem
 pela grade comum do TSC, e o disparo antes do prazo nao conta` confere o
 período — numa rodada, a grade de 20 999 918 ciclos e a régua de
 2 099 991 809 Hz —, os primeiros prazos de cada núcleo na grade comum, os
-disparos que a conversão dá sozinha antes do prazo — nenhum, em 1122, 1335
-e 993 tiques desde o boot, nas três rodadas dele sozinho, e em 568 891, na
-parte 2/3 da suíte —, e um disparo provocado antes do prazo, que não anda o
+disparos que a conversão dá sozinha antes do prazo — nenhum, em 1122, 1335,
+993 e 968 tiques desde o boot, nas quatro rodadas dele sozinho, e em
+568 891, na parte 2/3 da suíte —, e um disparo provocado antes do prazo, que
+não anda o
 pulso nem muda o prazo. A bancada de tempo media o
 relógio do x86, no holdover, de -808 a +10 082 ppm do contador nas CIs 512
 a 522 — a conta dupla e a calibração dão números assim, e o #455-B tira as
@@ -1266,13 +1271,104 @@ mesmo: "um nucleo ligado nao armou o primeiro prazo").
 | x86: a grade do TSC por núcleo | `smp: o tique do x86 vem pela grade comum do TSC...`: "o primeiro prazo de um nucleo nao esta na grade comum dos nucleos"; e `smp: o relogio nao passa do contador...`: o relógio 324, contra 300 |
 | x86: o disparo antes do prazo contado como tique | `smp: o tique do x86 vem pela grade comum do TSC...`: "um disparo antes do prazo contou tique" — o pulso de 249 a 250 |
 | x86: o disparo antes do prazo sem rearme | o mesmo: "depois do disparo antes do prazo, o tique do prazo nao veio" |
-| x86: o período pela frequência do APIC, e não pela do TSC | o mesmo: "o periodo da grade dos tiques nao e o da regua do civil" — a grade de 21 016 158 ciclos, contra 20 999 833 da régua: o período do APIC calibrado 778 ppm longo nesse boot |
+| x86: o período pela frequência do APIC, e não pela do TSC | o mesmo: "o periodo da grade dos tiques nao e o da regua do civil" — a grade de 21 016 158 ciclos, contra 20 999 833 da régua: o período do APIC calibrado 777 ppm longo nesse boot |
 | x86: duas medidas do TSC, uma para a grade e outra para a régua | o mesmo — a grade de 21 000 014 ciclos, contra 20 999 921 |
 | x86: o rearme sem pular os perdidos | `smp: mascarado por mais de um periodo...`: três tiques logo depois |
 | x86: o rearme a partir de agora | `smp: o pulso nao perde tique...`: o relógio 49, o pulso 38, o contador 50; e `smp: o tique do x86 vem pela grade comum do TSC...`: "depois do tique, o prazo seguinte saiu da grade comum" |
-| x86: a contagem sem a margem de um milésimo | nenhum — equivalente: nenhum disparo antes do prazo em 1130 tiques, mesmo sem a margem; o A e o B passam |
-| x86: a razão do TSC para o APIC dezesseis vezes maior — as contagens pequenas demais | `smp: o tique do x86 vem pela grade comum do TSC...`: "os disparos antes do prazo passam de 4 por tique" — 30 062 em 1272 tiques. Nem o relógio nem a conferência contra o PIT a sentem: os dois contam os tiques |
+| x86: a contagem sem a margem de 1/1024 | nenhum — equivalente: nenhum disparo antes do prazo em 1130 tiques, mesmo sem a margem; o A e o B passam |
+| x86: a razão do TSC para o APIC dezesseis vezes maior — as contagens pequenas demais | `smp: o tique do x86 vem pela grade comum do TSC...`: "os disparos antes do prazo passam de 4 por tique" — 30 062 em 1272 tiques. O relógio não a sente — ele conta os tiques —, e a conferência contra o PIT, que também os contava, desde o #455-C recusa a tentativa: ver abaixo |
 | a bancada: o teto à frente em 20 000 ppm | o teste do hospedeiro `o_relogio_do_kernel_nao_anda_a_frente_do_contador_no_holdover` |
+
+**O #455-C: as correções do adversário do #455-B.** O adversário do
+#455-B confirmou as três propriedades nas duas arquiteturas, no emulador, e
+achou cinco pontos, nenhum alto nem médio; o #455-C corrige os cinco.
+
+- **A ordem das leituras.** O caso `smp: o relogio nao passa do contador...`
+  lia o contador por dentro das outras leituras — no fim, antes do relógio
+  e dos pulsos —, e uma parada do núcleo da suíte entre as duas — o
+  hospedeiro que tira a vCPU, um handler longo, outro fio no quantum —
+  deixava fora dos períodos os avanços que os outros núcleos faziam nela:
+  com uns 30 ms, o caso reprovava sem defeito. Agora o contador fica por
+  fora: antes do relógio e dos pulsos no começo, e depois deles no fim. Com
+  50 ms de giro entre as duas leituras do fim (a demonstração do
+  adversário, que não entra), na ordem de antes o relógio andou 304 contra
+  300 períodos no ARM, e 306 contra 301 no x86 — reprovou —; por fora, 300
+  contra 305 e 301 contra 306 — passou. O mesmo molde estava em `smp:
+  mascarado por mais de um periodo...`, que lia o pulso antes do relógio no
+  fim, com folga de dois, e, com folga de sete, em `smp: o pulso nao perde
+  tique...` e em `smp: o relogio anda uma vez por tique`: os três leem cada
+  ponta com o núcleo mascarado e o pulso por fora do relógio (`Janela`, na
+  suíte). Com os mesmos 50 ms no fim do caso dos 35 ms: na ordem de antes,
+  o pulso 10 contra o relógio 15 no ARM, e 11 contra 15 no x86 — reprovou
+  —; por fora, 11 e 11, e 10 e 11. E `hora: a disciplina no civil` lia o
+  civil e a régua um depois do outro, com a folga do teto do gradual em
+  cinco milésimos da janela: o civil passou a ser cercado pela régua, lida
+  antes e depois dele. Dentro da janela, uma parada do núcleo da suíte
+  ainda pesa nos casos que comparam o pulso dele com o relógio — o pulso
+  perde os tiques dela, e o relógio, que os outros andam, não —, e é a
+  folga de cada um que a cobre.
+- **Os disparos antes do prazo na conferência do boot do x86.** A
+  conferência contra o PIT só contava os tiques, e a conversão do TSC para o
+  APIC curta — a razão alta — não muda os tiques: com a razão dezesseis
+  vezes maior, o boot passava com uns 24 disparos antes do prazo por tique,
+  em todo núcleo. Os disparos antes do prazo passaram a ser contados fora da
+  suíte também (`apic::ANTECIPADOS`), e a conferência recusa a tentativa
+  com mais de quatro por tique — o teto do caso do TSC —, e calibra de novo.
+  O veredito é uma conta pura (`apic::julgar_a_conferencia`), que o caso
+  `smp: o tique do x86 vem pela grade comum do TSC...` confere com números
+  fixos e com os do boot. Com a razão dezesseis vezes maior (a mutação
+  `x86-9` do #455-B), o boot recusa as três tentativas — "o APIC disparou
+  777 vezes antes do prazo em 19 tiques: a conversao do TSC para o APIC
+  esta curta", e 804 e 750 nas outras duas —, o PIT continua, os outros
+  núcleos não ligam, e o caso do TSC reprova pelo teto: 2354 disparos antes
+  do prazo em 60 tiques.
+- **O TSC suposto.** Toda leitura do TSC da grade é `lfence; rdtsc`
+  (`ciclos_em_ordem`, no `mod.rs` do x86): o rearme lê o TSC depois de
+  ver, no relógio, o avanço de outro núcleo, e o pulo dos perdidos supõe
+  essa ordem. O `arch::ciclos` das medidas de custo, da régua e das esperas
+  continua sem a barreira. E o boot avisa quando o `CPUID` não anuncia o
+  TSC invariante — "o CPUID nao anuncia o TSC invariante (0x80000007, EDX
+  bit 8): a grade dos tiques e a regua do civil supoem o TSC numa taxa so,
+  e igual em todos os nucleos" —, sem recusar: o QEMU sem aceleração não o
+  anuncia, e a CI vê o aviso em todo boot do x86. A sincronia entre os
+  núcleos não se confere — ver "O que fica de fora", em
+  [O tempo](#o-tempo).
+- **O PIT, uma segunda grade no boot do x86.** Na conferência contra o PIT
+  os dois timers disparam no primeiro núcleo, e os dois andavam o relógio:
+  o tique de cada um achava o `VISTO` que o outro tinha gravado. O APIC só
+  anda o relógio depois de assumi-lo (`apic::assumir_o_relogio`), com o PIT
+  já mascarado; na conferência, só o PIT o anda. Medido no log do boot, que
+  ganhou a linha da conferência ("conferencia contra o PIT: 19 tique(s) do
+  APIC e 0 disparo(s) antes do prazo em 20 disparo(s) do PIT, e o relogio
+  andou 20"): com o APIC andando o relógio na conferência, como antes —
+  uma mutação —, o relógio andou 39 em 20 disparos do PIT, 19 tiques e uns
+  190 ms a mais por tentativa; com a correção, 20 em 20, em todas as
+  rodadas do x86 do #455-C. E a PCI do x86 não entrega mais as linhas 0 e 2
+  (`pci::linha_de_dispositivo`): a 0 é a do PIT, que desmascarada para um
+  dispositivo andaria o relógio ao lado do APIC, e a 2 é a cascata do
+  escravo. Só um firmware que as escrevesse no registrador de linha as
+  daria, e o SeaBIOS e o OVMF não escrevem.
+- **O detector de disparos antes do prazo do ARM** lê o contador no começo
+  do ramo do timer (`gic::conferir_o_prazo_de_teste`, só na suíte), e não
+  no fim do handler, onde um disparo antecipado a menos de um handler do
+  prazo já o teria passado, e contava como tique sem ser visto.
+
+As mutações do #455-C, uma de cada vez, em depuração, com quatro núcleos.
+A ordem de antes só reprova com a parada no meio — sem ela, passou em
+todas as rodadas do #455-B —, e as duas primeiras linhas põem nela os
+50 ms da demonstração:
+
+| Mutação | Reprovada por |
+|---|---|
+| a ordem de antes, no caso do adversário, com 50 ms entre as duas leituras do fim | `smp: o relogio nao passa do contador...`: "o relogio andou a frente do contador: o mesmo periodo contou duas vezes" — 304 contra 300 períodos no ARM, 306 contra 301 no x86. Na ordem nova, com o mesmo atraso, 300 contra 305 e 301 contra 306, e passa |
+| a ordem de antes, no caso dos 35 ms, com 50 ms entre as duas leituras do fim | `smp: mascarado por mais de um periodo...`: "depois do atraso, o pulso nao voltou ao ritmo da grade: nao andou com o relogio" — o pulso 10 e o relógio 15 no ARM, 11 e 15 no x86. Com o pulso por fora, e o mesmo atraso, 11 e 11, e 10 e 11, e passa |
+| x86: a conferência sem a recusa dos disparos antes do prazo | `smp: o tique do x86 vem pela grade comum do TSC...`: "o veredito da conferencia contra o PIT nao e o esperado" — 81 disparos antes do prazo em 20 tiques deram `Ok` |
+| x86: a razão do TSC para o APIC dezesseis vezes maior (a `x86-9`), com a recusa | o boot recusa as três tentativas — 777, 804 e 750 disparos antes do prazo em 19 tiques — e fica no PIT, com um núcleo; e `smp: o tique do x86...`: "os disparos antes do prazo passam de 4 por tique" — 2354 em 60 tiques |
+| x86: o APIC andando o relógio na conferência contra o PIT | `smp: o tique do x86...`: "na conferencia contra o PIT o relogio andou mais que o PIT: o APIC o andou antes de assumi-lo" — 39 em 20 disparos do PIT |
+| x86: a PCI entregando as linhas 0 e 2 | `pci: varredura coerente`: "a PCI do x86 entrega uma linha do PIC que nao e de dispositivo, ou recusa uma que e" — a linha 0 |
+| x86: o TSC da grade lido sem o `lfence` | nenhum — equivalente no emulador, que executa as instruções em ordem: o caso do TSC (nenhum disparo antes do prazo em 961 tiques) e o do adversário (300 contra 301) passam. No hardware, a barreira fecha uma janela de nanossegundos |
+| ARM: o detector dos disparos antes do prazo no fim do handler, como antes | nenhum — equivalente no emulador, que só levanta a linha do timer com o contador no prazo: o C passa. A diferença só aparece num disparo antecipado a menos de um handler do prazo |
+| ARM: um prazo só para todos os núcleos (a 3 do #455), com o detector no começo do ramo | `smp: o prazo do timer do ARM...`: "um disparo do timer achou o prazo do nucleo ainda no futuro" — 16 disparos, contados pelo núcleo 0 |
 
 **O núcleo dos dispositivos.** As interrupções dos dispositivos chegam a
 um núcleo só, o de boot (`NUCLEO_DOS_DISPOSITIVOS`): é nele que o tique
@@ -7997,7 +8093,7 @@ fala com o kernel: responde a quem pergunta.
 | O firewall | `net.block` numa fonte, depois noutra | o gate permite o `net.connect` do serviço, e o firewall o barra na execução (`DENY_POLICY`, com a regra); nenhum pedido chega às barradas; acordo 2/2, depois sem quórum; tiradas as regras, 3/3 |
 | A revogação | `policy.write` tirando `time.sync` do papel `tempo` no meio de uma rodada lenta | o passo de hora seguinte do serviço ouve `DENY_PERMISSION`; a rodada acaba ali, sem fechamento e sem mover nada, e a fonte seguinte não é pedida; com a linha de volta, 3/3 |
 | A hora vence | uma imagem com o teto da incerteza baixado a 10 s; o RTC uma hora atrás; raios de 9 e 10 s | o salto traz a incerteza de 9 s; as fontes calam, a incerteza cresce pela deriva, passa do teto, e a hora vence; o lógico segue o civil; o NSF vê `vencido` e abre o incidente `time-unauthenticated` do relógio, sem ação nem pedido; a validade é a do lógico, não autenticada; as fontes voltam, com raio de 1 s: `sincronizado` de novo, a validade pelo civil, e o NSF vê a volta |
-| O holdover | sincronizar e calar as três | `sincronizado` pela janela de 2048 s — contada na hora do hospedeiro, que o contador do civil acompanha; o relógio do kernel, no emulador, perde tiques —, uma rodada perdida a cada 64 s, e `holdover` depois dela, abaixo do teto: a validade ainda é a do civil, autenticado; as fontes voltam três segundos à frente: o ajuste gradual, `sincronizado` de novo, a validade pelo civil, e o NSF vê a volta |
+| O holdover | sincronizar e calar as três | `sincronizado` pela janela de 2048 s — contada na hora do hospedeiro, que o contador do civil acompanha; o relógio do kernel, no emulador, perde tiques —, uma rodada perdida a cada 64 s, e `holdover` depois dela, abaixo do teto, com o relógio do kernel a no máximo 100 ppm à frente do contador e 3 000 atrás (`mono_ppm`, que tem de vir): a validade ainda é a do civil, autenticado; as fontes voltam três segundos à frente: o ajuste gradual, `sincronizado` de novo, a validade pelo civil, e o NSF vê a volta |
 
 Cada cenário também confere, a cada leitura, que o lógico nunca volta. No
 fim, a bancada imprime o que mediu: a primeira sincronização depois do
@@ -8263,6 +8359,16 @@ com ação, a não ser a recomendação do pendente a uma pessoa.
   grade são uma só (`pic::frequencia_do_tsc`). A frequência também não é
   aprendida das amostras: com raios de segundos, separar 100 ppm pediria
   dias entre rodadas.
+- **O TSC suposto.** A grade dos tiques do x86 e a régua supõem o TSC
+  invariante — numa taxa só, em todo estado de energia e de frequência — e
+  igual em todos os núcleos. O boot avisa quando o `CPUID` não anuncia o
+  invariante, e o QEMU sem aceleração não anuncia; a sincronia entre os
+  núcleos não se confere. Num processador de um soquete ela fica abaixo de
+  um microssegundo; numa máquina de vários soquetes, com um firmware que
+  escreva o TSC ou num hipervisor que não sincronize as vCPUs, a grade
+  comum vira uma grade por núcleo, deslocada, e um deslocamento de
+  milissegundos devolve a conta dupla (o achado 3 do adversário do
+  #455-B). Fica para quando houver hardware de verdade na CI.
 - **Bloquear uma fonte não tira a confiança nela.** O firewall corta o
   caminho do serviço até uma fonte; a resposta dela, chegada por outro
   caminho permitido e entregue por quem tem `time.sync`, ainda vale — a
@@ -15137,7 +15243,7 @@ de teste, nenhum do kernel, e cada caso agora prepara o próprio estado:
   trabalho para o primeiro núcleo, sem a folga de dez tiques que o `smp:
   todos os nucleos ligam` lhe dava. Ele espera os dez tiques antes de
   medir. No ARM o timer era rearmado no fim do handler, e o atraso sob
-  carga saía do pulso do primeiro núcleo; o x86 tem o APIC periódico. O
+  carga saía do pulso do primeiro núcleo; o x86 tinha o APIC periódico. O
   #455 rearmou o timer do ARM pelo prazo, sem perder o tique atrasado —
   ver [Vários núcleos](#vários-núcleos).
 
@@ -15349,12 +15455,13 @@ na parte 2/2, o caso dos trechos de 6 ms mascarados mediu o relógio em 50,
 o pulso do núcleo 0 em 50 e o contador em 50 períodos; no holdover da
 bancada de tempo, na parte 3/3, o relógio do kernel andou a -24 ppm do
 contador, contra -12 681 antes. Na mesma CI, o holdover do x86 mediu +6216
-ppm — 2069 segundos no relógio do kernel em 2056 do contador —, e em três
+ppm — 2069 segundos no relógio do kernel em 2056 do hospedeiro —, e em três
 das CIs 512 a 519, de +6194 a +10 082; nas outras, de -808 a +16. Duas
 causas dão números assim, e as duas mudam a cada boot: a conta dupla de
 `tempo::avancar` com a grade de tiques de cada núcleo, que o APIC
 periódico do x86 tinha desde antes do #455 e que o adversário do #455
-achou, e o período do APIC calibrado curto. O #455-B tira as duas — ver
+achou, e o período do APIC calibrado fora do certo — curto, o relógio à
+frente; longo, atrás. O #455-B tira as duas — ver
 [Vários núcleos](#vários-núcleos).
 
 A CI 521 (`776b1ba`, o lote A5) caiu pela infraestrutura, e não pelo

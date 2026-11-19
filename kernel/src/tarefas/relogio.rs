@@ -76,7 +76,7 @@ pub struct Dormir {
     vaga: Option<usize>,
 }
 
-/// Dorme por `ticks` interrupções do timer.
+/// Dorme por `ticks` períodos do timer — ver `tempo::ticks`.
 pub fn por_ticks(ticks: u64) -> Dormir {
     Dormir {
         alvo: crate::tempo::ticks().saturating_add(ticks),

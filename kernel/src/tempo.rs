@@ -75,7 +75,8 @@ pub fn tick() {
 /// viu. Os timers das duas arquiteturas — o `gic` do ARM e o `apic` do x86 —
 /// garantem isso com três propriedades, que são invariantes:
 ///
-/// 1. todo tique roda no ponto da grade dele ou depois, nunca antes: um
+/// 1. todo tique roda no ponto da grade dele ou depois, nunca antes: no
+///    ARM o timer só levanta a linha com o contador no prazo; no x86 um
 ///    disparo que chega antes do prazo só rearma, e não é tique;
 /// 2. o rearme pula todo ponto que não está no futuro ([`proximo_prazo`]);
 /// 3. todos os núcleos estão na mesma grade: os pontos `origem + k ·
@@ -85,9 +86,12 @@ pub fn tick() {
 /// seguinte do mesmo núcleo, a um ponto depois de tudo o que ele viu; e
 /// dois tiques do mesmo ponto, em núcleos diferentes, andam o relógio uma
 /// vez só. O relógio anda no máximo uma vez por ponto: nunca à frente do
-/// contador da arquitetura. Atrás, sim — um período em que nenhum núcleo
-/// tiqueia não volta, e uma parada do hospedeiro, que anda o contador e
-/// não deixa ninguém tiquear, deixa o relógio para trás.
+/// contador da arquitetura — no boot do x86 também: na conferência do APIC
+/// contra o PIT, só o PIT o anda, e o APIC depois de assumi-lo
+/// (`apic::assumir_o_relogio`); até o #455-C os dois o andavam juntos ali.
+/// Atrás, sim — um período em que nenhum núcleo tiqueia não volta, e uma
+/// parada do hospedeiro, que anda o contador e não deixa ninguém tiquear,
+/// deixa o relógio para trás.
 ///
 /// Sem a terceira — uma grade por núcleo, cada uma na sua fase: o APIC
 /// periódico do x86 desde sempre, e o timer do ARM depois do #455 —, um
@@ -208,8 +212,9 @@ pub fn frequencia_hz() -> u32 {
 ///   transbordo do kernel de depuração seria um pânico. Um intervalo zero
 ///   vale um.
 /// - **O prazo ainda no futuro**, o atraso negativo, fica: a conta devolve
-///   `vencido`. É o disparo que chegou antes do prazo — no x86 acontece, e o
-///   rearme fica no mesmo ponto; no ARM não, e a suíte conta quantas vezes.
+///   `vencido`. É o disparo que chegou antes do prazo — no x86 pode
+///   acontecer, e o rearme fica no mesmo ponto; no ARM não, e a suíte conta
+///   quantas vezes.
 /// - **Um atraso de 2^63 ciclos ou mais** lê-se como negativo, e o prazo
 ///   também fica. São séculos a qualquer frequência — ver o `PRAZO` do ARM,
 ///   onde o comparador do timer, sem sinal, faz da volta do contador um

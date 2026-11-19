@@ -1000,10 +1000,10 @@ fn incerteza_sem_acordo(
 ///   +6 194 a +10 082 ppm em quatro das oito CIs de 512 a 520 — a ordem de
 ///   grandeza do período do APIC calibrado curto —, e o caso do adversário
 ///   do #455 mediu a conta dupla nas duas arquiteturas.
-/// - **Para trás: -3 000 ppm.** Largo, para as paradas do hospedeiro — seis
-///   segundos sem tique em meia hora —, e estreito para o relógio que perdia
-///   o atraso de cada interrupção: o ARM antes do #455, de -8 318 a -12 681
-///   ppm nas CIs. Depois dele, -24.
+/// - **Para trás: -3 000 ppm.** Largo, para as paradas do hospedeiro — 5,4
+///   segundos sem tique em meia hora, uns seis nos 35 minutos da medida —,
+///   e estreito para o relógio que perdia o atraso de cada interrupção: o
+///   ARM antes do #455, de -8 318 a -12 681 ppm nas CIs. Depois dele, -24.
 fn taxa_do_relogio(mono_ppm: Option<i64>) -> Result<i64, String> {
     const A_FRENTE_PPM: i64 = 100;
     const ATRAS_PPM: i64 = -3_000;
@@ -4286,7 +4286,8 @@ mod testes {
     /// A guarda da taxa do relógio no holdover, com os números das CIs.
     #[test]
     fn o_relogio_do_kernel_nao_anda_a_frente_do_contador_no_holdover() {
-        // O ARM depois do #455, o x86 perto de zero, e paradas do hospedeiro.
+        // O ARM depois do #455, o x86 das CIs perto de zero e o -808 da CI 512,
+        // e os dois limites.
         for ppm in [-24, -25, -34, 10, 16, -808, 100, -3_000] {
             assert_eq!(taxa_do_relogio(Some(ppm)), Ok(ppm), "{ppm}");
         }

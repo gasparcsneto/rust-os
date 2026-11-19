@@ -2,7 +2,7 @@
 //!
 //! # Por que não os tiques
 //!
-//! O relógio do kernel ([`crate::tempo`]) conta as interrupções do timer, e
+//! O relógio do kernel ([`crate::tempo`]) conta os períodos do timer, e
 //! tique perdido não volta: o emulador junta interrupções quando o
 //! processador emulado fica sem vez no hospedeiro, e o relógio anda devagar
 //! sem dizer nada — 5% de perda são 51 s de erro em 1024 s, entre duas

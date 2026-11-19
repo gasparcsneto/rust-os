@@ -152,9 +152,9 @@ static BASE: AtomicU64 = AtomicU64::new(0);
 /// `frequencia / contagem` é autoconsistente sobre a premissa errada.
 static FREQUENCIA_DO_CONTADOR: AtomicU32 = AtomicU32::new(0);
 
-/// A contagem de um período no contador do APIC, no primeiro núcleo — só
-/// para o relatório, e diferente de zero quando o timer foi programado e
-/// conferido ([`pronto`]).
+/// A contagem de um período no contador do APIC, no primeiro núcleo. Não
+/// programa nada — o timer é armado pela grade ([`PRAZO`]) —: diferente de
+/// zero, diz que o timer foi programado e conferido ([`pronto`]).
 ///
 /// Sai com `Release`, depois da grade ([`ORIGEM`], [`INTERVALO`],
 /// [`CICLOS_POR_DECREMENTO`]); cada núcleo secundário a lê com `Acquire`
@@ -207,7 +207,7 @@ static CONTAGEM: AtomicU32 = AtomicU32::new(0);
 ///
 /// A contagem é a distância no TSC convertida pela razão entre os dois
 /// contadores medida na calibração ([`CICLOS_POR_DECREMENTO`]), arredondada
-/// para cima e com um milésimo a mais. Se ainda assim o APIC disparar antes
+/// para cima e com 1/1024 a mais. Se ainda assim o APIC disparar antes
 /// do prazo, o disparo não é tique: o handler só rearma para o mesmo prazo
 /// ([`rearmar`]). É a primeira das três propriedades de `tempo::avancar`.
 ///
@@ -964,8 +964,8 @@ fn armar_o_primeiro() {
 
 /// Programa o disparo único deste núcleo para o prazo `prazo` do TSC, a
 /// partir do TSC `agora`: a distância convertida em contagem pela razão da
-/// calibração ([`CICLOS_POR_DECREMENTO`]), arredondada para cima e com um
-/// milésimo a mais — a razão medida erra pouco, e o disparo antes do prazo
+/// calibração ([`CICLOS_POR_DECREMENTO`]), arredondada para cima e com
+/// 1/1024 a mais — a razão medida erra pouco, e o disparo antes do prazo
 /// custa uma interrupção a mais. Um prazo que já passou dispara já (a
 /// contagem um): a contagem zero pararia o timer.
 fn armar_para(prazo: u64, agora: u64) {

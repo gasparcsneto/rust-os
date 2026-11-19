@@ -164,7 +164,8 @@ static INTERVALO: AtomicU32 = AtomicU32::new(0);
 /// inteiro. Todo núcleo perdia o atraso de cada interrupção, e com eles o
 /// relógio: a bancada de tempo media o relógio do kernel do ARM a -12 681
 /// ppm do contador, contra -25 no x86 na mesma rodada — no x86 a taxa
-/// mudava de uma CI para outra, pelo período do APIC (ver `apic::PRAZO`). E
+/// mudava de uma CI para outra, pela conta dupla da grade de cada núcleo e
+/// pelo período do APIC (ver `apic::PRAZO`). E
 /// o núcleo dos dispositivos, que recolhe os dispositivos e apresenta a
 /// tela no tique e no cutucão, perdia do pulso também tudo o que fazia ali
 /// — na CI 508, "relogio andou 51, o primeiro nucleo contou 40". Essa parte

@@ -2,8 +2,8 @@
 //!
 //! # Para que serve, e para que não serve
 //!
-//! O kernel sabe há quanto tempo está ligado — [`crate::tempo`] conta as
-//! interrupções do timer. Isso não diz que horas são, e um boot o zera. Um
+//! O kernel sabe há quanto tempo está ligado — [`crate::tempo`] conta os
+//! períodos do timer. Isso não diz que horas são, e um boot o zera. Um
 //! prazo que precisa sobreviver a um reboot — o de uma mensagem, o de um
 //! desafio gravado — precisa de um relógio que continue andando com a
 //! máquina desligada. É o RTC: o CMOS do PC, alimentado por bateria; a
