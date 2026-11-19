@@ -201,8 +201,9 @@ pub enum Programa {
     /// Um fio do kernel: não há imagem a atenuar, e quem decide é só a
     /// autoridade.
     Kernel,
-    /// Um processo que ainda não carregou a imagem — o fio que
-    /// `usuario::lancar` cria, antes de ler o executável. Não exerce nada.
+    /// Um processo que ainda não carregou a imagem — o fio que o
+    /// lançamento (`usuario::lancar_por`) cria, antes de carregar o
+    /// executável. Não exerce nada.
     SemImagem,
     /// A imagem que o processo executa: o manifesto dela, se tem um — sem
     /// manifesto, não exerce nada —, o resumo BLAKE2s do executável, e,
@@ -2104,9 +2105,10 @@ pub fn recusa_da_execucao(codigo: Codigo, motivo: &str) -> Option<Recusa> {
     .flatten()
 }
 
-/// O alvo `texto` de uma contenção é o recurso que o gate decidiu para o
-/// comando em execução neste fio: o handler só contém, ou solta, quem foi
-/// decidido.
+/// O alvo `texto` — de uma contenção, ou o caminho de um lançamento — é um
+/// dos recursos que o gate decidiu para o comando em execução neste fio: o
+/// handler só contém, ou solta, quem foi decidido, e só se lança o caminho
+/// decidido (ver [`reconfirmar_o_lancamento`]).
 pub fn alvo_decidido(texto: &str) -> bool {
     do_comando_deste_fio(|c| {
         c.decidido
@@ -4213,7 +4215,10 @@ const BIFURCACAO: &str = "process.fork";
 
 /// A recusa de quem pede sem decisão — o comando que não foi decidido pelo
 /// gate, o pedido nativo sem o programa que o gate decidiu —: a mesma de
-/// [`reconfirmar`] fora de um comando autorizado.
+/// [`reconfirmar`] fora de um comando autorizado; e o lançamento que não é o
+/// do comando — outra autoridade, um caminho que o gate não decidiu — e o
+/// do kernel por conta própria depois do boot (ver
+/// [`reconfirmar_o_lancamento`]).
 const FORA_DE_UM_COMANDO: (Codigo, &str) = (Codigo::Error, "fora de um comando autorizado");
 
 /// A recusa de quem tem credencial com o journal recusado: as revogações
@@ -4395,15 +4400,16 @@ pub fn reconfirmar_bifurcacao(autoridade: Autoridade) -> Result<(), (Codigo, &'s
 ///
 /// Só dois arquivos o nomeiam — este e `usuario/mod.rs`, que lança —, e o
 /// `xtask` confere: [`Lancador::Kernel`], que passa fora de um comando sem
-/// decisão nenhuma, não se diz de outro lugar.
+/// decisão nenhuma até o boot fechar os lançamentos do kernel
+/// ([`fechar_os_lancamentos_do_kernel`]), não se diz de outro lugar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lancador {
     /// O comando em execução neste fio — o `user.run`, pedido pelo canal,
     /// pelo console ou pela interface nativa —, que o gate decidiu.
     Comando,
     /// O próprio kernel, por conta própria, e não um comando: o servidor de
-    /// janelas e o Terminal, no boot (`usuario::lancar`); e a suíte, que
-    /// lança direto. Ninguém pediu.
+    /// janelas e o Terminal, no boot (`usuario::lancar_como_sistema`); e a
+    /// suíte, que lança direto. Ninguém pediu.
     Kernel,
 }
 
@@ -4422,6 +4428,37 @@ pub enum Lancador {
 /// lançadores: dentro de um comando, o lançamento é dele, diga quem lança o
 /// que disser.
 ///
+/// # Com a autoridade e o caminho do comando
+///
+/// O comando decidido de novo diz que **ele** ainda vale, e não que o
+/// lançamento é o dele. Dentro do `user.run` de um operador, um lançamento
+/// como o sistema (`usuario::lancar_como_sistema`), um `usuario::lancar_como`
+/// com outra autoridade, ou um `usuario::lancar_conferido` com outro caminho
+/// passavam: a auditoria gravava "processo N lancado" como a execução da
+/// decisão do operador, e o processo nascia com outra autoridade, ou rodava
+/// o que o gate não decidiu (o item 2 do lote A3 do #448). O único
+/// chamador — o handler do `user.run` — passa a autoridade de agora e o
+/// mesmo `path`, e a garantia era só essa linha. Num comando decidido para
+/// `process.run`, qualquer que seja o lançador, o lançamento é o do
+/// comando, ou não é:
+///
+/// - a `autoridade` do processo que nasce é a do comando
+///   ([`autoridade_atual`]);
+/// - o `caminho` é um dos recursos que o gate decidiu ([`alvo_decidido`]),
+///   cru, como o handler o leu do pedido e o gate o decidiu. O exemplo
+///   embutido, sem caminho, é o recurso vazio — e é assim que o gate decide
+///   o `user.run` sem `path`: o `process.run` é de caminho, e o vazio não se
+///   normaliza, `DENY_RESOURCE` para todo papel que tem `process.run`, o
+///   sistema inclusive. O exemplo nunca nasce de dentro de um comando
+///   decidido.
+///
+/// Recusado como fora de um comando autorizado — `ERROR` —, que quem chama
+/// grava como a execução do comando, como a recusa do comando que não é o
+/// `user.run`. A autoridade e o caminho vêm antes do comando decidido de
+/// novo: o lançamento que não é o do comando é recusado por isso, qualquer
+/// que seja o estado do comando. Não se conta quantos lançamentos o comando
+/// faz: a amarração é pela autoridade e pelo caminho.
+///
 /// # Sem decisão, recusa
 ///
 /// O que não se sabe não passa: fora de um comando decidido, a recusa de
@@ -4435,23 +4472,124 @@ pub enum Lancador {
 ///   lançamento é do comando, e o comando é decidido de novo, diga quem
 ///   lança o que disser. Fora da suíte, só o boot diz isso
 ///   (`usuario::lancar_o_servidor_de_janelas` e `usuario::lancar_o_terminal`,
-///   pelo `usuario::lancar`) — o `xtask` confere quem chama cada um;
+///   pelo `usuario::lancar_como_sistema`) — o `xtask` confere quem chama
+///   cada um;
 /// - a suíte que chama o handler do `user.run` direto, sem o gate: o
 ///   comando que ela monta não tem decisão (`como_comando_de_teste`,
 ///   `como_canal_de_teste`), e só ela o monta. Fora da compilação da
 ///   suíte o braço dele não existe, e o comando sem decisão é recusado.
 ///
+/// # O kernel só lança por conta própria até o boot acabar de lançar
+///
+/// O `main.rs` fecha os lançamentos do kernel por conta própria depois do
+/// servidor de janelas e do Terminal ([`fechar_os_lancamentos_do_kernel`]);
+/// daí em diante, fora da suíte — que não os fecha no boot, e lança direto,
+/// caso a caso; só o caso do trinco os fecha, e os reabre —, também o
+/// [`Lancador::Kernel`] fora de um comando é recusado como fora de um
+/// comando autorizado, gravado em nome do kernel. A documentação já dizia
+/// "fora da suíte, só o boot", e o `xtask` confere quem chama; o trinco faz
+/// o mesmo valer em tempo de execução — também para um lançamento do kernel
+/// por conta própria num outro fio, sem comando, que a conferência das
+/// fontes não distingue do boot. Nenhum caminho de produção lança como o
+/// kernel depois do boot: o Terminal que a barra abre de novo, o servidor
+/// de janelas o lança — um processo, pelo `bifurcar` e pelo `executar`,
+/// chamadas dele, pelo gate —; o NSF, a hora, a energia e o botão são fios
+/// do kernel, e não processos (o trinco do item 1 do lote A3 do #448).
+///
+/// # A mesma pergunta, antes
+///
+/// O que não é a decisão refeita — quem lança, com que autoridade, de que
+/// caminho, e o trinco — o lançamento pergunta também no começo, antes das
+/// perguntas sobre quem pede e da leitura do código
+/// ([`conferir_o_lancamento`]): sem isso, um lançamento que não é o do
+/// comando lia o arquivo com a autoridade dele, e a leitura que falhava se
+/// gravava como a execução da decisão do operador, para um recurso que ela
+/// não cobriu — e, com o trinco fechado, em nome do kernel, sem o trinco
+/// chegar a recusar (o achado 2 do adversário do lote A3 do #448). A
+/// mesma regra, mais cedo; aqui, no nascimento, ela vale inteira de novo,
+/// com o comando decidido de novo.
+///
 /// Não grava nada, como [`reconfirmar`]: quem chama grava a recusa como a
 /// execução do comando — ou, fora de um, em nome do kernel.
-pub fn reconfirmar_o_lancamento(lancador: Lancador) -> Result<(), (Codigo, &'static str)> {
+pub fn reconfirmar_o_lancamento(
+    lancador: Lancador,
+    autoridade: Autoridade,
+    caminho: Option<&str>,
+) -> Result<(), (Codigo, &'static str)> {
+    if amarrado_ao_comando(lancador, autoridade, caminho)? {
+        reconfirmar()
+    } else {
+        Ok(())
+    }
+}
+
+/// A pergunta de [`reconfirmar_o_lancamento`] sobre o lançamento — quem
+/// lança, com que autoridade e de que caminho, e o trinco do boot —, sem
+/// decidir o comando de novo, para o começo do lançamento
+/// (`usuario::lancar_conferido` e `usuario::lancar_pelo_kernel`): o que
+/// ela recusa não lê o código nem pergunta nada sobre quem pede, e a
+/// recusa é a mesma da última palavra — fora de um comando autorizado,
+/// `ERROR` —, que quem chama grava como ela. A última palavra continua
+/// inteira no nascimento.
+///
+/// Não grava nada.
+pub fn conferir_o_lancamento(
+    lancador: Lancador,
+    autoridade: Autoridade,
+    caminho: Option<&str>,
+) -> Result<(), (Codigo, &'static str)> {
+    amarrado_ao_comando(lancador, autoridade, caminho).map(|_| ())
+}
+
+/// O lançamento é o do comando, ou uma das exceções sem decisão — ver
+/// [`reconfirmar_o_lancamento`]: `Ok(true)` num comando decidido para
+/// `process.run`, com a autoridade e um dos caminhos dele — falta decidi-lo
+/// de novo ([`reconfirmar`]) —; `Ok(false)` numa exceção; e a recusa, fora
+/// de um comando autorizado.
+fn amarrado_ao_comando(
+    lancador: Lancador,
+    autoridade: Autoridade,
+    caminho: Option<&str>,
+) -> Result<bool, (Codigo, &'static str)> {
     let decidido = do_comando_deste_fio(|c| c.decidido.as_ref().map(|d| d.permissao));
     match (decidido, lancador) {
-        (Some(Some(Some(Permissao::ProcessRun))), _) => reconfirmar(),
+        (Some(Some(Some(Permissao::ProcessRun))), _) => {
+            if autoridade != autoridade_atual() || !alvo_decidido(caminho.unwrap_or("")) {
+                return Err(FORA_DE_UM_COMANDO);
+            }
+            Ok(true)
+        }
         #[cfg(feature = "modo-teste")]
-        (Some(None), _) => Ok(()),
-        (None, Lancador::Kernel) => Ok(()),
+        (Some(None), _) => Ok(false),
+        (None, Lancador::Kernel) if !LANCAMENTOS_DO_KERNEL_FECHADOS.load(Ordering::Acquire) => {
+            Ok(false)
+        }
         _ => Err(FORA_DE_UM_COMANDO),
     }
+}
+
+/// O boot já lançou os programas dele — ver [`fechar_os_lancamentos_do_kernel`]
+/// e [`reconfirmar_o_lancamento`]. Fora da suíte, nada o reabre.
+static LANCAMENTOS_DO_KERNEL_FECHADOS: AtomicBool = AtomicBool::new(false);
+
+/// Fecha os lançamentos do kernel por conta própria, fora de um comando: o
+/// `main.rs` o chama depois de lançar o servidor de janelas e o Terminal, e
+/// só ele, fora da suíte — o `xtask` confere que, fora deste arquivo, onde
+/// se define, só o `main.rs` o nomeia, e lá uma vez, logo depois dos dois
+/// lançamentos, no mesmo bloco, pelo caminho do pacote, que nada sombreia,
+/// e fora de uma macro. Fechar
+/// só estreita: chamado antes da hora, o boot não lançaria os dois — o
+/// servidor e o Terminal ficariam de fora, com a recusa no log e na
+/// auditoria —, e nada que o gate não decidiu nasceria.
+pub fn fechar_os_lancamentos_do_kernel() {
+    LANCAMENTOS_DO_KERNEL_FECHADOS.store(true, Ordering::Release);
+}
+
+/// Só para a suíte: reabre os lançamentos do kernel por conta própria,
+/// depois do caso que os fecha — a suíte lança direto, caso a caso.
+#[cfg(feature = "modo-teste")]
+pub fn reabrir_os_lancamentos_do_kernel_de_teste() {
+    LANCAMENTOS_DO_KERNEL_FECHADOS.store(false, Ordering::Release);
 }
 
 /// O escalonador recusou o nascimento porque a cota encheu entre a

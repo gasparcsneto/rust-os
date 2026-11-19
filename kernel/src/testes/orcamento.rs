@@ -168,7 +168,7 @@ const DO_ANONIMO: i64 = 76;
 /// sem atendê-la: `na_fila` é quantos estão lá depois dele. O fio.
 fn anonimo_na_fila(na_fila: usize) -> Result<u64, &'static str> {
     let programa = alloc::format!("{}/anonimo", crate::usuario::DIRETORIO_DOS_COMPILADOS);
-    let fio = crate::usuario::lancar(Some(&programa))?;
+    let fio = crate::usuario::lancar_como_sistema(Some(&programa))?;
     ate(&|| nativo::pendentes_de_teste() >= na_fila, 600, None)
         .map_err(|_| "o pedido do anonimo nao chegou a fila")?;
     if nativo::pendentes_de_teste() != na_fila {

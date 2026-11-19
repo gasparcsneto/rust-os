@@ -4093,16 +4093,21 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     (".handler)(", &["kernel/src/autorizacao.rs"]),
     // O código que vira processo: lido e conferido por uma função só — a
     // do código de fora da imagem, com selo — e carregado só pelas duas
-    // portas, o lançamento e o `executar`, que a usam.
+    // portas, o lançamento e o `executar`, que a usam. Fora do módulo
+    // `usuario`, quem os fecha é a visibilidade (`pub(super)`), que o
+    // compilador confere em qualquer forma da chamada, e
+    // [`conferir_os_carregadores`] confere que ela não se alarga; dentro do
+    // módulo, a visibilidade não separa os irmãos, e quem confere que só o
+    // `usuario/mod.rs` e o arquivo de cada um os chamam, em qualquer forma,
+    // é [`carregadores_nos_irmaos`] — e que ninguém no módulo lhes dá outro
+    // nome, [`carregadores_renomeados`] —; estas duas regras, pelo texto com
+    // o caminho, ficam como eram. (O lançamento do
+    // sistema, que se protegia aqui pelo texto com o caminho,
+    // `usuario::lancar(`, tem nome único desde o lote A3 do #448,
+    // `lancar_como_sistema`, protegido pela palavra: ver
+    // [`NOMES_PROTEGIDOS`].)
     ("codigo::obter(", &["kernel/src/usuario/mod.rs"]),
     ("programa::carregar(", &["kernel/src/usuario/mod.rs"]),
-    // O lançamento do kernel por conta própria, com a autoridade do
-    // sistema: o boot o pede pelos dois lançamentos dele — o servidor de
-    // janelas e o Terminal, nomes protegidos abaixo —, que o chamam de
-    // dentro de `usuario/mod.rs`, sem o caminho. Com o caminho, só a suíte.
-    // Fora de um comando, a última palavra do nascimento o deixa sem
-    // decisão nenhuma (`autorizacao::reconfirmar_o_lancamento`).
-    ("usuario::lancar(", &[]),
     // Escrever no disco: só o journal de estado, o volume do armazém e a
     // atualização A/B, cada um pela sua janela — o journal na de estado, o
     // volume na dele, a atualização na do controle de boot e na do slot
@@ -6254,8 +6259,330 @@ fn conferir_codigo_conferido(raiz: &Path) -> Result<Vec<String>, String> {
     Ok(fora)
 }
 
-/// A abertura da persistência antes de quem atende: devolve o que estiver
-/// fora de ordem no `kernel/src/main.rs`.
+/// Os carregadores de um programa — a leitura conferida do código e os
+/// passos da carga —, pelo arquivo e pelo nome: só o módulo `usuario` os
+/// alcança.
+///
+/// # Por que pela visibilidade, e o que [`conferir_os_carregadores`] faz
+///
+/// Eram `pub`, e só dois deles tinham a regra por texto com o caminho
+/// ([`CHAMADAS_PROTEGIDAS`]), que um `use` contorna; o `preparar`, o
+/// `trocar`, o `mapear` e o `entrar` não tinham regra nenhuma (o item 1 do
+/// lote A3 do #448). Agora são `pub(super)`: fora do módulo `usuario`, a
+/// chamada não compila — em qualquer forma, com qualquer apelido, e o
+/// `pub use` que os reexportasse também não. O compilador confere a
+/// visibilidade de agora; a conferência impede que ela se alargue depois
+/// sem ninguém notar. Dentro do módulo, a visibilidade não separa os
+/// irmãos do `usuario/mod.rs`: quem confere ali é
+/// [`carregadores_nos_irmaos`].
+const CARREGADORES: &[(&str, &str)] = &[
+    ("kernel/src/usuario/codigo.rs", "obter"),
+    ("kernel/src/usuario/programa.rs", "carregar"),
+    ("kernel/src/usuario/programa.rs", "preparar"),
+    ("kernel/src/usuario/programa.rs", "trocar"),
+    ("kernel/src/usuario/programa.rs", "mapear"),
+    ("kernel/src/usuario/programa.rs", "entrar"),
+];
+
+/// O que pode vir antes do `fn` de um carregador: nada — privado ao
+/// arquivo —, ou uma visibilidade que não passa do módulo `usuario`.
+const DENTRO_DO_USUARIO: &[&str] = &["", "pub(self)", "pub(super)", "pub(in crate::usuario)"];
+
+/// O que só existe na compilação da suíte: o `executar`, que entra num
+/// programa sem a conferência do código ([`CARREGADORES`]) e sem o gate —
+/// é o que os casos querem, com as imagens estáticas deles —, e os
+/// embrulhos dos carregadores com que a suíte os alcança de fora do módulo
+/// `usuario` (nomes protegidos, ver [`NOMES_PROTEGIDOS`]).
+const SO_NA_SUITE: &[(&str, &str)] = &[
+    ("kernel/src/usuario/codigo.rs", "obter_de_teste"),
+    ("kernel/src/usuario/programa.rs", "executar"),
+    ("kernel/src/usuario/programa.rs", "carregar_de_teste"),
+    ("kernel/src/usuario/programa.rs", "entrar_de_teste"),
+];
+
+/// Os tipos dos passos da carga — o que um passo de [`CARREGADORES`]
+/// devolve ao seguinte —, pelo arquivo que os define: como os carregadores,
+/// só ele e o `usuario/mod.rs` os nomeiam ([`carregadores_nos_irmaos`]).
+const PASSOS_DA_CARGA: &[(&str, &str)] = &[
+    ("kernel/src/usuario/programa.rs", "Preparada"),
+    ("kernel/src/usuario/programa.rs", "Trocada"),
+];
+
+/// O que um irmão do `usuario/mod.rs` — outro arquivo do módulo `usuario`,
+/// ou de um submódulo dele — nomeia dos carregadores ([`CARREGADORES`]), do
+/// que só a suíte tem ([`SO_NA_SUITE`]) e dos passos da carga
+/// ([`PASSOS_DA_CARGA`]), fora do arquivo que define cada um: a linha, no
+/// código ([`so_o_codigo`]), com o nome como palavra ([`tem_a_palavra`]).
+///
+/// # Por que dentro do módulo, e não só a visibilidade
+///
+/// O `pub(super)` de um filho do módulo `usuario` vale para o módulo
+/// inteiro e os descendentes dele — os irmãos inclusive. Um
+/// `use super::programa::{carregar as abrir, entrar as descer};` em
+/// `usuario/elf.rs`, e um `pub fn` dele que os chamasse, entrariam num
+/// programa sem a conferência do código, sem o gate, sem a última palavra,
+/// sem o trinco e sem o registro do nascimento — um segundo caminho de
+/// lançamento, que o compilador aceita e a regra por texto com o caminho
+/// ([`CHAMADAS_PROTEGIDAS`]) não via (o achado 1 do adversário do lote A3
+/// do #448). Dentro do módulo, só o `usuario/mod.rs` os chama; o arquivo
+/// de cada um o define e o usa. Fora do módulo, quem confere é o
+/// compilador.
+fn carregadores_nos_irmaos(relativo: &str, fonte: &str) -> Vec<String> {
+    if !relativo.starts_with("kernel/src/usuario/") || relativo == "kernel/src/usuario/mod.rs" {
+        return Vec::new();
+    }
+    let codigo: String = so_o_codigo(fonte).into_iter().collect();
+    let mut fora = Vec::new();
+    for (n, (linha, so_codigo)) in fonte.lines().zip(codigo.lines()).enumerate() {
+        for (dono, nome) in CARREGADORES
+            .iter()
+            .chain(SO_NA_SUITE)
+            .chain(PASSOS_DA_CARGA)
+        {
+            if *dono != relativo && tem_a_palavra(so_codigo, nome) {
+                fora.push(format!(
+                    "{relativo}:{}: `{nome}` fora de `usuario/mod.rs` e de `{dono}`: um irmão não \
+                     alcança a carga de um programa: {}",
+                    n + 1,
+                    linha.trim()
+                ));
+            }
+        }
+    }
+    fora
+}
+
+/// Onde um carregador, um nome do que só a suíte tem ou um passo da carga
+/// ganha outro nome num arquivo do módulo `usuario` — o `usuario/mod.rs` e
+/// o arquivo de cada um inclusive —: a regra do `as` de
+/// [`onde_um_nome_protegido_se_renomeia`], para estes nomes
+/// ([`onde_se_renomeia`]).
+///
+/// # Por quê
+///
+/// Um `use programa::{carregar as carga, entrar as descida};` no
+/// `usuario/mod.rs` — que pode nomear os carregadores — deixava o apelido
+/// ao alcance dos irmãos, que os chamavam sem nomeá-los, e
+/// [`carregadores_nos_irmaos`] não via nada (o achado 2 do adversário do
+/// delta do lote A3 do #448). Fora do módulo, não: lá quem confere é o
+/// compilador, e o `arch` tem um `entrar as entrar_em_usuario` que é outra
+/// coisa.
+fn carregadores_renomeados(relativo: &str, fonte: &str) -> Vec<String> {
+    if !relativo.starts_with("kernel/src/usuario/") {
+        return Vec::new();
+    }
+    let nomes = CARREGADORES
+        .iter()
+        .chain(SO_NA_SUITE)
+        .chain(PASSOS_DA_CARGA)
+        .map(|(_, nome)| *nome);
+    onde_se_renomeia(fonte, nomes)
+        .into_iter()
+        .map(|(linha, nome)| {
+            format!(
+                "{relativo}:{linha}: `{nome} as`: a carga de um programa não ganha outro nome no \
+                 módulo `usuario`, nem no `usuario/mod.rs`"
+            )
+        })
+        .collect()
+}
+
+/// As declarações de `fn <nome>` em `codigo` — uma fonte só com o código,
+/// ver [`so_o_codigo`] —: a linha do `fn`, contada do 1; o que vem antes
+/// dele desde o fim do item anterior — o `;`, a chave ou o `]` de um
+/// atributo —, com os espaços e as quebras de linha reduzidos a um espaço:
+/// a visibilidade e o que mais a declaração tiver; e onde isso começa,
+/// logo depois do `;`, da chave ou do `]`.
+fn declaracoes_de(codigo: &[char], nome: &str) -> Vec<(usize, String, usize)> {
+    let de_nome = |x: char| x.is_alphanumeric() || x == '_';
+    let n: Vec<char> = nome.chars().collect();
+    let mut achadas = Vec::new();
+    for i in 0..codigo.len() {
+        let e_fn = codigo[i..].starts_with(&['f', 'n'])
+            && (i == 0 || !de_nome(codigo[i - 1]))
+            && !codigo.get(i + 2).is_some_and(|&x| de_nome(x));
+        if !e_fn {
+            continue;
+        }
+        let mut k = i + 2;
+        while codigo.get(k).is_some_and(|x| x.is_whitespace()) {
+            k += 1;
+        }
+        if codigo[k.min(codigo.len())..].starts_with(&['r', '#']) {
+            k += 2;
+        }
+        let e_o_nome = codigo.get(k..k + n.len()) == Some(&n[..])
+            && !codigo.get(k + n.len()).is_some_and(|&x| de_nome(x));
+        if !e_o_nome {
+            continue;
+        }
+        let comeco = codigo[..i]
+            .iter()
+            .rposition(|&x| matches!(x, ';' | '{' | '}' | ']'))
+            .map_or(0, |p| p + 1);
+        let antes: String = codigo[comeco..i].iter().collect();
+        let antes = antes.split_whitespace().collect::<Vec<_>>().join(" ");
+        let linha = 1 + codigo[..i].iter().filter(|&&x| x == '\n').count();
+        achadas.push((linha, antes, comeco));
+    }
+    achadas
+}
+
+/// Os atributos logo antes da posição `ate` de `codigo` — uma fonte só com
+/// o código ([`so_o_codigo`]) —, de trás para a frente, cada um do `#` ao
+/// `]` que o fecha, só com espaços entre eles e até `ate`. Para no que não
+/// é atributo.
+fn atributos_antes(codigo: &[char], ate: usize) -> Vec<(usize, usize)> {
+    let antes_dos_espacos = |mut k: usize| {
+        while k > 0 && codigo[k - 1].is_whitespace() {
+            k -= 1;
+        }
+        k
+    };
+    let mut achados = Vec::new();
+    let mut fim = antes_dos_espacos(ate);
+    while fim > 0 && codigo[fim - 1] == ']' {
+        let mut nivel = 0usize;
+        let mut abre = None;
+        for j in (0..fim).rev() {
+            match codigo[j] {
+                ']' => nivel += 1,
+                '[' => {
+                    nivel -= 1;
+                    if nivel == 0 {
+                        abre = Some(j);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(abre) = abre else { break };
+        let cerquilha = antes_dos_espacos(abre);
+        if cerquilha == 0 || codigo[cerquilha - 1] != '#' {
+            break;
+        }
+        achados.push((cerquilha - 1, fim));
+        fim = antes_dos_espacos(cerquilha - 1);
+    }
+    achados
+}
+
+/// O atributo que deixa um item só na compilação da suíte.
+const ATRIBUTO_DA_SUITE: &str = "#[cfg(feature = \"modo-teste\")]";
+
+/// Se `antes` — o que vem antes de um `fn` desde os atributos dele, como
+/// [`declaracoes_de`] o devolve — é só uma visibilidade, ou nada.
+fn so_a_visibilidade(antes: &str) -> bool {
+    let v: String = antes.chars().filter(|x| !x.is_whitespace()).collect();
+    v.is_empty()
+        || v == "pub"
+        || v.strip_prefix("pub(")
+            .and_then(|r| r.strip_suffix(')'))
+            .is_some_and(|dentro| !dentro.contains(['(', ')']))
+}
+
+/// O que a fonte `relativo` tem de carregador alargado: declarado com
+/// outra visibilidade que as de [`DENTRO_DO_USUARIO`], ou não declarado
+/// uma vez só — a conferência cega —; o que tem de ser só da suíte
+/// ([`SO_NA_SUITE`]) sem o atributo dela logo acima da declaração; e uma
+/// macro definida no arquivo.
+///
+/// # Nenhuma macro nos arquivos dos carregadores
+///
+/// Uma macro do arquivo leva o que as conferências procuram para dentro da
+/// invocação dela: `macro_rules! so_na_suite { (# [cfg $c:tt] $($t:tt)*) =>
+/// { $($t)* }; }`, em volta do `executar` com o atributo da suíte, tirava o
+/// atributo da compilação, e o atributo continuava no texto, logo acima do
+/// `fn` (o achado 4 do adversário do delta do lote A3 do #448). Os dois
+/// arquivos não têm macro nenhuma. Os outros donos de nomes protegidos não
+/// entram: o `interpretador.rs` tem as duas dele, `saida!` e `saidaln!`.
+fn carregadores_alargados(relativo: &str, fonte: &str) -> Vec<String> {
+    let codigo = so_o_codigo(fonte);
+    let cru: Vec<char> = fonte.chars().collect();
+    let mut fora = Vec::new();
+    let so_codigo: String = codigo.iter().collect();
+    for (n, linha) in so_codigo.lines().enumerate() {
+        if tem_a_palavra(linha, "macro_rules") {
+            fora.push(format!(
+                "{relativo}:{}: `macro_rules!` num arquivo dos carregadores: uma macro dele \
+                 tiraria o que as conferências procuram",
+                n + 1
+            ));
+        }
+    }
+    for (_, nome) in CARREGADORES.iter().filter(|(a, _)| *a == relativo) {
+        match &declaracoes_de(&codigo, nome)[..] {
+            [(_, antes, _)] if DENTRO_DO_USUARIO.contains(&antes.as_str()) => {}
+            [(n, antes, _)] => fora.push(format!(
+                "{relativo}:{n}: `{nome}` declarado `{antes} fn`: um carregador só se alcança de \
+                 dentro do módulo `usuario`"
+            )),
+            outras => fora.push(format!(
+                "{relativo}: `fn {nome}` declarado {} vezes, e não uma: a conferência dos \
+                 carregadores está cega",
+                outras.len()
+            )),
+        }
+    }
+    let sem_espacos = |x: &[char]| x.iter().filter(|c| !c.is_whitespace()).collect::<String>();
+    for (_, nome) in SO_NA_SUITE.iter().filter(|(a, _)| *a == relativo) {
+        match &declaracoes_de(&codigo, nome)[..] {
+            [(n, antes, comeco)] => {
+                // O atributo no código: um atributo de verdade, fora dos
+                // comentários, com só atributos e a visibilidade até o `fn`
+                // — e o texto dele, lido cru nas mesmas posições, é o da
+                // suíte: no código, o texto `"modo-teste"` vira espaços.
+                // Antes, o atributo se procurava nas linhas cruas logo acima
+                // da declaração, e um comentário de bloco o escondia ali (o
+                // achado 5 do adversário do lote A3 do #448); a leitura das
+                // linhas cruas saiu, porque esta acha todo atributo que ela
+                // achava — ela só acrescentava a recusa do atributo na
+                // mesma linha do `fn`, que é Rust certo.
+                let suite: Vec<char> = ATRIBUTO_DA_SUITE.chars().collect();
+                let no_codigo = so_a_visibilidade(antes)
+                    && atributos_antes(&codigo, *comeco)
+                        .into_iter()
+                        .any(|(de, ate)| sem_espacos(&cru[de..ate]) == sem_espacos(&suite));
+                if !no_codigo {
+                    fora.push(format!(
+                        "{relativo}:{n}: `{nome}` fora da compilação da suíte: só ela o tem"
+                    ));
+                }
+            }
+            outras => fora.push(format!(
+                "{relativo}: `fn {nome}` declarado {} vezes, e não uma: a conferência dos \
+                 carregadores está cega",
+                outras.len()
+            )),
+        }
+    }
+    fora
+}
+
+/// [`carregadores_alargados`] nos arquivos dos carregadores, lidos pelo
+/// caminho: um arquivo que suma reprova, em vez de deixar a conferência
+/// cega.
+fn conferir_os_carregadores(raiz: &Path) -> Result<Vec<String>, String> {
+    let mut arquivos: Vec<&str> = CARREGADORES
+        .iter()
+        .chain(SO_NA_SUITE)
+        .map(|(a, _)| *a)
+        .collect();
+    arquivos.sort_unstable();
+    arquivos.dedup();
+    let mut fora = Vec::new();
+    for arquivo in arquivos {
+        let texto = std::fs::read_to_string(raiz.join(arquivo))
+            .map_err(|e| format!("não foi possível ler {arquivo}: {e}"))?;
+        fora.extend(carregadores_alargados(arquivo, &texto));
+    }
+    Ok(fora)
+}
+
+/// A abertura da persistência antes de quem atende, e o trinco do boot, uma
+/// vez, depois dos dois lançamentos ([`trinco_fora_de_ordem`]): devolve o
+/// que estiver fora de ordem no `kernel/src/main.rs`.
 fn conferir_a_ordem_do_boot(raiz: &Path) -> Result<Vec<String>, String> {
     const ABRIR: &str = "persistencia::abrir()";
     // O fio do botão de energia também é atendido: ele pede ao gate como o
@@ -6295,7 +6622,107 @@ fn conferir_a_ordem_do_boot(raiz: &Path) -> Result<Vec<String>, String> {
             ));
         }
     }
+    // E o trinco do boot, depois dos dois lançamentos dele.
+    fora.extend(trinco_fora_de_ordem(&texto));
     Ok(fora)
+}
+
+/// O trinco do boot no `main.rs` — `texto` —, uma vez, e depois dos dois
+/// lançamentos do kernel por conta própria, o servidor de janelas e o
+/// Terminal: antes deles, os dois seriam recusados; sem ele, o kernel
+/// lançaria por conta própria depois do boot (ver
+/// `autorizacao::fechar_os_lancamentos_do_kernel`, o trinco do item 1 do
+/// lote A3 do #448). Devolve o que estiver fora de ordem; no código, sem os
+/// comentários.
+///
+/// # As três seguidas, pelo caminho do pacote, e fora de uma macro
+///
+/// E as três chamadas seguidas, nessa ordem, no mesmo bloco, só com
+/// espaços e comentários entre elas: pela ordem do texto passavam um
+/// `#[cfg(any())]` ou um `if` na linha do trinco, o trinco num bloco à
+/// parte ou numa função que ninguém chama (o achado 8 do adversário do lote
+/// A3 do #448). Seguidas, o que tirar o trinco tira os dois lançamentos
+/// junto — o bloco com um atributo, uma condição, a função que ninguém
+/// chama —, e um boot sem o servidor de janelas e sem o Terminal não passa
+/// despercebido.
+///
+/// O trinco, pelo caminho do pacote, `crate::autorizacao::…`: pelo caminho
+/// relativo, um `mod autorizacao { pub fn fechar_os_lancamentos_do_kernel()
+/// {} }` no mesmo bloco o sombreava — ele não fechava, e os dois
+/// lançamentos continuavam —, e o `crate::` não se sombreia. E as três fora
+/// dos argumentos de uma macro ([`invocacoes_de_macro`]), que poderia
+/// devolver os lançamentos sem ele (o achado 3 do adversário do delta do
+/// lote A3).
+fn trinco_fora_de_ordem(texto: &str) -> Vec<String> {
+    const TRINCO: &str = "crate::autorizacao::fechar_os_lancamentos_do_kernel()";
+    const ANTES: [&str; 2] = [
+        "usuario::lancar_o_servidor_de_janelas()",
+        "usuario::lancar_o_terminal()",
+    ];
+    let c = so_o_codigo(texto);
+    let codigo: String = c.iter().collect();
+    let linhas: Vec<&str> = codigo.lines().collect();
+    let achadas = |marca: &str| -> Vec<usize> {
+        (0..linhas.len())
+            .filter(|&n| linhas[n].contains(marca))
+            .collect()
+    };
+    let trinco = achadas(TRINCO);
+    let [trinco] = trinco[..] else {
+        return vec![format!(
+            "kernel/src/main.rs: `{TRINCO}` aparece {} vezes, e não uma",
+            trinco.len()
+        )];
+    };
+    let mut fora = Vec::new();
+    for antes in ANTES {
+        match achadas(antes)[..] {
+            [n] if n < trinco => {}
+            [n] => fora.push(format!(
+                "kernel/src/main.rs:{}: `{antes}` depois de `{TRINCO}` (linha {}): o boot não o \
+                 lançaria",
+                n + 1,
+                trinco + 1
+            )),
+            ref outras => fora.push(format!(
+                "kernel/src/main.rs: `{antes}` aparece {} vezes, e não uma: a conferência do \
+                 trinco está cega",
+                outras.len()
+            )),
+        }
+    }
+    if fora.is_empty() {
+        let [servidor, terminal] = ANTES;
+        let seguidas = format!("{servidor}; {terminal}; {TRINCO};");
+        if !codigo
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains(&seguidas)
+        {
+            fora.push(format!(
+                "kernel/src/main.rs:{}: `{TRINCO}` não vem logo depois de `{servidor}` e de \
+                 `{terminal}`, no mesmo bloco, só com espaços e comentários entre eles: o que o \
+                 tirasse sem tirar os lançamentos passaria",
+                trinco + 1
+            ));
+        } else {
+            let marca: Vec<char> = TRINCO.chars().collect();
+            let onde = c.windows(marca.len()).position(|w| w == &marca[..]);
+            if onde.is_some_and(|i| {
+                invocacoes_de_macro(&c)
+                    .into_iter()
+                    .any(|(abre, fecha)| abre < i && i < fecha)
+            }) {
+                fora.push(format!(
+                    "kernel/src/main.rs:{}: `{TRINCO}` nos argumentos de uma macro: ela poderia \
+                     devolver os lançamentos sem ele",
+                    trinco + 1
+                ));
+            }
+        }
+    }
+    fora
 }
 
 /// Os nomes que só aparecem nas fontes dos donos — sozinhos, como palavra
@@ -6304,7 +6731,9 @@ fn conferir_a_ordem_do_boot(raiz: &Path) -> Result<Vec<String>, String> {
 /// [`CHAMADAS_PROTEGIDAS`] procura a chamada com o caminho, e por texto
 /// aquilo se contorna (o achado 8 do adversário do passo 1); aqui, o nome
 /// em qualquer forma. Só nomes que não se repetem noutro módulo: o dono
-/// inclui o que os define.
+/// inclui o que os define. Nenhum deles ganha outro nome, nem no dono
+/// ([`onde_um_nome_protegido_se_renomeia`]), e cada linha conta crua e só
+/// com o código ([`nomes_protegidos_fora`]).
 const NOMES_PROTEGIDOS: &[(&str, &[&str])] = &[
     // Quem atende a fila dos pedidos dos processos: só a tarefa `programas`,
     // no executor, pelo `nativo::servir()` — o laço de `servir_com` com o
@@ -6375,10 +6804,20 @@ const NOMES_PROTEGIDOS: &[(&str, &[&str])] = &[
     // servidor de janelas e o Terminal; e quem lança só se diz onde se
     // define e onde se lança. Fora daqui, só a suíte (o achado 6 do
     // adversário do lote A do #448).
+    //
+    // O mais forte deles, o do sistema — `Autoridade::Sistema`, e fora de
+    // um comando sem decisão nenhuma —, chamava-se `lancar`, e se protegia
+    // pelo texto com o caminho, `usuario::lancar(`: um `use … as …`, o
+    // `use crate::usuario as u`, o espaço ou a quebra de linha antes do
+    // parêntese, um ponteiro de função, o `super::` e uma macro o
+    // contornavam, e `lancar` não serve de palavra — colide com
+    // `executor.lancar(`. Tem nome único desde o lote A3 do #448,
+    // protegido pela palavra em qualquer dessas formas.
     (
         "lancar_conferido",
         &["kernel/src/agent/commands.rs", "kernel/src/usuario/mod.rs"],
     ),
+    ("lancar_como_sistema", &["kernel/src/usuario/mod.rs"]),
     ("lancar_como", &["kernel/src/usuario/mod.rs"]),
     ("lancar_pelo_kernel", &["kernel/src/usuario/mod.rs"]),
     (
@@ -6392,6 +6831,28 @@ const NOMES_PROTEGIDOS: &[(&str, &[&str])] = &[
     (
         "Lancador",
         &["kernel/src/autorizacao.rs", "kernel/src/usuario/mod.rs"],
+    ),
+    // Os carregadores, para a suíte: a carga sem entrar no programa, a
+    // entrada num programa já carregado e a leitura conferida do código,
+    // que fora da suíte só o módulo `usuario` alcança — `pub(super)`, ver
+    // [`conferir_os_carregadores`]. Existem só na compilação da suíte, e
+    // nenhum arquivo de produção os nomeia, nem num bloco da suíte (o item
+    // 1 do lote A3 do #448).
+    ("carregar_de_teste", &["kernel/src/usuario/programa.rs"]),
+    ("entrar_de_teste", &["kernel/src/usuario/programa.rs"]),
+    ("obter_de_teste", &["kernel/src/usuario/codigo.rs"]),
+    // O trinco do boot: fora de `autorizacao.rs`, onde se define, só o
+    // `main.rs` nomeia o que fecha os lançamentos do kernel por conta
+    // própria, e lá uma vez, depois dos dois lançamentos —
+    // [`trinco_fora_de_ordem`] confere a ordem —; e só a suíte os reabre (ver
+    // `autorizacao::reconfirmar_o_lancamento`).
+    (
+        "fechar_os_lancamentos_do_kernel",
+        &["kernel/src/autorizacao.rs", "kernel/src/main.rs"],
+    ),
+    (
+        "reabrir_os_lancamentos_do_kernel_de_teste",
+        &["kernel/src/autorizacao.rs"],
     ),
 ];
 
@@ -6509,7 +6970,12 @@ fn so_o_codigo(fonte: &str) -> Vec<char> {
 /// - um atributo com a palavra `path` em qualquer lugar dele, do `#[` ao `]`
 ///   que o fecha: `#[path = …]`, `#[cfg_attr(…, path = …)]`, `#[r#path = …]`;
 /// - um atributo montado por uma macro, `#[$…]`, que pode ser o `path`;
-/// - o `include!`, que traz o arquivo sem atributo nenhum.
+/// - o `include`, que traz o arquivo sem atributo nenhum — pela palavra, em
+///   qualquer forma: o `include!`, e o `use core::include as …` que o traz
+///   com outro nome, que um `include` seguido de `!` não via (o achado 3
+///   do adversário do lote A3 do #448). O `include_str!` e o
+///   `include_bytes!` trazem texto e bytes, e não código: são outras
+///   palavras.
 fn onde_traz_outro_arquivo(fonte: &str) -> Option<(usize, &'static str)> {
     let c = so_o_codigo(fonte);
     let linha_de = |i: usize| 1 + c[..i].iter().filter(|&&x| x == '\n').count();
@@ -6554,10 +7020,12 @@ fn onde_traz_outro_arquivo(fonte: &str) -> Option<(usize, &'static str)> {
             }
         } else if c[i..].starts_with(&['i', 'n', 'c', 'l', 'u', 'd', 'e'])
             && (i == 0 || !de_nome(c[i - 1]))
-            && c.get(pular_espacos(i + 7)) == Some(&'!')
             && !c.get(i + 7).is_some_and(|&x| de_nome(x))
         {
-            return Some((linha_de(i), "`include!`"));
+            return Some((
+                linha_de(i),
+                "`include`, que traz um arquivo — o `include!`, ou o `use` que o renomeia",
+            ));
         }
     }
     None
@@ -6580,11 +7048,294 @@ fn tem_a_palavra(linha: &str, nome: &str) -> bool {
     })
 }
 
+/// O que `texto` — a fonte `relativo`, fora da suíte — tem dos
+/// [`NOMES_PROTEGIDOS`]: as linhas que os usam fora dos donos, e as que
+/// renomeiam um deles ([`onde_um_nome_protegido_se_renomeia`]), em
+/// qualquer arquivo; e os índices dos nomes que aparecem aqui, sendo este
+/// arquivo um dono deles — a conta que diz se a conferência está cega.
+///
+/// # A linha que conta
+///
+/// Um nome conta como palavra inteira ([`tem_a_palavra`]) de um de dois
+/// jeitos:
+///
+/// - na linha crua, se ela não começa num comentário — a menção na
+///   documentação fica —: pega também o nome num texto, que não é chamada,
+///   e é o lado seguro;
+/// - na mesma linha só com o código ([`so_o_codigo`]): pega o que a crua
+///   pulava — a linha que começa com `//` dentro de um texto de várias
+///   linhas, e continua com código depois de fechá-lo (o rustfmt não mexe
+///   num texto):
+///
+///   ```text
+///   let _s = "
+///   // "; crate::usuario::lancar_como_sistema(None); let _t = "
+///   ";
+///   ```
+///
+/// A união das duas não acha menos que a conferência de antes, que só lia a
+/// crua (o item 1 do lote A3 do #448): a só de código, sozinha, acharia
+/// menos, porque apaga os textos.
+fn nomes_protegidos_fora(relativo: &str, texto: &str) -> (Vec<String>, Vec<usize>) {
+    let codigo: String = so_o_codigo(texto).into_iter().collect();
+    let mut fora = Vec::new();
+    let mut nos_donos = Vec::new();
+    for (n, (linha, so_codigo)) in texto.lines().zip(codigo.lines()).enumerate() {
+        // Um comentário não chama nada: a menção na documentação fica.
+        let comentario = linha.trim_start().starts_with("//");
+        for (i, (nome, donos)) in NOMES_PROTEGIDOS.iter().enumerate() {
+            let presente =
+                (!comentario && tem_a_palavra(linha, nome)) || tem_a_palavra(so_codigo, nome);
+            if !presente {
+                continue;
+            }
+            if donos.contains(&relativo) {
+                nos_donos.push(i);
+            } else {
+                fora.push(format!(
+                    "{relativo}:{}: `{nome}` fora de {donos:?}: {}",
+                    n + 1,
+                    linha.trim()
+                ));
+            }
+        }
+    }
+    for (linha, nome) in onde_um_nome_protegido_se_renomeia(texto) {
+        fora.push(format!(
+            "{relativo}:{linha}: `{nome} as`: um nome protegido não ganha outro nome, nem no dono"
+        ));
+    }
+    for linha in onde_um_use_se_monta(texto) {
+        fora.push(format!(
+            "{relativo}:{linha}: um `use` montado por uma macro: o nome que vem de uma \
+             metavariável escapa da conferência pela palavra, também no dono"
+        ));
+    }
+    nos_donos.sort_unstable();
+    nos_donos.dedup();
+    (fora, nos_donos)
+}
+
+/// Onde um nome de [`NOMES_PROTEGIDOS`] ganha outro nome em `fonte`: o
+/// nome, como palavra inteira, seguido de `as` — com qualquer espaço,
+/// comentário ou quebra de linha no meio —, no código ([`so_o_codigo`]),
+/// fora dos comentários e dos textos. A linha do nome, contada do 1, e o
+/// nome.
+///
+/// # Em qualquer arquivo, dono ou não
+///
+/// Um `pub use self::lancar_como_sistema as abrir;` no arquivo dono deixa
+/// o apelido livre nos outros: a palavra protegida não aparece onde ele é
+/// chamado, e a conferência pela palavra não o vê. Fora do dono, o `use …
+/// as …` já é a palavra fora do dono — e aparece pelas duas regras. Nenhum
+/// nome protegido tem por que ganhar outro nome (o item 1 do lote A3 do
+/// #448).
+fn onde_um_nome_protegido_se_renomeia(fonte: &str) -> Vec<(usize, &'static str)> {
+    onde_se_renomeia(fonte, NOMES_PROTEGIDOS.iter().map(|(nome, _)| *nome))
+}
+
+/// Onde um dos `nomes` ganha outro nome em `fonte` — a regra de
+/// [`onde_um_nome_protegido_se_renomeia`], para quaisquer nomes: o nome,
+/// como palavra inteira, seguido de `as`, com qualquer espaço, comentário ou
+/// quebra de linha no meio, no código ([`so_o_codigo`]). A linha do nome,
+/// contada do 1, e o nome.
+fn onde_se_renomeia(
+    fonte: &str,
+    nomes: impl IntoIterator<Item = &'static str>,
+) -> Vec<(usize, &'static str)> {
+    let c = so_o_codigo(fonte);
+    let de_nome = |x: char| x.is_alphanumeric() || x == '_';
+    let mut achados = Vec::new();
+    for nome in nomes {
+        let n: Vec<char> = nome.chars().collect();
+        let mut i = 0;
+        while i + n.len() <= c.len() {
+            let palavra = c[i..i + n.len()] == n[..]
+                && (i == 0 || !de_nome(c[i - 1]))
+                && !c.get(i + n.len()).is_some_and(|&x| de_nome(x));
+            if !palavra {
+                i += 1;
+                continue;
+            }
+            let mut k = i + n.len();
+            while c.get(k).is_some_and(|x| x.is_whitespace()) {
+                k += 1;
+            }
+            if c[k.min(c.len())..].starts_with(&['a', 's'])
+                && !c.get(k + 2).is_some_and(|&x| de_nome(x))
+            {
+                let linha = 1 + c[..i].iter().filter(|&&x| x == '\n').count();
+                achados.push((linha, nome));
+            }
+            i += n.len();
+        }
+    }
+    achados.sort_unstable();
+    achados
+}
+
+/// Onde um `use` se monta numa macro, em `fonte` — a palavra `use`, no
+/// código ([`so_o_codigo`]) —, de um de dois jeitos. A linha do `use`,
+/// contada do 1.
+///
+/// - Com uma metavariável antes do `;` que a fecha: o `$` seguido de um
+///   nome que não é `crate`, ou de uma repetição, `$(`.
+/// - Nos argumentos de uma invocação de macro ([`invocacoes_de_macro`]):
+///   uma macro que só repassa os tokens monta o `use` que vem neles —
+///   `apelido!(pub use self::lancar_como_sistema);` —, e a do `$u:tt` monta
+///   o `use` passado como token, `apelido!(use lancar_como_sistema);`. A
+///   macro pode vir de outro arquivo (o achado 1 do adversário do delta do
+///   lote A3 do #448).
+///
+/// # Por quê
+///
+/// O nome que vem da metavariável não aparece no `use`, e o `as` não vem
+/// logo depois dele: `macro_rules! apelido { ($n:ident) => { pub use
+/// self::$n as abrir; }; }` e `apelido!(lancar_como_sistema);`, no arquivo
+/// dono, davam outro nome a um nome protegido sem que
+/// [`onde_um_nome_protegido_se_renomeia`] o visse, e o apelido ficava livre
+/// nos outros arquivos (o achado 4 do adversário do lote A3 do #448). Fora
+/// de uma macro, um `$` não é Rust; o kernel não tem `use` nenhum assim, e
+/// o `$crate`, que é a raiz do pacote e não um nome, fica.
+fn onde_um_use_se_monta(fonte: &str) -> Vec<usize> {
+    let c = so_o_codigo(fonte);
+    let de_nome = |x: char| x.is_alphanumeric() || x == '_';
+    let palavra = |i: usize, p: &[char]| {
+        c.get(i..i + p.len()) == Some(p)
+            && (i == 0 || !de_nome(c[i - 1]))
+            && !c.get(i + p.len()).is_some_and(|&x| de_nome(x))
+    };
+    let mut linhas = Vec::new();
+    for i in 0..c.len() {
+        if !palavra(i, &['u', 's', 'e']) {
+            continue;
+        }
+        let fim = (i..c.len()).find(|&k| c[k] == ';').unwrap_or(c.len());
+        let montado = (i + 3..fim).any(|k| {
+            if c[k] != '$' {
+                return false;
+            }
+            let mut depois = k + 1;
+            while c.get(depois).is_some_and(|x| x.is_whitespace()) {
+                depois += 1;
+            }
+            !palavra(depois, &['c', 'r', 'a', 't', 'e'])
+        });
+        if montado {
+            linhas.push(1 + c[..i].iter().filter(|&&x| x == '\n').count());
+        }
+    }
+    for (abre, fecha) in invocacoes_de_macro(&c) {
+        for i in abre + 1..fecha {
+            if palavra(i, &['u', 's', 'e']) {
+                linhas.push(1 + c[..i].iter().filter(|&&x| x == '\n').count());
+            }
+        }
+    }
+    linhas.sort_unstable();
+    linhas.dedup();
+    linhas
+}
+
+/// As invocações de macro em `c` — uma fonte só com o código
+/// ([`so_o_codigo`]) —: um nome, o `!` e o delimitador que abre os
+/// argumentos, `(`, `[` ou `{`, com espaços no meio. Para cada uma, onde os
+/// argumentos abrem e onde fecham. A definição de uma macro,
+/// `macro_rules! nome {…}`, não é uma: depois do `!` vem o nome; e o `!`
+/// depois de uma palavra-chave — `if !(…)`, `while !(…)` — é a negação.
+fn invocacoes_de_macro(c: &[char]) -> Vec<(usize, usize)> {
+    const NEGAM: [&str; 7] = ["if", "while", "match", "return", "in", "break", "else"];
+    let de_nome = |x: char| x.is_alphanumeric() || x == '_';
+    let mut achadas = Vec::new();
+    for k in 0..c.len() {
+        if c[k] != '!' {
+            continue;
+        }
+        let mut fim_do_nome = k;
+        while fim_do_nome > 0 && c[fim_do_nome - 1].is_whitespace() {
+            fim_do_nome -= 1;
+        }
+        let mut comeco_do_nome = fim_do_nome;
+        while comeco_do_nome > 0 && de_nome(c[comeco_do_nome - 1]) {
+            comeco_do_nome -= 1;
+        }
+        let nome: String = c[comeco_do_nome..fim_do_nome].iter().collect();
+        if nome.is_empty() || NEGAM.contains(&nome.as_str()) {
+            continue;
+        }
+        let mut abre = k + 1;
+        while c.get(abre).is_some_and(|x| x.is_whitespace()) {
+            abre += 1;
+        }
+        if !matches!(c.get(abre), Some('(' | '[' | '{')) {
+            continue;
+        }
+        let mut nivel = 0usize;
+        let mut fecha = c.len();
+        for (j, &x) in c.iter().enumerate().skip(abre) {
+            match x {
+                '(' | '[' | '{' => nivel += 1,
+                ')' | ']' | '}' => {
+                    nivel -= 1;
+                    if nivel == 0 {
+                        fecha = j;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        achadas.push((abre, fecha));
+    }
+    achadas
+}
+
 #[cfg(test)]
 mod testes_dos_nomes_protegidos {
     use super::{
-        NOMES_PROTEGIDOS, fonte_traz_outro_arquivo, onde_traz_outro_arquivo, tem_a_palavra,
+        NOMES_PROTEGIDOS, carregadores_alargados, carregadores_nos_irmaos,
+        fonte_traz_outro_arquivo, nomes_protegidos_fora, onde_traz_outro_arquivo,
+        onde_um_nome_protegido_se_renomeia, tem_a_palavra, trinco_fora_de_ordem,
     };
+
+    /// Os números das linhas de uma lista de achados de `arquivo` —
+    /// `arquivo:N: …` —, na ordem, sem repetir.
+    fn linhas_de(arquivo: &str, achados: &[String]) -> Vec<usize> {
+        let mut linhas: Vec<usize> = achados
+            .iter()
+            .map(|f| {
+                let resto = f
+                    .strip_prefix(arquivo)
+                    .and_then(|r| r.strip_prefix(':'))
+                    .unwrap();
+                resto.split(':').next().unwrap().parse().unwrap()
+            })
+            .collect();
+        linhas.sort_unstable();
+        linhas.dedup();
+        linhas
+    }
+
+    /// Um `usuario/programa.rs` em que nada se alarga: os carregadores
+    /// dentro do módulo `usuario`, e o `executar` e os embrulhos só na
+    /// suíte.
+    const PROGRAMA_BOM: &str = "use x;\n\
+                                pub(super) fn carregar(i: &[u8]) {}\n\
+                                pub(super) fn preparar(i: &[u8]) {}\n\
+                                impl P {\n    pub(super) fn trocar(self) {}\n}\n\
+                                impl T {\n    #[inline]\n    pub(in crate::usuario) fn mapear(self) {}\n}\n\
+                                fn entrar(p: P) {}\n\
+                                /// doc\n#[cfg(feature = \"modo-teste\")]\npub fn executar(i: &[u8]) {}\n\
+                                /// Só para a suíte: o `pub fn carregar(` de antes.\n\
+                                #[cfg(feature = \"modo-teste\")]\npub fn carregar_de_teste(i: &[u8]) {}\n\
+                                #[cfg(feature = \"modo-teste\")]\npub fn entrar_de_teste(p: P) {}\n";
+
+    /// As linhas que [`nomes_protegidos_fora`] acusa em `fonte`, como o
+    /// arquivo `arquivo`: só os números, na ordem, sem repetir.
+    fn acusadas(arquivo: &str, fonte: &str) -> Vec<usize> {
+        let (fora, _) = nomes_protegidos_fora(arquivo, fonte);
+        linhas_de(arquivo, &fora)
+    }
 
     /// O atributo de caminho, em qualquer forma, e o que não é ele.
     #[test]
@@ -6702,9 +7453,10 @@ mod testes_dos_nomes_protegidos {
     /// Quem lança um processo: o `user.run` só pelo handler dele, o kernel
     /// por conta própria só de dentro de `usuario/mod.rs`, o boot pelos dois
     /// lançamentos dele, e o lançador só onde se define e onde se lança —
-    /// pela palavra, também num `use` que a traz sem o caminho; e o
-    /// lançamento do sistema com o caminho, só na suíte (o achado 6 do
-    /// adversário do lote A do #448).
+    /// pela palavra, também num `use` que a traz sem o caminho (o achado 6
+    /// do adversário do lote A do #448); e o lançamento do sistema também
+    /// pela palavra, com o nome único, no lugar da regra por texto com o
+    /// caminho, que saiu (o item 1 do lote A3 do #448).
     #[test]
     fn o_lancamento_so_nos_donos() {
         let donos = |nome: &str| {
@@ -6718,6 +7470,7 @@ mod testes_dos_nomes_protegidos {
             donos("lancar_conferido"),
             Some(vec!["kernel/src/agent/commands.rs", usuario])
         );
+        assert_eq!(donos("lancar_como_sistema"), Some(vec![usuario]));
         assert_eq!(donos("lancar_como"), Some(vec![usuario]));
         assert_eq!(donos("lancar_pelo_kernel"), Some(vec![usuario]));
         for boot in ["lancar_o_servidor_de_janelas", "lancar_o_terminal"] {
@@ -6728,10 +7481,20 @@ mod testes_dos_nomes_protegidos {
             Some(vec!["kernel/src/autorizacao.rs", usuario])
         );
         assert!(
-            super::CHAMADAS_PROTEGIDAS
+            !super::CHAMADAS_PROTEGIDAS
                 .iter()
-                .any(|(c, d)| *c == "usuario::lancar(" && d.is_empty())
+                .any(|(c, _)| c.contains("usuario::lancar(")),
+            "a regra por texto saiu: o lançamento do sistema é pela palavra"
         );
+        // Os nomes do lançamento não se confundem um com o outro.
+        assert!(!tem_a_palavra(
+            "crate::usuario::lancar_como_sistema(None)",
+            "lancar_como"
+        ));
+        assert!(!tem_a_palavra(
+            "fn lancar_como_sistema_de_teste() {}",
+            "lancar_como_sistema"
+        ));
         for linha in [
             "use crate::autorizacao::Lancador::Kernel as K;",
             "    lancar_por(caminho, autoridade, crate::autorizacao::Lancador::Kernel)",
@@ -6769,6 +7532,650 @@ mod testes_dos_nomes_protegidos {
             "soltar_o_da_edicao",
         ] {
             assert!(!tem_a_palavra(linha, nome), "{linha}");
+        }
+    }
+
+    /// As formas que contornavam a regra por texto do lançamento do
+    /// sistema, `usuario::lancar(` (o item 1 do lote A3 do #448), cada uma
+    /// num arquivo que não é dono, e a linha que a conferência acusa; e as
+    /// que nenhuma regra por texto veria: o `use` de tudo, o identificador
+    /// cru, e a linha que começa com `//` dentro de um texto.
+    #[test]
+    fn as_formas_de_contornar_o_lancamento_do_sistema() {
+        let barra = "kernel/src/barra.rs";
+        let casos: &[(&str, &str, &[usize])] = &[
+            // O `use` que renomeia: a linha do `use`.
+            (
+                barra,
+                "use crate::usuario::lancar_como_sistema as abrir;\nfn f() {\n    let _ = abrir(None);\n}\n",
+                &[1],
+            ),
+            // O módulo com outro nome: a chamada.
+            (
+                barra,
+                "use crate::usuario as u;\nfn f() {\n    let _ = u::lancar_como_sistema(None);\n}\n",
+                &[3],
+            ),
+            // O espaço antes do parêntese.
+            (
+                barra,
+                "fn f() {\n    let _ = crate::usuario::lancar_como_sistema (None);\n}\n",
+                &[2],
+            ),
+            // A quebra de linha antes do parêntese: a linha do nome.
+            (
+                barra,
+                "fn f() {\n    let _ = crate::usuario::lancar_como_sistema\n        (None);\n}\n",
+                &[2],
+            ),
+            // O ponteiro de função.
+            (
+                barra,
+                "static F: fn(Option<&str>) -> Result<u64, &'static str> =\n    crate::usuario::lancar_como_sistema;\n",
+                &[2],
+            ),
+            // O `super::`, de dentro do módulo `usuario`, num arquivo que não
+            // é o dono.
+            (
+                "kernel/src/usuario/codigo.rs",
+                "fn f() {\n    let _ = super::lancar_como_sistema(None);\n}\n",
+                &[2],
+            ),
+            // A macro: a linha que a chama com o nome.
+            (
+                barra,
+                "macro_rules! chamar {\n    ($f:ident) => {\n        crate::usuario::$f(None)\n    };\n}\nfn f() {\n    let _ = chamar!(lancar_como_sistema);\n}\n",
+                &[7],
+            ),
+            // O `use` de tudo: a chamada sem caminho.
+            (
+                barra,
+                "use crate::usuario::*;\nfn f() {\n    let _ = lancar_como_sistema(None);\n}\n",
+                &[3],
+            ),
+            // O identificador cru.
+            (
+                barra,
+                "fn f() {\n    let _ = crate::usuario::r#lancar_como_sistema(None);\n}\n",
+                &[2],
+            ),
+            // A linha que começa com `//` dentro de um texto: a crua a
+            // pulava; a só de código, não.
+            (
+                barra,
+                "fn f() {\n    let _s = \"\n// \"; let _ = crate::usuario::lancar_como_sistema(None); let _t = \"\n\";\n}\n",
+                &[3],
+            ),
+        ];
+        for (arquivo, fonte, esperadas) in casos {
+            assert_eq!(
+                &acusadas(arquivo, fonte)[..],
+                *esperadas,
+                "{arquivo}:\n{fonte}"
+            );
+        }
+    }
+
+    /// Nenhum nome protegido ganha outro nome, nem no arquivo dono: o
+    /// `pub use … as …` deixaria o apelido livre nos outros. Numa linha,
+    /// partido em linhas e com um comentário no meio; e o `Lancador`, no
+    /// dono dele.
+    #[test]
+    fn o_nome_protegido_nao_se_renomeia_nem_no_dono() {
+        let usuario = "kernel/src/usuario/mod.rs";
+        assert_eq!(
+            acusadas(usuario, "pub use self::lancar_como_sistema as abrir;\n"),
+            [1]
+        );
+        assert_eq!(
+            acusadas(
+                usuario,
+                "pub use self::{\n    lancar_como_sistema\n        as abrir,\n};\n"
+            ),
+            [2]
+        );
+        assert_eq!(
+            acusadas(
+                usuario,
+                "pub use self::lancar_como_sistema /* x */ as abrir;\n"
+            ),
+            [1]
+        );
+        assert_eq!(
+            acusadas(
+                "kernel/src/autorizacao.rs",
+                "pub use self::Lancador as L;\n"
+            ),
+            [1]
+        );
+        assert_eq!(
+            onde_um_nome_protegido_se_renomeia("use x::lancar_pelo_kernel\n as l;"),
+            [(1, "lancar_pelo_kernel")]
+        );
+        // A suíte também tem nomes protegidos: o embrulho de um carregador,
+        // reexportado com outro nome no dono.
+        assert_eq!(
+            acusadas(
+                "kernel/src/usuario/programa.rs",
+                "pub use self::carregar_de_teste as carregar_solto;\n"
+            ),
+            [1]
+        );
+    }
+
+    /// O que não é o nome, ou não é renomeá-lo, não se acusa: o dono que
+    /// chama, a documentação, outro nome que começa igual, o `as` de um
+    /// molde com o nome num comentário, o nome com `as` num texto do dono, e
+    /// o nome seguido de outra palavra que começa com `as`.
+    #[test]
+    fn o_que_nao_e_o_nome_nao_se_acusa() {
+        let usuario = "kernel/src/usuario/mod.rs";
+        let barra = "kernel/src/barra.rs";
+        for (arquivo, fonte) in [
+            (
+                usuario,
+                "pub fn lancar_o_terminal() {\n    let _ = lancar_como_sistema(Some(\"/x\"));\n}\n",
+            ),
+            (
+                barra,
+                "// lancar_como_sistema\n/// [`crate::usuario::lancar_como_sistema`]\nfn f() {}\n",
+            ),
+            (barra, "fn lancar_como_sistema_de_teste() {}\n"),
+            (
+                usuario,
+                "let x = y as u64; // lancar_como_sistema as abrir\n",
+            ),
+            (usuario, "let s = \"lancar_como_sistema as abrir\";\n"),
+            (usuario, "let _ = lancar_como_sistema\n    assim;\n"),
+            (usuario, "let _ = lancar_como_sistema\n    (None); // as\n"),
+        ] {
+            assert_eq!(
+                acusadas(arquivo, fonte),
+                Vec::<usize>::new(),
+                "{arquivo}:\n{fonte}"
+            );
+        }
+    }
+
+    /// Os carregadores não se alargam: `pub`, `pub(crate)` e
+    /// `pub(in crate)` reprovam, cada um na linha da declaração, também
+    /// partido em duas linhas; dentro do módulo `usuario`, não. O
+    /// `executar` e os embrulhos da suíte, só com o atributo dela. E um
+    /// carregador que some, ou declarado duas vezes, deixa a conferência
+    /// cega, e reprova.
+    #[test]
+    fn os_carregadores_nao_se_alargam() {
+        let programa = "kernel/src/usuario/programa.rs";
+        let codigo = "kernel/src/usuario/codigo.rs";
+        let bom = PROGRAMA_BOM;
+        assert_eq!(carregadores_alargados(programa, bom), Vec::<String>::new());
+        for alargado in [
+            "pub fn carregar(",
+            "pub(crate) fn carregar(",
+            "pub(in crate) fn carregar(",
+            "pub\nfn carregar(",
+            "pub(super) const fn carregar(",
+        ] {
+            let fonte = bom.replacen("pub(super) fn carregar(", alargado, 1);
+            let fora = carregadores_alargados(programa, &fonte);
+            assert_eq!(fora.len(), 1, "{alargado}: {fora:?}");
+            assert!(fora[0].contains("`carregar` declarado"), "{fora:?}");
+        }
+        // O `executar` e um embrulho sem o atributo da suíte.
+        for sem_a_suite in ["pub fn executar(", "pub fn entrar_de_teste("] {
+            let fonte = bom.replacen(
+                &format!("#[cfg(feature = \"modo-teste\")]\n{sem_a_suite}"),
+                sem_a_suite,
+                1,
+            );
+            let fora = carregadores_alargados(programa, &fonte);
+            assert!(
+                fora.len() == 1 && fora[0].contains("fora da compilação da suíte"),
+                "{sem_a_suite}: {fora:?}"
+            );
+        }
+        // Sumido, ou declarado duas vezes: a conferência cega reprova.
+        let sumido = bom.replace("fn entrar(", "fn entra(");
+        assert_eq!(carregadores_alargados(programa, &sumido).len(), 1);
+        let duas = format!("{bom}mod outro {{\n    fn preparar() {{}}\n}}\n");
+        assert_eq!(carregadores_alargados(programa, &duas).len(), 1);
+        // O `obter`, em `usuario/codigo.rs`, com o embrulho dele.
+        let bom = "pub(super) fn obter(c: &str) {}\n#[cfg(feature = \"modo-teste\")]\npub fn obter_de_teste(c: &str) {}\n";
+        assert_eq!(carregadores_alargados(codigo, bom), Vec::<String>::new());
+        let alargado = bom.replacen("pub(super) fn obter(", "pub fn obter(", 1);
+        assert_eq!(carregadores_alargados(codigo, &alargado).len(), 1);
+    }
+
+    /// O trinco do boot, no `main.rs`: uma vez, depois dos dois lançamentos
+    /// do kernel por conta própria. Antes de um deles, ausente — também só
+    /// num comentário — ou duas vezes, reprova.
+    #[test]
+    fn o_trinco_do_boot_depois_dos_dois_lancamentos() {
+        let trinco = "    crate::autorizacao::fechar_os_lancamentos_do_kernel();\n";
+        let terminal = "    usuario::lancar_o_terminal();\n";
+        let bom = format!(
+            "fn f() {{\n    usuario::lancar_o_servidor_de_janelas();\n{terminal}{trinco}}}\n"
+        );
+        assert_eq!(trinco_fora_de_ordem(&bom), Vec::<String>::new());
+        let antes_do_terminal = bom.replace(
+            &format!("{terminal}{trinco}"),
+            &format!("{trinco}{terminal}"),
+        );
+        let fora = trinco_fora_de_ordem(&antes_do_terminal);
+        assert!(
+            fora.len() == 1
+                && fora[0].contains("lancar_o_terminal")
+                && fora[0].contains("o boot não o lançaria"),
+            "{fora:?}"
+        );
+        for errado in [
+            bom.replace(trinco, ""),
+            bom.replace(
+                trinco,
+                "    // crate::autorizacao::fechar_os_lancamentos_do_kernel();\n",
+            ),
+            bom.replace(trinco, &format!("{trinco}{trinco}")),
+        ] {
+            let fora = trinco_fora_de_ordem(&errado);
+            assert!(
+                fora.len() == 1 && fora[0].contains("vezes, e não uma"),
+                "{errado}: {fora:?}"
+            );
+        }
+    }
+
+    /// O trinco não só depois dos dois lançamentos, mas logo depois deles,
+    /// no mesmo bloco: um atributo ou uma condição na linha dele, um bloco
+    /// à parte, uma função que ninguém chama, ou outra coisa no meio,
+    /// reprovam (o achado 8 do adversário do lote A3 do #448). E pelo
+    /// caminho do pacote, fora de uma macro: o caminho relativo, que um
+    /// `mod autorizacao` no bloco sombreia, e as três nos argumentos de uma
+    /// macro, reprovam (o achado 3 do adversário do delta). Um comentário
+    /// no meio, o atributo do bloco dos três e o `crate::` na frente do
+    /// primeiro, não.
+    #[test]
+    fn o_trinco_logo_depois_dos_dois_lancamentos() {
+        let servidor = "    usuario::lancar_o_servidor_de_janelas();\n";
+        let terminal = "    usuario::lancar_o_terminal();\n";
+        let trinco = "    crate::autorizacao::fechar_os_lancamentos_do_kernel();\n";
+        let bom = format!("fn f() {{\n{servidor}{terminal}{trinco}}}\n");
+        for certo in [
+            bom.clone(),
+            bom.replace(trinco, &format!("    // o trinco\n{trinco}")),
+            format!(
+                "fn f() {{\n    #[cfg(not(feature = \"modo-teste\"))]\n    {{\n    {servidor}    {terminal}    {trinco}    }}\n}}\n"
+            ),
+            bom.replace(
+                servidor,
+                "    crate::usuario::lancar_o_servidor_de_janelas();\n",
+            ),
+        ] {
+            assert_eq!(
+                trinco_fora_de_ordem(&certo),
+                Vec::<String>::new(),
+                "{certo}"
+            );
+        }
+        for errado in [
+            bom.replace(trinco, &format!("    #[cfg(any())]\n{trinco}")),
+            bom.replace(trinco, &format!("    if pronto() {{\n    {trinco}    }}\n")),
+            bom.replace(trinco, &format!("    {{\n    {trinco}    }}\n")),
+            bom.replace(trinco, "") + &format!("fn g() {{\n{trinco}}}\n"),
+            bom.replace(trinco, &format!("    let _ = 1;\n{trinco}")),
+        ] {
+            let fora = trinco_fora_de_ordem(&errado);
+            assert!(
+                fora.len() == 1 && fora[0].contains("não vem logo depois"),
+                "{errado}: {fora:?}"
+            );
+        }
+        // O caminho relativo, e o sombreado por um `mod autorizacao` no
+        // bloco: o trinco não aparece.
+        let relativo = "    autorizacao::fechar_os_lancamentos_do_kernel();\n";
+        for errado in [
+            bom.replace(trinco, relativo),
+            bom.replace(
+                servidor,
+                &format!(
+                    "    mod autorizacao {{\n        pub fn fechar_os_lancamentos_do_kernel() {{}}\n    }}\n{servidor}"
+                ),
+            )
+            .replace(trinco, relativo),
+        ] {
+            let fora = trinco_fora_de_ordem(&errado);
+            assert!(
+                fora.len() == 1 && fora[0].contains("aparece 0 vezes, e não uma"),
+                "{errado}: {fora:?}"
+            );
+        }
+        // As três nos argumentos de uma macro.
+        let na_macro =
+            format!("fn f() {{\n    m! {{\n    {servidor}    {terminal}    {trinco}    }}\n}}\n");
+        let fora = trinco_fora_de_ordem(&na_macro);
+        assert!(
+            fora.len() == 1 && fora[0].contains("nos argumentos de uma macro"),
+            "{fora:?}"
+        );
+    }
+
+    /// Os carregadores, os embrulhos da suíte e os passos da carga não se
+    /// nomeiam num irmão do `usuario/mod.rs` — nem num submódulo do
+    /// `usuario` —: o `pub(super)` vale para o módulo inteiro, e um `use …
+    /// as …` em `usuario/elf.rs` os expunha ao kernel (o achado 1 do
+    /// adversário do lote A3 do #448). O `usuario/mod.rs`, o arquivo de
+    /// cada um, os comentários, os textos, outro nome que começa igual e os
+    /// arquivos de fora do módulo — onde quem confere é o compilador — não
+    /// se acusam.
+    #[test]
+    fn o_irmao_do_usuario_nao_alcanca_os_carregadores() {
+        let elf = "kernel/src/usuario/elf.rs";
+        let prova = "use super::programa::{carregar as abrir_imagem, entrar as descer};\n\
+                     pub fn rodar(imagem: &[u8]) -> ! {\n\
+                     \x20   let _ = abrir_imagem(imagem, None).and_then(descer);\n\
+                     \x20   crate::fios::terminar()\n\
+                     }\n\
+                     use super::codigo::obter as ler_conferido;\n";
+        let fora = carregadores_nos_irmaos(elf, prova);
+        assert_eq!(linhas_de(elf, &fora), [1, 6], "{fora:?}");
+        assert_eq!(fora.len(), 3, "{fora:?}");
+        let casos: &[(&str, &str, &[usize])] = &[
+            // Os passos da carga, e o `trocar` de um deles.
+            (
+                "kernel/src/usuario/exemplo.rs",
+                "fn f(p: super::programa::Preparada<'_>) -> super::programa::Trocada<'_> {\n    p.trocar()\n}\n",
+                &[1, 2],
+            ),
+            // Num submódulo do `usuario`, pelo `use` de tudo.
+            (
+                "kernel/src/usuario/novo/x.rs",
+                "pub use super::super::programa::*;\nfn f() {\n    let _ = mapear;\n}\n",
+                &[3],
+            ),
+            // O que só a suíte tem.
+            (
+                "kernel/src/usuario/descritores.rs",
+                "fn f() {\n    let _ = super::programa::executar;\n    let _ = super::codigo::obter_de_teste;\n}\n",
+                &[2, 3],
+            ),
+            // O arquivo de um carregador nomeando o do outro.
+            (
+                "kernel/src/usuario/programa.rs",
+                "fn f() {\n    let _ = super::codigo::obter(\"/x\", a);\n}\n",
+                &[2],
+            ),
+            // O identificador cru.
+            (
+                "kernel/src/usuario/codigo.rs",
+                "fn f() {\n    let _ = super::programa::r#entrar;\n}\n",
+                &[2],
+            ),
+        ];
+        for (arquivo, fonte, esperadas) in casos {
+            assert_eq!(
+                linhas_de(arquivo, &carregadores_nos_irmaos(arquivo, fonte)),
+                *esperadas,
+                "{arquivo}:\n{fonte}"
+            );
+        }
+        for (arquivo, fonte) in [
+            ("kernel/src/usuario/mod.rs", prova),
+            ("kernel/src/barra.rs", prova),
+            ("kernel/src/usuario/programa.rs", PROGRAMA_BOM),
+            (
+                "kernel/src/usuario/codigo.rs",
+                "pub(super) fn obter(c: &str) {}\nfn f() {\n    let _ = obter(\"/x\");\n}\n",
+            ),
+            (
+                elf,
+                "// carregar\n/// [`super::programa::entrar`]\nlet s = \"obter\";\n/* executar */\nfn carregar_segmento() {}\nlet e = x.entrada;\n",
+            ),
+        ] {
+            assert_eq!(
+                carregadores_nos_irmaos(arquivo, fonte),
+                Vec::<String>::new(),
+                "{arquivo}:\n{fonte}"
+            );
+        }
+    }
+
+    /// Os carregadores, o que só a suíte tem e os passos da carga não ganham
+    /// outro nome em arquivo nenhum do módulo `usuario` — o `usuario/mod.rs`
+    /// inclusive, que pode nomeá-los e dava o apelido aos irmãos (o achado 2
+    /// do adversário do delta do lote A3 do #448). Fora do módulo, não: o
+    /// `arch` tem um `entrar as entrar_em_usuario` que é outra coisa. E o
+    /// irmão que chamava o apelido não nomeia carregador nenhum: o que o
+    /// fecha é a regra do `as`, no dono.
+    #[test]
+    fn o_carregador_nao_ganha_outro_nome_no_modulo_usuario() {
+        let usuario = "kernel/src/usuario/mod.rs";
+        let prova = "use programa::{carregar as carga, entrar as descida};\n";
+        let fora = super::carregadores_renomeados(usuario, prova);
+        assert_eq!(linhas_de(usuario, &fora), [1], "{fora:?}");
+        assert_eq!(fora.len(), 2, "{fora:?}");
+        let casos: &[(&str, &str, &[usize])] = &[
+            (
+                "kernel/src/usuario/programa.rs",
+                "pub(super) use self::{\n    preparar\n        as preparo,\n};\n",
+                &[2],
+            ),
+            (
+                "kernel/src/usuario/codigo.rs",
+                "pub use self::obter_de_teste /* x */ as obter_solto;\n",
+                &[1],
+            ),
+            (
+                "kernel/src/usuario/elf.rs",
+                "use super::programa::Trocada as T;\n",
+                &[1],
+            ),
+        ];
+        for (arquivo, fonte, esperadas) in casos {
+            assert_eq!(
+                linhas_de(arquivo, &super::carregadores_renomeados(arquivo, fonte)),
+                *esperadas,
+                "{arquivo}:\n{fonte}"
+            );
+        }
+        for (arquivo, fonte) in [
+            (
+                "kernel/src/arch/mod.rs",
+                "pub use x86_64::entrar as entrar_em_usuario;\n",
+            ),
+            (
+                usuario,
+                "// use programa::carregar as carga;\nlet x = mapear_paginas as usize;\nlet s = \"entrar as\";\n",
+            ),
+            (
+                "kernel/src/usuario/elf.rs",
+                "pub fn rodar(i: &[u8]) {\n    let _ = super::carga(i, None).and_then(super::descida);\n}\n",
+            ),
+        ] {
+            assert_eq!(
+                super::carregadores_renomeados(arquivo, fonte),
+                Vec::<String>::new(),
+                "{arquivo}:\n{fonte}"
+            );
+        }
+        assert_eq!(
+            carregadores_nos_irmaos(
+                "kernel/src/usuario/elf.rs",
+                "pub fn rodar(i: &[u8]) {\n    let _ = super::carga(i, None).and_then(super::descida);\n}\n"
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    /// O `include` pela palavra, em qualquer forma: o `use` que o traz com
+    /// outro nome também traz outro arquivo (o achado 3 do adversário do
+    /// lote A3 do #448). O `include_str!` e o `include_bytes!`, que trazem
+    /// texto e bytes, e a palavra num comentário ou num texto, não.
+    #[test]
+    fn o_include_renomeado() {
+        for fonte in [
+            "use core::include as trazer;\ntrazer!(\"../../fora/abrir.rs\");\n",
+            "use core::{include as trazer, panic};\n",
+            "use core::include;\n",
+            "let _ = r#include!(\"x.rs\");\n",
+        ] {
+            assert!(fonte_traz_outro_arquivo(fonte), "{fonte}");
+        }
+        assert_eq!(
+            onde_traz_outro_arquivo("fn a() {}\nuse core::include as trazer;\n").map(|(l, _)| l),
+            Some(2)
+        );
+        for fonte in [
+            "let t = include_str!(\"x.txt\");\n",
+            "let b = include_bytes!(\"x.bin\");\n",
+            "// use core::include as trazer;\n",
+            "let s = \"include\";\n",
+            "fn incluir() {}\n",
+        ] {
+            assert!(!fonte_traz_outro_arquivo(fonte), "{fonte}");
+        }
+    }
+
+    /// O `use` montado numa macro, com uma metavariável no caminho, não se
+    /// aceita em arquivo nenhum, dono ou não: o nome que vem dela não
+    /// aparece no `use`, e o `as` não vem logo depois dele (o achado 4 do
+    /// adversário do lote A3 do #448). Partido em linhas e com a repetição
+    /// também; o `$crate`, a macro sem `use` e o `$` num comentário, não.
+    #[test]
+    fn o_apelido_por_macro_no_dono() {
+        let usuario = "kernel/src/usuario/mod.rs";
+        let barra = "kernel/src/barra.rs";
+        let prova = "macro_rules! apelido {\n    ($n:ident) => {\n        pub use self::$n as abrir;\n    };\n}\napelido!(lancar_como_sistema);\n";
+        assert_eq!(acusadas(usuario, prova), [3]);
+        assert_eq!(
+            acusadas(
+                barra,
+                "macro_rules! m {\n    ($($n:ident),*) => {\n        use crate::usuario::{\n            $($n),*\n        };\n    };\n}\n"
+            ),
+            [3]
+        );
+        assert_eq!(
+            acusadas(
+                barra,
+                "macro_rules! m {\n    ($n:ident) => {\n        use crate::usuario::$ n;\n    };\n}\n"
+            ),
+            [3]
+        );
+        for fonte in [
+            "macro_rules! m {\n    () => {\n        use $crate::log::nivel;\n    };\n}\n",
+            "macro_rules! m {\n    ($x:expr) => {\n        $crate::log::escrever($x)\n    };\n}\n",
+            "use crate::usuario::NaoLancou;\nlet custo = 5; // $x\n",
+        ] {
+            assert_eq!(acusadas(barra, fonte), Vec::<usize>::new(), "{fonte}");
+        }
+    }
+
+    /// O `use` que vem nos argumentos de uma invocação de macro, em arquivo
+    /// nenhum, dono ou não: a macro que só repassa os tokens, e a do
+    /// `$u:tt`, que monta o `use` passado como token, davam outro nome a um
+    /// nome protegido sem `use` nenhum no corpo delas (o achado 1 do
+    /// adversário do delta do lote A3 do #448); a macro pode vir de outro
+    /// arquivo. Com chaves e colchetes, e partida em linhas, também. A
+    /// negação de uma palavra-chave, `if !(…)`, o `!=`, a definição de uma
+    /// macro, uma invocação sem `use`, outro nome que começa igual e o `use`
+    /// num texto, não.
+    #[test]
+    fn o_use_nos_argumentos_de_uma_macro() {
+        let usuario = "kernel/src/usuario/mod.rs";
+        let barra = "kernel/src/barra.rs";
+        let repassa = "macro_rules! apelido {\n    ($($p:tt)*) => {\n        $($p)* as abrir;\n    };\n}\napelido!(pub use self::lancar_como_sistema);\n";
+        assert_eq!(acusadas(usuario, repassa), [6]);
+        let token = "macro_rules! apelido {\n    ($u:tt $n:ident) => {\n        pub $u self::$n as abrir;\n    };\n}\napelido!(use lancar_como_sistema);\n";
+        assert_eq!(acusadas(usuario, token), [6]);
+        assert_eq!(
+            acusadas(barra, "crate::apelido! {\n    pub\n    use x;\n}\n"),
+            [3]
+        );
+        assert_eq!(
+            acusadas(barra, "fn f() {\n    let _ = m![use, 1];\n}\n"),
+            [2]
+        );
+        for fonte in [
+            "fn f(a: bool) {\n    if !(a) {}\n    while !(a) {}\n    let _ = 1 != 2;\n}\n",
+            "macro_rules! m {\n    ($x:expr) => {\n        $x\n    };\n}\nfn f() {\n    let _ = m!(usado + 1);\n}\n",
+            "fn f() {\n    crate::log_info!(\"teste\", \"use {}\", 1);\n    let _ = matches!(x, Some(_));\n}\n",
+        ] {
+            assert_eq!(acusadas(barra, fonte), Vec::<usize>::new(), "{fonte}");
+        }
+    }
+
+    /// Nenhuma macro nos arquivos dos carregadores: uma macro do arquivo,
+    /// em volta do `executar` com o atributo da suíte, tirava o atributo da
+    /// compilação, e o atributo continuava no texto, logo acima do `fn` (o
+    /// achado 4 do adversário do delta do lote A3 do #448). Num comentário
+    /// ou num texto, a palavra não conta.
+    #[test]
+    fn nenhuma_macro_nos_arquivos_dos_carregadores() {
+        let programa = "kernel/src/usuario/programa.rs";
+        let original = "/// doc\n#[cfg(feature = \"modo-teste\")]\npub fn executar(i: &[u8]) {}\n";
+        assert!(PROGRAMA_BOM.contains(original));
+        let prova = PROGRAMA_BOM.replacen(
+            original,
+            "macro_rules! so_na_suite {\n    (# [cfg $c:tt] $($t:tt)*) => {\n        $($t)*\n    };\n}\nso_na_suite! {\n    #[cfg(feature = \"modo-teste\")]\n    #[allow(dead_code)]\n    pub fn executar(i: &[u8]) {}\n}\n",
+            1,
+        );
+        let fora = carregadores_alargados(programa, &prova);
+        assert!(
+            fora.len() == 1 && fora[0].contains("`macro_rules!` num arquivo dos carregadores"),
+            "{fora:?}"
+        );
+        let codigo = "kernel/src/usuario/codigo.rs";
+        let bom = "pub(super) fn obter(c: &str) {}\n#[cfg(feature = \"modo-teste\")]\npub fn obter_de_teste(c: &str) {}\n";
+        assert_eq!(
+            carregadores_alargados(
+                codigo,
+                &format!("{bom}macro_rules! m {{\n    () => {{}};\n}}\n")
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            carregadores_alargados(
+                codigo,
+                &format!("{bom}// macro_rules! m\nconst S: &str = \"macro_rules!\";\n")
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    /// O atributo da suíte é o de verdade, no código: num comentário de
+    /// bloco logo acima do `fn` — que as linhas cruas aceitavam —, não vale
+    /// (o achado 5 do adversário do lote A3 do #448); nem com outra coisa
+    /// que não atributos e a visibilidade entre ele e o `fn`. Com outro
+    /// atributo ou a documentação no meio, ou na mesma linha do `fn` — que
+    /// a leitura das linhas cruas, que saiu, recusava —, vale.
+    #[test]
+    fn o_atributo_da_suite_num_comentario() {
+        let programa = "kernel/src/usuario/programa.rs";
+        let original = "/// doc\n#[cfg(feature = \"modo-teste\")]\npub fn executar(";
+        assert!(PROGRAMA_BOM.contains(original));
+        for errado in [
+            "/// doc\n/*\n#[cfg(feature = \"modo-teste\")]\n*/ pub fn executar(",
+            "/// doc\n#[cfg(feature = \"modo-teste\")]\npub const fn executar(",
+            "/// doc\n#[cfg(feature = \"modo-teste\")]\nunsafe fn executar(",
+        ] {
+            let fonte = PROGRAMA_BOM.replacen(original, errado, 1);
+            let fora = carregadores_alargados(programa, &fonte);
+            assert!(
+                fora.len() == 1 && fora[0].contains("`executar` fora da compilação da suíte"),
+                "{errado}: {fora:?}"
+            );
+        }
+        for certo in [
+            "#[cfg(feature = \"modo-teste\")]\n#[inline]\npub fn executar(",
+            "#[cfg(feature = \"modo-teste\")]\n/// doc\npub fn executar(",
+            "/// doc\n#[cfg(feature = \"modo-teste\")]\npub(crate) fn executar(",
+            "/// doc\n#[cfg(feature = \"modo-teste\")] pub fn executar(",
+        ] {
+            let fonte = PROGRAMA_BOM.replacen(original, certo, 1);
+            assert_eq!(
+                carregadores_alargados(programa, &fonte),
+                Vec::<String>::new(),
+                "{certo}"
+            );
         }
     }
 }
@@ -6809,22 +8216,19 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
                     fora.push(format!("{relativo}:{}: {}", n + 1, linha.trim()));
                 }
             }
-            // Um comentário não chama nada: a menção na documentação fica.
-            let comentario = linha.trim_start().starts_with("//");
-            for (i, (nome, donos)) in NOMES_PROTEGIDOS.iter().enumerate() {
-                if comentario || !tem_a_palavra(linha, nome) {
-                    continue;
-                }
-                if donos.contains(&relativo.as_str()) {
-                    nomes_achados[i].insert(relativo.clone());
-                } else {
-                    fora.push(format!(
-                        "{relativo}:{}: `{nome}` fora de {donos:?}: {}",
-                        n + 1,
-                        linha.trim()
-                    ));
-                }
-            }
+        }
+        // Os nomes protegidos, pela palavra, na linha crua e na só de
+        // código, e nenhum com outro nome — ver [`nomes_protegidos_fora`].
+        let (de_nomes, nos_donos) = nomes_protegidos_fora(&relativo, &texto);
+        fora.extend(de_nomes);
+        // E os carregadores, que dentro do módulo `usuario` só o
+        // `usuario/mod.rs` e o arquivo de cada um nomeiam, e com o nome
+        // deles — ver [`carregadores_nos_irmaos`] e
+        // [`carregadores_renomeados`].
+        fora.extend(carregadores_nos_irmaos(&relativo, &texto));
+        fora.extend(carregadores_renomeados(&relativo, &texto));
+        for i in nos_donos {
+            nomes_achados[i].insert(relativo.clone());
         }
         Ok(())
     })?;
@@ -6842,7 +8246,8 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
     // O journal se reaplica antes de alguém poder falar: no `main.rs`, a
     // abertura da persistência vem antes da primeira tarefa que atende um
     // agente e antes da suíte. Uma abertura depois disso seria uma janela
-    // em que a credencial revogada da imagem ainda está ativa.
+    // em que a credencial revogada da imagem ainda está ativa. E o trinco do
+    // boot, uma vez, depois dos dois lançamentos ([`trinco_fora_de_ordem`]).
     fora.extend(conferir_a_ordem_do_boot(&raiz)?);
     // O TLS é do programa, e sem atalho: nada desliga a verificação do
     // certificado, e o kernel não o tem.
@@ -6857,6 +8262,9 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
     // por fora da conferência, o programa do fio só nasce no carregador, e
     // o kernel não sela nada.
     fora.extend(conferir_codigo_conferido(&raiz)?);
+    // E os carregadores só se alcançam de dentro do módulo `usuario`; o que
+    // entra num programa sem a conferência, só na suíte.
+    fora.extend(conferir_os_carregadores(&raiz)?);
     // O servidor de Roughtime de teste é só da suíte; e nenhuma decisão lê
     // o relógio civil nem o lógico.
     fora.extend(conferir_servidor_de_hora_so_na_suite(&raiz)?);
@@ -6889,7 +8297,10 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
              Internet Computer, que é do programa, também não, e a declaração dele é genérica \
              e não é lida por decisão nenhuma; o plano de dados só \
              sai da taxa, e só espera pela auditoria, pelo gate; o \
-             código só vira processo pela conferência única, que o kernel faz e não sela; e \
+             código só vira processo pela conferência única, que o kernel faz e não sela, e \
+             pelos carregadores, que só o módulo `usuario` alcança, e nele só o \
+             `usuario/mod.rs` e o arquivo de cada um, sem outro nome; nenhum nome protegido \
+             ganha outro nome, nem por uma macro; e \
              a hora só anda pelos tratadores de time.sync e time.confirm, depois do gate, com \
              o servidor de teste só na suíte e o da bancada de tempo escrito à parte; e as \
              chaves de assinatura só mudam pelos handlers delas, pela prova e pela revogação \

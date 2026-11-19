@@ -41,6 +41,20 @@
 //! encerrado", e não "processo isolado" — e a resposta sem a explicação do
 //! comando às recusas sobre quem pede ficam nos casos acima que as
 //! conferem.
+//!
+//! E os achados do adversário da integração `f018bee..2c39e80` (o lote A3
+//! do #448), no fim do arquivo: a última palavra do nascimento amarra a
+//! autoridade e o caminho do lançamento aos do comando — de dentro de um
+//! `user.run`, pelo gancho de antes das perguntas do gate, também com a
+//! autoridade de outra pessoa —, e a mesma pergunta vem antes, no começo
+//! do lançamento, sem ler o código — o caminho que não existe, de dentro
+//! do `user.run` e com o trinco fechado (o adversário do lote A3) —; o
+//! registro do nascimento diz o editor pelo nome que a última palavra
+//! perguntou — pelo gancho do meio do nascimento, que troca o nome —; o
+//! `user.run` permitido que não lança grava o desfecho — o caminho que não
+//! existe, e o fio que não nasce, com a tabela de fios cheia —; e o kernel
+//! que não lança mais por conta própria depois do boot, que um comando
+//! ainda lança.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 
@@ -67,6 +81,38 @@ extern "C" fn ocupante(_argumento: u64) -> ! {
     }
     OCUPANTES.fetch_sub(1, SeqCst);
     crate::fios::terminar()
+}
+
+/// Enche a tabela de fios com fios do kernel que cedem até o caso soltá-los
+/// ([`esvaziar_a_tabela`]). `Ok` com quantos nasceram; `Err` com o motivo
+/// de um que não nasceu por outra coisa que a falta de vaga — os que
+/// nasceram antes dele continuam contados, e saem do mesmo jeito.
+fn encher_a_tabela() -> Result<usize, &'static str> {
+    SOLTAR.store(false, SeqCst);
+    OCUPANTES.store(0, SeqCst);
+    let mut criados = 0usize;
+    for _ in 0..crate::fios::MAX_FIOS {
+        match crate::fios::criar("teste-tabela-cheia", ocupante, 0) {
+            Ok(_) => {
+                OCUPANTES.fetch_add(1, SeqCst);
+                criados += 1;
+            }
+            Err(motivo) if motivo.contains("vaga") => break,
+            Err(motivo) => return Err(motivo),
+        }
+    }
+    Ok(criados)
+}
+
+/// Solta os fios que enchiam a tabela ([`encher_a_tabela`]), e espera eles
+/// saírem e as vagas voltarem a `livres`.
+fn esvaziar_a_tabela(livres: usize) -> Resultado {
+    SOLTAR.store(true, SeqCst);
+    let sairam = esperar_cedendo(|| OCUPANTES.load(SeqCst) == 0, 600)
+        .map_err(|_| "os fios que enchiam a tabela nao sairam");
+    let recolhidos = esperar_cedendo(|| crate::fios::vagas_livres_de_teste() >= livres, 600)
+        .map_err(|_| "as vagas dos fios que enchiam a tabela nao voltaram");
+    sairam.and(recolhidos)
 }
 
 /// O fio `energia` da tabela — o número e o estado —, se há um, e só um.
@@ -96,28 +142,12 @@ pub(super) fn energia_o_reinicio_com_a_tabela_de_fios_cheia() -> Resultado {
     let _ = esperar_cedendo(|| parado(fio_da_energia()), 300);
     let antes = fio_da_energia();
     let livres_antes = crate::fios::vagas_livres_de_teste();
-    SOLTAR.store(false, SeqCst);
-    OCUPANTES.store(0, SeqCst);
-    let mut criados = 0usize;
-    let mut outra = None;
-    for _ in 0..crate::fios::MAX_FIOS {
-        match crate::fios::criar("teste-tabela-cheia", ocupante, 0) {
-            Ok(_) => {
-                OCUPANTES.fetch_add(1, SeqCst);
-                criados += 1;
-            }
-            Err(motivo) if motivo.contains("vaga") => break,
-            Err(motivo) => {
-                outra = Some(motivo);
-                break;
-            }
-        }
-    }
+    let cheia = encher_a_tabela();
     let resultado = (|| -> Resultado {
-        if let Some(motivo) = outra {
+        let criados = cheia.map_err(|motivo| {
             crate::log_error!("teste", "a criacao recusou: {}", motivo);
-            return Err("um fio nao nasceu por outro motivo que a falta de vaga");
-        }
+            "um fio nao nasceu por outro motivo que a falta de vaga"
+        })?;
         if criados == 0 || crate::fios::vagas_livres_de_teste() != 0 {
             return Err("a tabela de fios nao encheu");
         }
@@ -146,14 +176,9 @@ pub(super) fn energia_o_reinicio_com_a_tabela_de_fios_cheia() -> Resultado {
         }
         Ok(())
     })();
-    SOLTAR.store(true, SeqCst);
-    let sairam = esperar_cedendo(|| OCUPANTES.load(SeqCst) == 0, 600)
-        .map_err(|_| "os fios que enchiam a tabela nao sairam");
-    let recolhidos = esperar_cedendo(|| crate::fios::vagas_livres_de_teste() >= livres_antes, 600)
-        .map_err(|_| "as vagas dos fios que enchiam a tabela nao voltaram");
+    let esvaziada = esvaziar_a_tabela(livres_antes);
     resultado?;
-    sairam?;
-    recolhidos?;
+    esvaziada?;
     // O fio é o do boot, parado de novo: o mesmo antes e depois.
     let _ = esperar_cedendo(|| parado(fio_da_energia()), 300);
     let depois = fio_da_energia();
@@ -1936,9 +1961,11 @@ pub(super) fn contencao_a_recusa_do_user_run_no_gate_diz_o_codigo() -> Resultado
 ///   —: as perguntas sobre quem pede um processo nao supoem "sem imagem", que
 ///   passava pela confianca no editor sem pergunta; recusam como fora de um
 ///   comando autorizado (`ERROR`), com quem pede na auditoria.
-/// - O lancamento do `user.run` fora de um comando decidido: a ultima
-///   palavra recusa (`ERROR`, "fora de um comando autorizado"), em nome do
-///   kernel na auditoria, e nada nasce.
+/// - O lancamento do `user.run` fora de um comando decidido: a pergunta da
+///   ultima palavra sobre o lancamento recusa (`ERROR`, "fora de um comando
+///   autorizado") — desde o achado 2 do adversario do lote A3 do #448, ja
+///   no comeco do lancamento —, em nome do kernel na auditoria, e nada
+///   nasce.
 /// - E a excecao, pelo que ela e: o kernel que lanca por conta propria, fora
 ///   de um comando — o boot, a suite —, lanca.
 pub(super) fn contencao_o_desconhecido_na_ultima_palavra_e_recusado() -> Resultado {
@@ -2315,5 +2342,607 @@ pub(super) fn contencao_o_lancamento_num_comando_que_nao_e_o_user_run_e_recusado
     crate::armazem::no_meio_da_verificacao_de_teste(None);
     crate::arch::sem_interrupcoes(|| *NO_COMANDO_ERRADO.lock() = [None, None]);
     encerrar_os_encerraveis();
+    resultado
+}
+
+// ---------------------------------------------------------------------------
+// Os achados do adversario da integracao `f018bee..2c39e80` (o lote A3 do
+// #448): a ultima palavra amarrada a autoridade e ao caminho do comando, o
+// nome do editor de agora no nascimento, o desfecho do `user.run` que nao
+// lanca, e o kernel que nao lanca mais por conta propria depois do boot
+// ---------------------------------------------------------------------------
+
+/// O que os lancamentos de dentro do `user.run` do operador ouviram: o do
+/// sistema (`usuario::lancar_como_sistema`); o do comando com outro
+/// caminho; o do comando com outra autoridade — a do sistema, e a de outra
+/// pessoa, da mesma especie —; o do exemplo embutido; e os dois de um
+/// caminho que nao existe, pelo comando e pelo sistema. `None`, nao
+/// tentado; `Ok`, o fio que nasceu; `Err`, o motivo da recusa.
+static DE_DENTRO: crate::trava::Mutex<[Option<Result<u64, &'static str>>; 7]> =
+    crate::trava::Mutex::new([None; 7]);
+
+/// A sessao da outra pessoa do caso abaixo — os oito bytes dela —, com que
+/// o gancho lanca de dentro do `user.run` do operador.
+static OUTRA_PESSOA: AtomicU64 = AtomicU64::new(0);
+
+/// Um caminho que o papel do operador alcanca — `/bin` — e que nao existe.
+const CAMINHO_QUE_NAO_EXISTE: &str = "/bin/nao-existe";
+
+/// O motivo de um lancamento recusado, ou o fio que nasceu.
+fn ouvido_de(r: Result<u64, crate::usuario::NaoLancou>) -> Result<u64, &'static str> {
+    use crate::usuario::NaoLancou;
+    r.map_err(|n| match n {
+        NaoLancou::Recusado(_, m) | NaoLancou::PorQuemPede(_, m) | NaoLancou::Fio(m) => m,
+        NaoLancou::Codigo(_) => "o codigo nao se leu",
+    })
+}
+
+/// O `ola` da imagem: o outro caminho, que o gate nao decidiu.
+fn caminho_do_ola() -> alloc::string::String {
+    alloc::format!("{}/ola", crate::usuario::DIRETORIO_DOS_COMPILADOS)
+}
+
+/// Antes das perguntas do gate sobre quem pede, dentro do `user.run` do
+/// operador (`autorizacao::antes_do_gate_do_lancamento_de_teste`): lanca de
+/// dentro do comando sete vezes, e guarda o que cada lancamento ouviu. E a
+/// prova de conceito do adversario — o lancamento como o sistema —, as
+/// formas do `lancar_conferido` — outro caminho, a autoridade do sistema, e
+/// a de outra pessoa —, o exemplo embutido, e os dois de um caminho que o
+/// gate nao decidiu e que nao existe — pelo comando e pelo sistema —, que
+/// so a pergunta do comeco do lancamento recusa antes de ler o arquivo.
+fn lancar_de_dentro_do_user_run() {
+    let decidido = caminho_do_encerravel();
+    let atual = crate::autorizacao::autoridade_atual();
+    let outra = crate::autorizacao::Autoridade::Pessoa {
+        sessao: crate::pessoas::IdSessao(OUTRA_PESSOA.load(SeqCst).to_le_bytes()),
+    };
+    let ouvidos = [
+        crate::usuario::lancar_como_sistema(Some(&decidido)),
+        ouvido_de(crate::usuario::lancar_conferido(
+            Some(&caminho_do_ola()),
+            atual,
+        )),
+        ouvido_de(crate::usuario::lancar_conferido(
+            Some(&decidido),
+            crate::autorizacao::Autoridade::Sistema,
+        )),
+        ouvido_de(crate::usuario::lancar_conferido(Some(&decidido), outra)),
+        ouvido_de(crate::usuario::lancar_conferido(None, atual)),
+        ouvido_de(crate::usuario::lancar_conferido(
+            Some(CAMINHO_QUE_NAO_EXISTE),
+            atual,
+        )),
+        crate::usuario::lancar_como_sistema(Some(CAMINHO_QUE_NAO_EXISTE)),
+    ];
+    crate::arch::sem_interrupcoes(|| *DE_DENTRO.lock() = ouvidos.map(Some));
+}
+
+/// O item 2 do lote A3 do #448: a ultima palavra do nascimento, num
+/// comando decidido, refazia a decisao do comando, mas nao olhava a
+/// autoridade nem o caminho do processo que nasce. Dentro do `user.run` de
+/// uma pessoa operadora, o gancho de antes das perguntas do gate lanca como
+/// o sistema o `encerravel` — o mesmo caminho que o comando decidiu —, e
+/// pelo lancamento do `user.run` outro programa, o mesmo com a autoridade
+/// do sistema e com a de outra pessoa operadora — a mesma especie de
+/// autoridade, outro titular —, e o exemplo embutido. Os cinco recusados
+/// como fora de um comando autorizado (`ERROR`), cada um na auditoria como
+/// a execucao da decisao do operador, com o caminho que tentou; so o do
+/// `user.run` nasce — um `processo N lancado` —, e age como o operador.
+/// Antes, os quatro de entao nasciam, dois com a autoridade do sistema, e
+/// todos com o nascimento gravado como a execucao da decisao do operador.
+///
+/// E o achado 2 do adversario do lote A3: a amarracao valia so no
+/// nascimento, e um lancamento de um caminho que o gate nao decidiu e que
+/// nao existe — pelo comando, e como o sistema — perguntava sobre quem pede
+/// com a autoridade dele e lia o arquivo, e a leitura que falhava ia a
+/// auditoria como a execucao da decisao do operador ("nao encontrado"). Os
+/// dois sao recusados como fora de um comando autorizado ja no comeco do
+/// lancamento, e gravados como a ultima palavra grava a recusa dela: nenhum
+/// registro do caminho diz outra coisa.
+pub(super) fn contencao_o_lancamento_de_dentro_do_user_run_so_nasce_com_a_autoridade_e_o_caminho()
+-> Resultado {
+    use politica::Codigo;
+    const FORA: &str = "fora de um comando autorizado";
+    const NASCERAM: [&str; 7] = [
+        "o lancamento como sistema de dentro do user.run nasceu",
+        "o lancamento de outro caminho de dentro do user.run nasceu",
+        "o lancamento com outra autoridade de dentro do user.run nasceu",
+        "o lancamento com a autoridade de outra pessoa de dentro do user.run nasceu",
+        "o exemplo embutido de dentro do user.run nasceu",
+        "o lancamento de um caminho que nao existe de dentro do user.run nasceu",
+        "o lancamento como sistema de um caminho que nao existe de dentro do user.run nasceu",
+    ];
+    crate::pessoas::esquecer_registradas();
+    crate::arch::sem_interrupcoes(|| *DE_DENTRO.lock() = [None; 7]);
+    let resultado = (|| -> Resultado {
+        let quem = operador_que_lanca(170, "lanca-de-dentro");
+        let crate::autorizacao::Chamador::Pessoa(sessao) = quem else {
+            return Err("quem lanca no caso nao e uma pessoa");
+        };
+        let crate::autorizacao::Chamador::Pessoa(outra) = operador_que_lanca(175, "outra-pessoa")
+        else {
+            return Err("a outra pessoa do caso nao e uma pessoa");
+        };
+        OUTRA_PESSOA.store(u64::from_le_bytes(outra.0), SeqCst);
+        let decidido = caminho_do_encerravel();
+        let cabeca = crate::autorizacao::ultimo_registro();
+        crate::autorizacao::antes_do_gate_do_lancamento_de_teste(Some(
+            lancar_de_dentro_do_user_run,
+        ));
+        let r = fs_pedir(
+            quem,
+            "user.run",
+            &alloc::format!(r#"{{"path":"{decidido}"}}"#),
+        );
+        crate::autorizacao::antes_do_gate_do_lancamento_de_teste(None);
+        let ouvidos = crate::arch::sem_interrupcoes(|| *DE_DENTRO.lock());
+        crate::log_info!(
+            "teste",
+            "contencao: os lancamentos de dentro do user.run ouviram {:?}: {}",
+            ouvidos,
+            r
+        );
+        let fio = fs_numero(&r, "thread_id").ok_or("o user.run do operador nao lancou")?;
+        for (ouvido, nasceu) in ouvidos.iter().zip(NASCERAM) {
+            match ouvido {
+                Some(Err(m)) if *m == FORA => {}
+                None => return Err("o gancho nao lancou de dentro do user.run"),
+                Some(Ok(_)) => return Err(nasceu),
+                Some(Err(_)) => {
+                    return Err(
+                        "um lancamento de dentro do user.run foi recusado por outro motivo",
+                    );
+                }
+            }
+        }
+        // As sete recusas, como a execucao da decisao do operador, com o
+        // caminho de cada uma; e um nascimento so, o do `user.run`.
+        let mut recursos: alloc::vec::Vec<alloc::string::String> = registros_depois(cabeca, |ev| {
+            ev.metodo == "user.run" && ev.codigo == Codigo::Error && e_a_execucao_de(ev, None, FORA)
+        })
+        .into_iter()
+        .map(|(_, ev)| ev.recurso)
+        .collect();
+        recursos.sort();
+        let mut esperados = alloc::vec![
+            decidido.clone(),
+            decidido.clone(),
+            decidido.clone(),
+            caminho_do_ola(),
+            alloc::string::String::from("<exemplo embutido>"),
+            alloc::string::String::from(CAMINHO_QUE_NAO_EXISTE),
+            alloc::string::String::from(CAMINHO_QUE_NAO_EXISTE),
+        ];
+        esperados.sort();
+        // E o caminho que nao existe so nas duas recusas: nada o leu, e
+        // nenhuma pergunta sobre quem pede o gravou.
+        let do_que_nao_existe = registros_depois(cabeca, |ev| ev.recurso == CAMINHO_QUE_NAO_EXISTE);
+        if do_que_nao_existe.len() != 2 {
+            for (seq, ev) in &do_que_nao_existe {
+                crate::log_error!("teste", "registro {}: {} {}", seq, ev.metodo, ev.detalhe);
+            }
+            return Err("o caminho que nao existe foi lido, ou gravado por outro motivo");
+        }
+        let lancados = registros_depois(cabeca, |ev| {
+            ev.codigo == Codigo::Allow && ev.detalhe.contains(" lancado")
+        });
+        let nasceu = alloc::format!("processo {fio} lancado");
+        let so_o_do_user_run = matches!(
+            &lancados[..],
+            [(_, ev)] if ev.metodo == "user.run" && e_a_execucao_de(ev, None, &nasceu)
+        );
+        if recursos != esperados || !so_o_do_user_run {
+            crate::log_error!(
+                "teste",
+                "recusas de {:?}; {} lancamento(s)",
+                recursos,
+                lancados.len()
+            );
+            return Err("a auditoria nao diz as sete recusas e um nascimento so, o do user.run");
+        }
+        // O que nasceu age como o operador.
+        match crate::fios::processo(fio) {
+            Some((crate::autorizacao::Autoridade::Pessoa { sessao: s }, _)) if s == sessao => {
+                Ok(())
+            }
+            outro => {
+                crate::log_error!("teste", "{:?}", outro.map(|(a, _)| a));
+                Err("o processo do user.run nao age como o operador")
+            }
+        }
+    })();
+    crate::autorizacao::antes_do_gate_do_lancamento_de_teste(None);
+    crate::arch::sem_interrupcoes(|| *DE_DENTRO.lock() = [None; 7]);
+    OUTRA_PESSOA.store(0, SeqCst);
+    encerrar_os_encerraveis();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O registro de editores com o do caso renomeado, que o gancho poe no
+/// meio do nascimento: um gancho e uma funcao sem estado.
+static EDITORES_DO_MEIO: crate::trava::Mutex<Option<alloc::vec::Vec<crate::identidade::Editor>>> =
+    crate::trava::Mutex::new(None);
+
+/// O nome com que o editor do caso volta ao registro no meio do nascimento.
+const NOME_NOVO: &str = "caso-novo";
+
+/// No meio do nascimento do lancado: a chave do editor do caso sai do
+/// registro e volta com outro nome — o registro trocado de uma vez.
+fn renomear_o_editor(nascendo: u64) {
+    if let Some(novos) = crate::arch::sem_interrupcoes(|| EDITORES_DO_MEIO.lock().take()) {
+        crate::identidade::trocar_editores_de_teste(novos);
+        ISOLOU.store(true, SeqCst);
+    }
+    NASCENDO.store(nascendo, SeqCst);
+}
+
+/// O item 4 do lote A3 do #448: a ultima palavra do nascimento pergunta de
+/// novo a confianca no editor do codigo, e a pergunta devolve o nome dele
+/// de agora — que o registro do nascimento descartava, gravando o da
+/// conferencia. O `encerravel` selado pelo editor do caso, no armazem; uma
+/// pessoa operadora, cujo papel confia no editor pelos dois nomes — "caso"
+/// e "caso-novo" —, pede o `user.run` dele, e o gancho do meio do
+/// nascimento troca o nome da chave no registro, depois da conferencia. O
+/// processo nasce, e o registro do nascimento diz o editor pelo nome de
+/// agora — `processo N lancado: codigo R de caso-novo` —, como a execucao
+/// da decisao. Antes, dizia `de caso`.
+pub(super) fn codigo_o_nascimento_grava_o_nome_do_editor_de_agora() -> Resultado {
+    use crate::identidade::Editor;
+    crate::pessoas::esquecer_registradas();
+    let resultado = super::com_editores_do_caso(|| {
+        let caminho = alloc::format!("{}/encerravel-renomeado", super::CODIGO_INSTALADO);
+        gravar_o_encerravel_selado(&caminho)?;
+        let resumo = crate::vfs::ler_tudo(&caminho_do_encerravel())
+            .map(|b| politica::auditoria::comeco_do_resumo(&sigilo::codigo::resumo(&b)))
+            .map_err(|_| "o encerravel da imagem nao se leu")?;
+        let dois_nomes = super::politica_trocada(&[
+            ("editores sistema bancada", "editores sistema bancada caso"),
+            (
+                "editores operador bancada",
+                "editores operador bancada caso caso-novo",
+            ),
+            (
+                "editores administrador bancada",
+                "editores administrador bancada caso",
+            ),
+        ])?;
+        super::com_a_politica(dois_nomes, || {
+            let quem = operador_que_lanca(171, "editor-renomeado");
+            // O registro de agora, com o editor do caso renomeado, pronto
+            // para o gancho.
+            let chave = sigilo::codigo::publica_do_editor(&super::EDITOR_DO_CASO.0);
+            let agora = crate::identidade::trocar_editores_de_teste(alloc::vec::Vec::new());
+            let renomeados: alloc::vec::Vec<Editor> = agora
+                .iter()
+                .map(|e| Editor {
+                    chave: e.chave,
+                    nome: if e.chave == chave {
+                        NOME_NOVO.into()
+                    } else {
+                        e.nome.clone()
+                    },
+                })
+                .collect();
+            crate::identidade::trocar_editores_de_teste(agora);
+            crate::arch::sem_interrupcoes(|| *EDITORES_DO_MEIO.lock() = Some(renomeados));
+            let cabeca = crate::autorizacao::ultimo_registro();
+            armar(renomear_o_editor, 0);
+            let r = fs_pedir(
+                quem,
+                "user.run",
+                &alloc::format!(r#"{{"path":"{caminho}"}}"#),
+            );
+            crate::fios::no_meio_do_nascimento_de_teste(None);
+            crate::log_info!(
+                "teste",
+                "codigo: o editor renomeado no meio do nascimento: {}",
+                r
+            );
+            if !ISOLOU.load(SeqCst) {
+                return Err("o gancho nao renomeou o editor no meio do nascimento");
+            }
+            let fio = fs_numero(&r, "thread_id")
+                .ok_or("o user.run do codigo com o editor renomeado nao lancou")?;
+            let esperado = alloc::format!("processo {fio} lancado: codigo {resumo} de {NOME_NOVO}");
+            let nascimentos = registros_depois(cabeca, |ev| {
+                ev.metodo == "user.run"
+                    && ev.codigo == politica::Codigo::Allow
+                    && ev.detalhe.contains(" lancado")
+            });
+            match &nascimentos[..] {
+                [(_, ev)] if e_a_execucao_de(ev, None, &esperado) => Ok(()),
+                outros => {
+                    crate::log_error!("teste", "esperado `{}`", esperado);
+                    for (seq, ev) in outros {
+                        crate::log_error!("teste", "registro {}: {}", seq, ev.detalhe);
+                    }
+                    Err(
+                        "o registro do nascimento nao diz o nome do editor que a ultima palavra viu",
+                    )
+                }
+            }
+        })
+    });
+    crate::arch::sem_interrupcoes(|| *EDITORES_DO_MEIO.lock() = None);
+    crate::fios::no_meio_do_nascimento_de_teste(None);
+    encerrar_os_encerraveis();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O item 5 do lote A3 do #448, a leitura: o `user.run` de um caminho que o
+/// papel alcanca e que nao existe — o operador alcanca `/bin` — e permitido
+/// pelo gate, e o arquivo nao se le. A execucao da decisao diz por que,
+/// como o `exec` diz o mesmo caso: `ERROR`, "nao encontrado", citando a
+/// decisao; e quem pediu ouve que nada foi lancado, com o motivo. Fora de
+/// um comando, o mesmo lancamento pelo kernel grava a recusa em nome dele.
+/// Antes, nenhum dos dois gravava nada: o `ALLOW` ficava sem desfecho.
+pub(super) fn contencao_o_user_run_de_um_caminho_que_nao_existe_grava_o_desfecho() -> Resultado {
+    use politica::Codigo;
+    const CAMINHO: &str = "/bin/nao-existe";
+    let motivo = crate::vfs::Erro::NaoEncontrado.motivo();
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let quem = operador_que_lanca(172, "caminho-que-nao-existe");
+        let cabeca = crate::autorizacao::ultimo_registro();
+        let r = fs_pedir(
+            quem,
+            "user.run",
+            &alloc::format!(r#"{{"path":"{CAMINHO}"}}"#),
+        );
+        if super::decisao_do_envelope(&r) != "ALLOW"
+            || fs_numero(&r, "thread_id").is_some()
+            || !r.contains(r#""launched":false"#)
+            || fs_texto(&r, "error").as_deref() != Some(motivo)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("o user.run de um caminho que nao existe nao respondeu a leitura recusada");
+        }
+        let decisoes = registros_depois(cabeca, |ev| {
+            ev.metodo == "user.run" && ev.recurso == CAMINHO && ev.codigo == Codigo::Allow
+        });
+        let execucoes = registros_depois(cabeca, |ev| {
+            ev.metodo == "user.run"
+                && ev.recurso == CAMINHO
+                && ev.codigo == Codigo::Error
+                && e_a_execucao_de(ev, None, motivo)
+        });
+        let cita = match (&decisoes[..], &execucoes[..]) {
+            ([(d, _)], [(_, ev)]) => super::decisao_executada(&ev.detalhe) == Some(*d),
+            _ => false,
+        };
+        if !cita {
+            crate::log_error!(
+                "teste",
+                "{} decisao(oes), {} execucao(oes)",
+                decisoes.len(),
+                execucoes.len()
+            );
+            return Err("o user.run permitido de um caminho que nao existe ficou sem o desfecho");
+        }
+        // Fora de um comando: em nome do kernel.
+        let cabeca = crate::autorizacao::ultimo_registro();
+        let fora = crate::usuario::lancar_pelo_kernel(
+            Some(CAMINHO),
+            crate::autorizacao::Autoridade::Sistema,
+        );
+        if !matches!(
+            fora,
+            Err(crate::usuario::NaoLancou::Codigo(
+                crate::usuario::codigo::Recusa::Leitura(crate::vfs::Erro::NaoEncontrado)
+            ))
+        ) {
+            crate::log_error!("teste", "{:?}", fora);
+            return Err("o lancamento do kernel de um caminho que nao existe nao foi recusado");
+        }
+        let do_kernel = registros_depois(cabeca, |ev| {
+            ev.metodo == "process.run"
+                && ev.recurso == CAMINHO
+                && ev.agente == "kernel"
+                && ev.codigo == Codigo::Error
+                && ev.detalhe == motivo
+        });
+        if do_kernel.len() != 1 {
+            return Err("a leitura recusada fora de um comando nao foi gravada em nome do kernel");
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O item 5 do lote A3 do #448, o fio: com a tabela de fios cheia — fios
+/// do kernel ate nao haver vaga, sem caminho so de teste no codigo de
+/// producao —, o `user.run` de uma pessoa operadora e permitido, o codigo
+/// se le, e o fio nao nasce. A execucao da decisao diz por que: `ERROR`,
+/// com o motivo da falta de vaga, citando a decisao; quem pediu ouve o
+/// mesmo motivo. Fora de um comando, o lancamento pelo kernel grava em nome
+/// dele. Antes, nada se gravava. As vagas voltam no fim.
+pub(super) fn contencao_o_user_run_cujo_fio_nao_nasce_grava_o_desfecho() -> Resultado {
+    use politica::Codigo;
+    crate::pessoas::esquecer_registradas();
+    let quem = operador_que_lanca(173, "fio-que-nao-nasce");
+    let caminho = caminho_do_encerravel();
+    let livres = crate::fios::vagas_livres_de_teste();
+    let cheia = encher_a_tabela();
+    let resultado = (|| -> Resultado {
+        let criados = cheia.map_err(|motivo| {
+            crate::log_error!("teste", "a criacao recusou: {}", motivo);
+            "um fio nao nasceu por outro motivo que a falta de vaga"
+        })?;
+        if criados == 0 || crate::fios::vagas_livres_de_teste() != 0 {
+            return Err("a tabela de fios nao encheu");
+        }
+        let cabeca = crate::autorizacao::ultimo_registro();
+        let r = fs_pedir(
+            quem,
+            "user.run",
+            &alloc::format!(r#"{{"path":"{caminho}"}}"#),
+        );
+        let motivo = fs_texto(&r, "error").unwrap_or_default();
+        if super::decisao_do_envelope(&r) != "ALLOW"
+            || fs_numero(&r, "thread_id").is_some()
+            || !r.contains(r#""launched":false"#)
+            || !motivo.contains("vaga")
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("o user.run com a tabela cheia nao respondeu a falta de vaga");
+        }
+        let decisoes = registros_depois(cabeca, |ev| {
+            ev.metodo == "user.run" && ev.recurso == caminho && ev.codigo == Codigo::Allow
+        });
+        let execucoes = registros_depois(cabeca, |ev| {
+            ev.metodo == "user.run"
+                && ev.recurso == caminho
+                && ev.codigo == Codigo::Error
+                && e_a_execucao_de(ev, None, &motivo)
+        });
+        let lancados = registros_depois(cabeca, |ev| ev.detalhe.contains(" lancado"));
+        let cita = match (&decisoes[..], &execucoes[..]) {
+            ([(d, _)], [(_, ev)]) => super::decisao_executada(&ev.detalhe) == Some(*d),
+            _ => false,
+        };
+        if !cita || !lancados.is_empty() {
+            crate::log_error!(
+                "teste",
+                "{} decisao(oes), {} execucao(oes), {} lancamento(s)",
+                decisoes.len(),
+                execucoes.len(),
+                lancados.len()
+            );
+            return Err("o user.run permitido cujo fio nao nasceu ficou sem o desfecho");
+        }
+        // Fora de um comando: em nome do kernel.
+        let cabeca = crate::autorizacao::ultimo_registro();
+        let fora = crate::usuario::lancar_pelo_kernel(
+            Some(&caminho),
+            crate::autorizacao::Autoridade::Sistema,
+        );
+        if !matches!(&fora, Err(crate::usuario::NaoLancou::Fio(m)) if *m == motivo) {
+            crate::log_error!("teste", "{:?}", fora);
+            return Err("o lancamento do kernel com a tabela cheia nao ouviu a falta de vaga");
+        }
+        let do_kernel = registros_depois(cabeca, |ev| {
+            ev.metodo == "process.run"
+                && ev.recurso == caminho
+                && ev.agente == "kernel"
+                && ev.codigo == Codigo::Error
+                && ev.detalhe == motivo
+        });
+        if do_kernel.len() != 1 {
+            return Err(
+                "o fio que nao nasceu fora de um comando nao foi gravado em nome do kernel",
+            );
+        }
+        Ok(())
+    })();
+    let esvaziada = esvaziar_a_tabela(livres);
+    crate::pessoas::esquecer_registradas();
+    resultado.and(esvaziada)
+}
+
+/// O trinco do boot (o item 1 do lote A3 do #448): fora da suite, o
+/// `main.rs` fecha os lancamentos do kernel por conta propria depois dos
+/// dois dele, o servidor de janelas e o Terminal. O caso os fecha: o
+/// lancamento do kernel fora de um comando — pelo `lancar_pelo_kernel` e
+/// pelo do sistema — e recusado como fora de um comando autorizado, em
+/// nome do kernel, e nada nasce; o `user.run` de uma pessoa operadora, um
+/// comando decidido, lanca como sempre. Reabertos — o que so a suite faz
+/// —, o kernel lanca de novo.
+///
+/// E o achado 2 do adversario do lote A3: o trinco valia so no nascimento,
+/// e o lancamento do kernel de um caminho que nao existe lia o arquivo e
+/// gravava "nao encontrado" em nome do kernel — o trinco nem chegava a
+/// recusar. Recusado ja no comeco do lancamento, como fora de um comando
+/// autorizado, e o caminho so nessa recusa.
+pub(super) fn contencao_depois_do_boot_o_kernel_nao_lanca_por_conta_propria() -> Resultado {
+    use politica::Codigo;
+    const FORA: &str = "fora de um comando autorizado";
+    crate::pessoas::esquecer_registradas();
+    let caminho = caminho_do_encerravel();
+    let livres = crate::fios::vagas_livres_de_teste();
+    let cabeca = crate::autorizacao::ultimo_registro();
+    crate::autorizacao::fechar_os_lancamentos_do_kernel();
+    let pelo_kernel =
+        crate::usuario::lancar_pelo_kernel(Some(&caminho), crate::autorizacao::Autoridade::Sistema);
+    let como_sistema = crate::usuario::lancar_como_sistema(Some(&caminho));
+    let do_que_nao_existe = crate::usuario::lancar_pelo_kernel(
+        Some(CAMINHO_QUE_NAO_EXISTE),
+        crate::autorizacao::Autoridade::Sistema,
+    );
+    let do_comando = Encerravel::lancar(operador_que_lanca(174, "lanca-com-o-trinco"));
+    crate::autorizacao::reabrir_os_lancamentos_do_kernel_de_teste();
+    let resultado = (|| -> Resultado {
+        crate::log_info!(
+            "teste",
+            "contencao: com os lancamentos do kernel fechados: {:?}, {:?}, {:?}",
+            pelo_kernel,
+            como_sistema,
+            do_que_nao_existe
+        );
+        if !matches!(
+            pelo_kernel,
+            Err(crate::usuario::NaoLancou::Recusado(Codigo::Error, m)) if m == FORA
+        ) || como_sistema != Err(FORA)
+        {
+            return Err("depois do boot, o kernel lancou por conta propria");
+        }
+        if !matches!(
+            do_que_nao_existe,
+            Err(crate::usuario::NaoLancou::Recusado(Codigo::Error, m)) if m == FORA
+        ) {
+            return Err("depois do boot, o kernel leu o caminho que lancaria por conta propria");
+        }
+        let do_kernel = registros_depois(cabeca, |ev| {
+            ev.metodo == "process.run"
+                && ev.recurso == caminho
+                && ev.agente == "kernel"
+                && ev.codigo == Codigo::Error
+                && ev.detalhe == FORA
+        });
+        if do_kernel.len() != 2 {
+            return Err("as recusas do kernel depois do boot nao foram gravadas em nome dele");
+        }
+        let do_que_nao_existe = registros_depois(cabeca, |ev| ev.recurso == CAMINHO_QUE_NAO_EXISTE);
+        if !matches!(
+            &do_que_nao_existe[..],
+            [(_, ev)] if ev.metodo == "process.run"
+                && ev.agente == "kernel"
+                && ev.codigo == Codigo::Error
+                && ev.detalhe == FORA
+        ) {
+            return Err("o caminho que nao existe nao ficou so na recusa do kernel depois do boot");
+        }
+        // O comando decidido lanca, com os lancamentos do kernel fechados:
+        // um nascimento so, o dele.
+        let e = do_comando?;
+        let nascidos = registros_depois(cabeca, |ev| ev.detalhe.contains(" lancado"));
+        let nasceu = alloc::format!("processo {} lancado", e.fio);
+        if !matches!(
+            &nascidos[..],
+            [(_, ev)] if ev.metodo == "user.run" && e_a_execucao_de(ev, None, &nasceu)
+        ) {
+            return Err("com os lancamentos do kernel fechados, o user.run nao lancou so o dele");
+        }
+        encerrar_os_encerraveis();
+        if esperar_cedendo(|| crate::fios::vagas_livres_de_teste() >= livres, 300).is_err() {
+            return Err("as vagas dos lancamentos recusados nao voltaram");
+        }
+        // Reabertos, na suite: o kernel lanca de novo.
+        let desde = crate::log::total_emitidos();
+        let fio = crate::usuario::lancar_pelo_kernel(
+            Some(&caminho),
+            crate::autorizacao::Autoridade::Sistema,
+        )
+        .map_err(|n| {
+            crate::log_error!("teste", "{:?}", n);
+            "reabertos os lancamentos, o kernel nao lancou"
+        })?;
+        Encerravel { fio, desde }.esperar_linha("encerravel: pronto", 1)
+    })();
+    crate::autorizacao::reabrir_os_lancamentos_do_kernel_de_teste();
+    encerrar_os_encerraveis();
+    crate::pessoas::esquecer_registradas();
     resultado
 }

@@ -474,7 +474,7 @@ pub fn estado() -> Estado {
 /// [`auditoria_gravada`] — ver `crate::oleoduto`.
 pub fn drenando() -> bool {
     #[cfg(feature = "modo-teste")]
-    if AUDITORIA_PAUSADA.load(Ordering::Acquire) {
+    if MARCAS_DA_AUDITORIA.load(Ordering::Acquire) & PAUSADA != 0 {
         return false;
     }
     estado() == Estado::Disponivel
@@ -2069,53 +2069,102 @@ pub const INTERVALO_DA_AUDITORIA_MS: u64 = 2_000;
 /// intervalo: metade do anel, para nenhum sair dele antes do disco.
 const AUDITORIA_QUE_NAO_ESPERA: u64 = crate::autorizacao::CAPACIDADE_DA_AUDITORIA as u64 / 2;
 
-/// Só na suíte: o coletor deixa de gravar a auditoria sozinho. A suíte
-/// conta registros, e um registro de auditoria no meio de um caso mudaria
-/// a conta; os casos que o querem pedem [`gravar_auditoria`].
+/// Só na suíte: as duas marcas que param o coletor da auditoria, num
+/// atômico só — a pausa ([`PAUSADA`]) e o journal segurado ([`SEGURADA`])
+/// —, que o coletor lê de uma vez ([`gravar_auditoria_se_preciso`]). Em dois
+/// atômicos, lidos um depois do outro, a devolução do estado da suíte —
+/// pausa o coletor, depois solta o journal — deixava o coletor que lesse a
+/// pausa antes dela, e o journal depois da soltura, gravar sem instante
+/// nenhum com as duas tiradas, e sem a conta
+/// ([`SOLTURAS_COM_O_JOURNAL_SOLTO`]) ver (o achado 6 do adversário do lote
+/// A3 do #448). A suíte começa com o coletor pausado e o journal solto.
 #[cfg(feature = "modo-teste")]
-static AUDITORIA_PAUSADA: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(true);
+static MARCAS_DA_AUDITORIA: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(PAUSADA);
 
-/// Só para a suíte: pausa ou solta a gravação periódica da auditoria.
+/// Só na suíte, a marca da pausa: o coletor deixa de gravar a auditoria
+/// sozinho, e o journal sai do caminho dela ([`drenando`]). A suíte conta
+/// registros, e um registro de auditoria no meio de um caso mudaria a
+/// conta; os casos que o querem pedem [`gravar_auditoria`].
+#[cfg(feature = "modo-teste")]
+const PAUSADA: u8 = 1;
+
+/// Só na suíte, a marca do journal segurado — de pé, e o consumidor do
+/// caminho da auditoria, mas sem gravar: o disco que demora. Diferente da
+/// pausa, que tira o journal do caminho; segurado, ele continua nele,
+/// parado.
+#[cfg(feature = "modo-teste")]
+const SEGURADA: u8 = 2;
+
+/// Só na suíte: põe ou tira a `marca` de [`MARCAS_DA_AUDITORIA`], e conta a
+/// soltura que deixa as duas tiradas ([`SOLTURAS_COM_O_JOURNAL_SOLTO`]) —
+/// na mesma operação que a tira, sem leitura à parte.
+#[cfg(feature = "modo-teste")]
+fn marcar_a_auditoria(marca: u8, posta: bool) {
+    if posta {
+        MARCAS_DA_AUDITORIA.fetch_or(marca, Ordering::AcqRel);
+        return;
+    }
+    let antes = MARCAS_DA_AUDITORIA.fetch_and(!marca, Ordering::AcqRel);
+    if antes & !marca == 0 {
+        SOLTURAS_COM_O_JOURNAL_SOLTO.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// Só para a suíte: pausa ou solta a gravação periódica da auditoria — ver
+/// [`PAUSADA`].
 #[cfg(feature = "modo-teste")]
 pub fn pausar_a_auditoria_de_teste(pausada: bool) {
-    AUDITORIA_PAUSADA.store(pausada, Ordering::Release);
+    marcar_a_auditoria(PAUSADA, pausada);
 }
 
-/// Só na suíte: o journal segurado — de pé, e o consumidor do caminho da
-/// auditoria, mas sem gravar: o disco que demora. Diferente da pausa, que
-/// tira o journal do caminho; segurado, ele continua nele, parado.
+/// Só na suíte: quantas vezes o coletor ficou solto com o journal solto —
+/// a pausa tirada com o journal solto, ou o journal solto com o coletor
+/// sem a pausa. É o estado em que o coletor grava a auditoria sozinho. Os
+/// casos que o querem gravando o fazem, e um deles confere que a conta
+/// andou quando soltou o coletor com o journal solto, e o coletor gravou
+/// (`auditoria: o que nao muda estado vai no registro seguinte, ou no do
+/// coletor`, o controle positivo dela); o caso
+/// do executor (`suite: o executor ve e devolve o coletor solto e o journal
+/// segurado`) confere que, nele, a conta não anda: uma gravação do coletor
+/// ali cairia num caso seguinte, e só seria vista se acontecesse naquele
+/// instante (o item 6 do lote A3 do #448, e o achado 6 do adversário dele).
 #[cfg(feature = "modo-teste")]
-static AUDITORIA_SEGURADA: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+static SOLTURAS_COM_O_JOURNAL_SOLTO: AtomicU64 = AtomicU64::new(0);
 
-/// Só para a suíte: segura ou solta o journal — ver [`AUDITORIA_SEGURADA`].
+/// Só para a suíte: ver [`SOLTURAS_COM_O_JOURNAL_SOLTO`].
+#[cfg(feature = "modo-teste")]
+pub fn solturas_com_o_journal_solto_de_teste() -> u64 {
+    SOLTURAS_COM_O_JOURNAL_SOLTO.load(Ordering::Acquire)
+}
+
+/// Só para a suíte: segura ou solta o journal — ver [`SEGURADA`].
 #[cfg(feature = "modo-teste")]
 pub fn segurar_a_auditoria_de_teste(segurada: bool) {
-    AUDITORIA_SEGURADA.store(segurada, Ordering::Release);
+    marcar_a_auditoria(SEGURADA, segurada);
 }
 
-/// Só para a suíte: se o coletor está pausado — ver [`AUDITORIA_PAUSADA`].
-/// É o estado da suíte, que o executor confere depois de cada caso.
+/// Só para a suíte: se o coletor está pausado — ver [`PAUSADA`]. É o
+/// estado da suíte, que o executor confere depois de cada caso.
 #[cfg(feature = "modo-teste")]
 pub fn auditoria_pausada_de_teste() -> bool {
-    AUDITORIA_PAUSADA.load(Ordering::Acquire)
+    MARCAS_DA_AUDITORIA.load(Ordering::Acquire) & PAUSADA != 0
 }
 
-/// Só para a suíte: se o journal está segurado — ver
-/// [`AUDITORIA_SEGURADA`]. Solto é o estado da suíte, que o executor
-/// confere depois de cada caso.
+/// Só para a suíte: se o journal está segurado — ver [`SEGURADA`]. Solto é
+/// o estado da suíte, que o executor confere depois de cada caso.
 #[cfg(feature = "modo-teste")]
 pub fn auditoria_segurada_de_teste() -> bool {
-    AUDITORIA_SEGURADA.load(Ordering::Acquire)
+    MARCAS_DA_AUDITORIA.load(Ordering::Acquire) & SEGURADA != 0
 }
 
 /// Chamada pelo coletor: grava a auditoria pendente a cada
 /// [`INTERVALO_DA_AUDITORIA_MS`], ou antes, se ela já ocupa meio anel.
 pub fn gravar_auditoria_se_preciso() {
     static ULTIMA: AtomicU64 = AtomicU64::new(0);
+    // As duas marcas da suíte, lidas de uma vez: ver [`MARCAS_DA_AUDITORIA`].
     #[cfg(feature = "modo-teste")]
-    if AUDITORIA_PAUSADA.load(Ordering::Acquire) || AUDITORIA_SEGURADA.load(Ordering::Acquire) {
+    if MARCAS_DA_AUDITORIA.load(Ordering::Acquire) != 0 {
         return;
     }
     if estado() != Estado::Disponivel {

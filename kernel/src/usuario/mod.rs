@@ -84,7 +84,7 @@ pub fn lancar_o_servidor_de_janelas() {
         return;
     }
     let caminho = alloc::format!("{DIRETORIO_DOS_COMPILADOS}/janelas");
-    match lancar(Some(&caminho)) {
+    match lancar_como_sistema(Some(&caminho)) {
         Ok(id) => crate::log_info!("janelas", "servidor de janelas no fio {}", id),
         Err(motivo) => crate::log_warn!(
             "janelas",
@@ -108,7 +108,7 @@ pub fn lancar_o_terminal() {
         return;
     }
     let caminho = alloc::format!("{DIRETORIO_DOS_COMPILADOS}/terminal");
-    match lancar(Some(&caminho)) {
+    match lancar_como_sistema(Some(&caminho)) {
         Ok(id) => crate::log_info!("janelas", "terminal no fio {}", id),
         Err(motivo) => {
             crate::log_warn!("janelas", "terminal nao lancado de {}: {}", caminho, motivo)
@@ -1906,26 +1906,42 @@ pub mod falha_da_troca_de_teste {
     }
 }
 
-/// Lança um programa no anel sem privilégio, num fio próprio.
+/// Lança um programa no anel sem privilégio, num fio próprio, **com a
+/// autoridade do sistema**, pelo próprio kernel.
 ///
 /// Sem caminho, lança o exemplo embutido. Com caminho, lê a imagem do VFS —
-/// que é o que permite rodar um programa **do disco** pelo canal do agente ou
-/// pelo interpretador, sem que ele precise estar embutido no kernel.
+/// que é o que permite rodar um programa **do disco**, sem que ele precise
+/// estar embutido no kernel.
 ///
-/// Devolve o identificador do fio. Não espera o processo terminar: quem chama
-/// é o canal do agente, e bloquear ali travaria o atendimento — o resultado
-/// aparece depois em `user.stats`.
+/// Devolve o identificador do fio. Não espera o processo terminar — o
+/// resultado aparece depois em `user.stats`.
 ///
 /// É o kernel que lança, por conta própria, com a autoridade do sistema:
 /// o servidor de janelas e o Terminal, no boot — ver [`lancar_pelo_kernel`].
-pub fn lancar(caminho: Option<&str>) -> Result<u64, &'static str> {
+///
+/// # O nome único
+///
+/// É o lançador mais forte: `Autoridade::Sistema`, e fora de um comando sem
+/// decisão nenhuma de `process.run` — até o boot fechar os lançamentos do
+/// kernel. Chamava-se `lancar`, que não serve de palavra protegida — colide
+/// com `executor.lancar(` —, e se protegia pelo texto com o caminho, que um
+/// `use … as …`, o `use crate::usuario as u`, o espaço antes do parêntese,
+/// um ponteiro de função, o `super::` e uma macro contornavam. Com o nome
+/// único, o `xtask` o protege pela palavra: fora deste arquivo, só a suíte
+/// o nomeia, em qualquer forma, e nenhum arquivo fora da suíte o renomeia
+/// (o item 1 do lote A3 do #448). Dentro de um comando, ele só passa do
+/// começo do lançamento, e só nasce, se for o lançamento do comando — um
+/// `user.run` com a autoridade do sistema e o mesmo caminho — (ver
+/// [`crate::autorizacao::conferir_o_lancamento`] e
+/// [`crate::autorizacao::reconfirmar_o_lancamento`]).
+pub fn lancar_como_sistema(caminho: Option<&str>) -> Result<u64, &'static str> {
     lancar_como(caminho, crate::autorizacao::Autoridade::Sistema)
 }
 
-/// Como [`lancar`], com a autoridade dada: um processo que um agente lança
-/// age como o agente — ver [`crate::fios::criar_como`]. Também o kernel por
-/// conta própria ([`lancar_pelo_kernel`]): fora da suíte, só o boot, pelo
-/// [`lancar`].
+/// Como [`lancar_como_sistema`], com a autoridade dada: um processo que um
+/// agente lança age como o agente — ver [`crate::fios::criar_como`].
+/// Também o kernel por conta própria ([`lancar_pelo_kernel`]): fora da
+/// suíte, só o boot, pelo [`lancar_como_sistema`].
 pub fn lancar_como(
     caminho: Option<&str>,
     autoridade: crate::autorizacao::Autoridade,
@@ -1934,12 +1950,13 @@ pub fn lancar_como(
 }
 
 /// [`lancar_conferido`] pelo próprio kernel, e não por um comando: o
-/// servidor de janelas e o Terminal, no boot ([`lancar`]); e a suíte, que
-/// lança direto. Ninguém pediu, e fora de um comando a última palavra do
-/// nascimento não tem decisão a conferir de novo — ver
+/// servidor de janelas e o Terminal, no boot ([`lancar_como_sistema`]); e
+/// a suíte, que lança direto. Ninguém pediu, e fora de um comando a última
+/// palavra do nascimento não tem decisão a conferir de novo — ver
 /// [`crate::autorizacao::reconfirmar_o_lancamento`] e
 /// [`crate::autorizacao::Lancador::Kernel`]. Dentro de um comando, o
-/// lançamento é dele, e ele é decidido de novo.
+/// lançamento é dele: decidido de novo, e só com a autoridade e um dos
+/// caminhos que o gate decidiu.
 pub fn lancar_pelo_kernel(
     caminho: Option<&str>,
     autoridade: crate::autorizacao::Autoridade,
@@ -1951,18 +1968,24 @@ pub fn lancar_pelo_kernel(
 #[derive(Debug)]
 pub enum NaoLancou {
     /// O código não se leu, ou é de fora da imagem e não prova de onde veio
-    /// — ver [`codigo`].
+    /// — ver [`codigo`]. Vai à auditoria como o desfecho: `ERROR` com o
+    /// motivo da leitura, `DENY_POLICY` com o da procedência.
     Codigo(codigo::Recusa),
     /// O fio não nasceu: as vagas do escalonador, a memória da pilha, ou o
     /// escalonamento congelado depois de uma falha fatal. Não é recusa de
-    /// ninguém.
+    /// ninguém, e vai à auditoria como o desfecho, `ERROR` com o motivo.
     Fio(&'static str),
-    /// O gate recusou, na última palavra do nascimento: o código e o
+    /// O gate recusou, na última palavra do nascimento — ou, antes dela, no
+    /// começo do lançamento, pela mesma pergunta —: o código e o
     /// motivo, já gravados como a execução do comando — ou, fora de um, em
     /// nome do kernel. O comando decidido de novo — quem pediu foi contido,
     /// saiu ou foi revogado no meio, ou a política mudou —, ou a confiança
     /// no editor do código que vai rodar, perguntada de novo e tirada no
-    /// meio. Ver [`lancar_conferido`].
+    /// meio; ou o lançamento que não é o do comando, e o do kernel depois do
+    /// boot — `ERROR`, "fora de um comando autorizado" —, estes já no
+    /// começo do lançamento, antes de o código ser lido, pela mesma pergunta
+    /// ([`crate::autorizacao::conferir_o_lancamento`]). Ver
+    /// [`lancar_conferido`].
     Recusado(politica::Codigo, &'static str),
     /// O gate recusou nas perguntas sobre quem pede o processo, e não sobre
     /// o comando: o código e o motivo, já gravados. Antes de o código ser
@@ -2018,8 +2041,17 @@ struct Carga {
 /// código e o motivo de cada recusa do gate ([`NaoLancou::Recusado`] e
 /// [`NaoLancou::PorQuemPede`]), para quem responde a um agente.
 ///
-/// Fora de um comando decidido, a última palavra recusa: o kernel que lança
-/// por conta própria usa [`lancar_pelo_kernel`].
+/// A `autoridade` e o `caminho` são os do comando — a autoridade dele
+/// ([`crate::autorizacao::autoridade_atual`]) e um dos caminhos que o gate
+/// decidiu —: outro lançamento, de dentro do mesmo comando, é recusado como
+/// fora de um comando autorizado já no começo, antes de o código ser lido
+/// ([`crate::autorizacao::conferir_o_lancamento`]), e de novo na última
+/// palavra ([`crate::autorizacao::reconfirmar_o_lancamento`]). O handler do
+/// `user.run` passa a autoridade de agora e o `path` do pedido.
+///
+/// Fora de um comando decidido, a pergunta da última palavra recusa, já no
+/// começo do lançamento: o kernel que lança por conta própria usa
+/// [`lancar_pelo_kernel`].
 pub fn lancar_conferido(
     caminho: Option<&str>,
     autoridade: crate::autorizacao::Autoridade,
@@ -2078,6 +2110,39 @@ fn lancar_por(
 
     limpar_ultima_saida();
 
+    // O recurso do lançamento na auditoria: o caminho, ou o exemplo.
+    let recurso = caminho.unwrap_or("<exemplo embutido>");
+    // O desfecho de um lançamento que o gate permitiu e que não acontece —
+    // o código que não prova de onde veio, o arquivo que não se lê, a
+    // última palavra que recusa, o fio que não nasce —: como o que a
+    // execução fez da decisão — o `user.run`, com o número dela —, ou, fora
+    // de um comando, em nome do kernel. Um `ALLOW` não fica sem desfecho na
+    // cadeia, como no `exec` (ver `executar`).
+    let gravar_o_desfecho = |codigo: politica::Codigo, motivo: &str| {
+        if crate::autorizacao::auditar_execucao(recurso, codigo, motivo) == 0 {
+            crate::autorizacao::auditar_do_kernel("process.run", recurso, codigo, motivo);
+        }
+    };
+
+    // O lançamento é o do comando — a autoridade e um dos caminhos dele —,
+    // ou o do kernel por conta própria, fora de um comando, até o trinco do
+    // boot: a pergunta da última palavra sobre o lançamento, feita antes de
+    // tudo, sem decidir o comando de novo — isso fica para o nascimento
+    // (`autorizacao::conferir_o_lancamento`). Sem ela, o lançamento que não
+    // é o do comando perguntava sobre quem pede e lia o código com a
+    // autoridade dele, e a leitura que falhava ia à auditoria como a
+    // execução da decisão do operador, de um recurso que ela não cobriu — e,
+    // com o trinco fechado, em nome do kernel —, antes de a última palavra
+    // recusar (o achado 2 do adversário do lote A3 do #448). Recusado como
+    // ela recusa: `ERROR`, "fora de um comando autorizado", gravado como
+    // ela grava, e nada é lido.
+    if let Err((codigo, motivo)) =
+        crate::autorizacao::conferir_o_lancamento(lancador, autoridade, caminho)
+    {
+        gravar_o_desfecho(codigo, motivo);
+        return Err(NaoLancou::Recusado(codigo, motivo));
+    }
+
     // As perguntas do gate sobre quem pede o processo, e a cota de
     // processos do papel de quem lança: contada antes de nascer, e de novo
     // ao nascer — ver `fios::criar_processo`. A recusa já está na
@@ -2104,25 +2169,19 @@ fn lancar_por(
                 (alloc::boxed::Box::into_raw(carga) as u64, c.selo)
             }
             Err(recusa) => {
-                // O que o código não prova vai para a auditoria como o que
-                // a execução fez da decisão — o `user.run`, com o número
-                // dela —, ou, fora de um comando, em nome do kernel.
-                if let codigo::Recusa::Procedencia(..) = recusa {
-                    let motivo = recusa.motivo();
-                    if crate::autorizacao::auditar_execucao(
-                        caminho,
-                        politica::Codigo::DenyPolicy,
-                        motivo,
-                    ) == 0
-                    {
-                        crate::autorizacao::auditar_do_kernel(
-                            "process.run",
-                            caminho,
-                            politica::Codigo::DenyPolicy,
-                            motivo,
-                        );
-                    }
-                }
+                // O que o código não prova, e o arquivo que não se lê, vão
+                // para a auditoria como o que a execução fez da decisão —
+                // ou, fora de um comando, em nome do kernel —, com o código
+                // que o `exec` grava para o mesmo caso: `DENY_POLICY` na
+                // procedência; `ERROR` na leitura, com o motivo dela. Antes,
+                // a leitura que falhava só ia ao log, e um `user.run`
+                // permitido de um caminho que não existe deixava o `ALLOW`
+                // sem desfecho (o item 5 do lote A3 do #448).
+                let desfecho = match recusa {
+                    codigo::Recusa::Procedencia(..) => politica::Codigo::DenyPolicy,
+                    codigo::Recusa::Leitura(_) => politica::Codigo::Error,
+                };
+                gravar_o_desfecho(desfecho, recusa.motivo());
                 crate::log_warn!(
                     "usuario",
                     "`{}` nao foi lancado: {}",
@@ -2147,6 +2206,15 @@ fn lancar_por(
     // um comando: o servidor de janelas e o Terminal, no boot; a suíte, que
     // lança direto (ver `autorizacao::reconfirmar_o_lancamento`).
     //
+    // E o lançamento amarrado ao comando: a autoridade do processo que
+    // nasce é a do comando, e o caminho, um dos que o gate decidiu — o
+    // exemplo embutido é o recurso vazio, que o gate nunca permite. Dentro
+    // de um `user.run`, um lançamento como o sistema, com outra autoridade,
+    // ou de outro caminho, era gravado como a execução da decisão do
+    // operador, e nascia com outra autoridade, ou rodava o que o gate não
+    // decidiu (o item 2 do lote A3 do #448). A pergunta já foi feita no
+    // começo, sem o comando decidido de novo; aqui ela vale inteira.
+    //
     // E a confiança no editor do código que vai rodar, se ele é de fora da
     // imagem: a conferência a perguntou antes de ler a pilha, e um
     // `policy.apply` que tira o editor do papel, ou o editor que sai do
@@ -2164,35 +2232,43 @@ fn lancar_por(
     //
     // Passando, quem lançou o fio novo, na auditoria — é a proveniência
     // dele —, antes de ele poder rodar; com quem selou, se o código veio de
-    // fora da imagem.
-    let recurso = caminho.unwrap_or("<exemplo embutido>");
+    // fora da imagem: o editor pelo nome que a pergunta de agora devolveu, e
+    // não pelo da conferência — a chave que sai do registro e volta com
+    // outro nome no meio aparece com o nome de agora (o item 4 do lote A3
+    // do #448).
     let recusa = core::cell::Cell::new(None);
     let recusar = |codigo: politica::Codigo,
                    gravado: &str,
                    ouvido: &'static str|
      -> Result<(), &'static str> {
-        if crate::autorizacao::auditar_execucao(recurso, codigo, gravado) == 0 {
-            crate::autorizacao::auditar_do_kernel("process.run", recurso, codigo, gravado);
-        }
+        gravar_o_desfecho(codigo, gravado);
         recusa.set(Some((codigo, ouvido)));
         Err(ouvido)
     };
     let nasce = |id: crate::fios::IdFio| {
-        if let Err((codigo, motivo)) = crate::autorizacao::reconfirmar_o_lancamento(lancador) {
+        if let Err((codigo, motivo)) =
+            crate::autorizacao::reconfirmar_o_lancamento(lancador, autoridade, caminho)
+        {
             return recusar(codigo, motivo, motivo);
         }
-        if let Some(s) = &selo {
-            let papel = crate::autorizacao::papel_da_autoridade(autoridade);
-            if let Err((falta, motivo)) =
-                crate::autorizacao::confianca_no_editor(papel.as_deref(), &s.editor)
-            {
-                return recusar(politica::Codigo::DenyPolicy, &motivo, falta.motivo());
+        let editor = match &selo {
+            None => None,
+            Some(s) => {
+                let papel = crate::autorizacao::papel_da_autoridade(autoridade);
+                match crate::autorizacao::confianca_no_editor(papel.as_deref(), &s.editor) {
+                    Ok(nome) => Some((nome, &s.resumo)),
+                    Err((falta, motivo)) => {
+                        return recusar(politica::Codigo::DenyPolicy, &motivo, falta.motivo());
+                    }
+                }
             }
-        }
+        };
         crate::autorizacao::auditar_nascimento(
             recurso,
             id.numero(),
-            selo.as_ref().map(|s| (s.nome.as_str(), &s.resumo)),
+            editor
+                .as_ref()
+                .map(|(nome, resumo)| (nome.as_str(), *resumo)),
         );
         Ok(())
     };
@@ -2242,7 +2318,19 @@ fn lancar_por(
                         Err(NaoLancou::Recusado(codigo, motivo))
                     }
                 }
-                _ => Err(NaoLancou::Fio(nao.motivo())),
+                // O fio não nasceu — a vaga, a pilha, o escalonamento
+                // congelado —, depois de o gate permitir: o desfecho, como o
+                // do `exec` que não prepara a imagem — `ERROR`, com o motivo.
+                // Antes, nada se gravava, e o `ALLOW` ficava sem desfecho (o
+                // item 5 do lote A3 do #448). Os outros estados que caem aqui
+                // não acontecem — a cota grava sempre a recusa dela, e a
+                // última palavra, a dela —, e, se acontecessem, também não
+                // ficariam sem desfecho.
+                _ => {
+                    let motivo = nao.motivo();
+                    gravar_o_desfecho(politica::Codigo::Error, motivo);
+                    Err(NaoLancou::Fio(motivo))
+                }
             }
         }
     }

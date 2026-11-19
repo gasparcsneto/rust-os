@@ -943,7 +943,7 @@ pub(super) fn vagas_tudo_ao_mesmo_tempo() -> Resultado {
     VIVOS.store(0, SeqCst);
     let desde = crate::log::total_emitidos();
     let programa = format!("{}/colhedor", crate::usuario::DIRETORIO_DOS_COMPILADOS);
-    let colhedor = crate::usuario::lancar(Some(&programa))?;
+    let colhedor = crate::usuario::lancar_como_sistema(Some(&programa))?;
     let mut r = ate(colhedor_pronto, desde, "o colhedor nao ficou pronto");
     if r.is_ok() {
         for &nucleo in secundarios.iter().take(LANCADORES) {

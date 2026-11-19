@@ -586,11 +586,18 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     slots::confirmar_se_pendente();
 
     // O servidor de janelas e o Terminal, agora que o disco onde eles moram
-    // está montado. Na suíte, é o caso de cada um que o lança.
+    // está montado. Na suíte, é o caso de cada um que o lança. Depois deles,
+    // o kernel não lança mais nada por conta própria: o que se lança daqui
+    // em diante é de um comando decidido — o `user.run` —, e o que nasce de
+    // um processo nasce pelo `fork` dele, pelo gate (ver
+    // `autorizacao::reconfirmar_o_lancamento`). O trinco, logo depois dos
+    // dois, e pelo caminho do pacote, que nada no bloco sombreia: o `xtask`
+    // confere as três chamadas seguidas, nesta forma.
     #[cfg(not(feature = "modo-teste"))]
     {
         usuario::lancar_o_servidor_de_janelas();
         usuario::lancar_o_terminal();
+        crate::autorizacao::fechar_os_lancamentos_do_kernel();
     }
 
     // Com heap e interrupções no ar, a serial do agente pode deixar de ser

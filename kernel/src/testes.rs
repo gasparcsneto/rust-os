@@ -3979,7 +3979,7 @@ fn usuario_ceder_de_varios_processos_em_varios_nucleos() -> Resultado {
     static RECUSADAS: AtomicUsize = AtomicUsize::new(0);
     extern "C" fn lancador(_: u64) -> ! {
         let caminho = alloc::format!("{DIRETORIO_DOS_COMPILADOS}/cedente");
-        let contador = if crate::usuario::lancar(Some(&caminho)).is_ok() {
+        let contador = if crate::usuario::lancar_como_sistema(Some(&caminho)).is_ok() {
             &LANCADAS
         } else {
             &RECUSADAS
@@ -4073,7 +4073,7 @@ fn usuario_programas_compilados_rodam() -> Resultado {
             });
             achou
         };
-        crate::usuario::lancar(Some(&caminho))?;
+        crate::usuario::lancar_como_sistema(Some(&caminho))?;
         let _ = esperar_ate(|| visto(&saida) || visto("processo morto por"), 600);
         if visto("processo morto por") {
             crate::log_error!("teste", "{} morreu por uma falha", nome);
@@ -4287,7 +4287,8 @@ fn eventos_canal_dorme_entrega_e_recusa() -> Resultado {
         return Err("publicar num canal sem ouvinte nao foi recusado");
     }
 
-    let ouvinte = crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/eco")))?;
+    let ouvinte =
+        crate::usuario::lancar_como_sistema(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/eco")))?;
     esperar_ate(|| visto("eco: escutando"), 600)?;
 
     // Dormindo: o canal sabe que o ouvinte espera, e a conta de chamadas de
@@ -4708,7 +4709,7 @@ fn superficies_o_processo_desenha_e_some() -> Resultado {
     let livres_antes = crate::frames::estatisticas().0;
     let (_, criadas_antes, recolhidas_antes) = crate::superficies::estatisticas();
 
-    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/superficie")))?;
+    crate::usuario::lancar_como_sistema(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/superficie")))?;
     esperar_ate(|| visto("superficie: pronta") || terminou_mal(), 600)?;
     if terminou_mal() {
         return Err("o programa da superficie falhou antes de ficar pronto");
@@ -5822,7 +5823,7 @@ fn terminal_o_interpretador_do_outro_lado() -> Resultado {
     let digitados = pty::digitados_de_teste();
     crate::teclado::esvaziar();
 
-    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/pseudo")))?;
+    crate::usuario::lancar_como_sistema(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/pseudo")))?;
     let _ = esperar_ate(
         || {
             while let Some((console, c)) = pty::proxima_entrada(|_| false) {
@@ -6017,7 +6018,7 @@ fn entradas_separadas() -> Resultado {
     };
 
     // E a outra janela, de outro processo, com o canal de entrada dela.
-    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/entrada")))?;
+    crate::usuario::lancar_como_sistema(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/entrada")))?;
     esperar_vezes("entrada: pronta", 1)?;
     let camada = crate::grafico::camada_em(ex as u32 + 1, ey as u32 + 1)
         .filter(|c| c.nome == crate::superficies::NOME_DA_CAMADA)
@@ -8788,7 +8789,9 @@ fn formulario_preenchido() -> Resultado {
         })
     };
     crate::teclado::esvaziar();
-    let processo = crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/formulario")))?;
+    let processo = crate::usuario::lancar_como_sistema(Some(&format!(
+        "{DIRETORIO_DOS_COMPILADOS}/formulario"
+    )))?;
     esperar("formulario: pronto")?;
 
     // Os elementos da janela, como a árvore os publica: a camada dela e o
@@ -12887,7 +12890,7 @@ fn usuario_imagem_recusada_nao_custa_o_espaco() -> Resultado {
 
     // Oito bytes não são um cabeçalho ELF, e é a primeira conferência do
     // validador que os recusa — bem antes de qualquer mapeamento.
-    let resultado = crate::usuario::programa::carregar(&[0u8; 8], None);
+    let resultado = crate::usuario::programa::carregar_de_teste(&[0u8; 8], None);
 
     let depois = crate::arch::espaco_atual();
     if depois != antes {
@@ -14313,7 +14316,10 @@ fn heap_o_programa_que_nao_cabe_e_recusado() -> Resultado {
         ) {
             Err("o programa que nao cabe no heap nao foi recusado na leitura")
         } else {
-            match crate::usuario::codigo::obter(&caminho, crate::autorizacao::Autoridade::Sistema) {
+            match crate::usuario::codigo::obter_de_teste(
+                &caminho,
+                crate::autorizacao::Autoridade::Sistema,
+            ) {
                 Err(recusa @ Recusa::Leitura(crate::vfs::Erro::SemMemoria)) => {
                     if recusa.erro() == crate::usuario::erro::SEM_MEMORIA {
                         Ok(())
@@ -19920,7 +19926,7 @@ fn campos_de_janela() -> Resultado {
         });
         achou
     };
-    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/formulario")))?;
+    crate::usuario::lancar_como_sistema(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/formulario")))?;
     esperar_ate(|| disse("formulario: pronto"), 600).map_err(|_| "o formulario nao abriu")?;
 
     let mut camada = None;
@@ -23657,6 +23663,7 @@ fn auditoria_o_que_nao_muda_estado_vai_depois() -> Resultado {
 
         // O coletor a grava sozinho, num registro só de auditoria.
         let de_auditoria = crate::persistencia::registros_de_auditoria();
+        let solturas = crate::persistencia::solturas_com_o_journal_solto_de_teste();
         crate::persistencia::pausar_a_auditoria_de_teste(false);
         let limite =
             crate::tempo::uptime_ms() + 2 * crate::persistencia::INTERVALO_DA_AUDITORIA_MS + 2_000;
@@ -23666,6 +23673,12 @@ fn auditoria_o_que_nao_muda_estado_vai_depois() -> Resultado {
         crate::persistencia::pausar_a_auditoria_de_teste(true);
         if crate::persistencia::auditoria_gravada() < seq {
             return Err("o coletor nao gravou a auditoria pendente");
+        }
+        // E a conta da suíte o viu solto com o journal solto: o controle
+        // positivo dela, que o caso do executor confere que não anda (o
+        // achado 6 do adversário do lote A3 do #448).
+        if crate::persistencia::solturas_com_o_journal_solto_de_teste() == solturas {
+            return Err("a conta da suite nao viu o coletor que gravou solto com o journal solto");
         }
         let ultimo = todos_do_journal()?.pop().ok_or("journal vazio")?;
         if ultimo.tipo != diario::estado::tipo::AUDITORIA
@@ -25964,7 +25977,9 @@ fn barra_nenhuma_superficie_a_cobre() -> Resultado {
         });
         mal
     };
-    crate::usuario::lancar(Some(&alloc::format!("{DIRETORIO_DOS_COMPILADOS}/cobrir")))?;
+    crate::usuario::lancar_como_sistema(Some(&alloc::format!(
+        "{DIRETORIO_DOS_COMPILADOS}/cobrir"
+    )))?;
     esperar_ate(|| visto("cobrir: pronto") || terminou_mal(), 600)?;
     if terminou_mal() {
         return Err("o programa que tenta cobrir a barra falhou antes de ficar pronto");
@@ -26709,7 +26724,7 @@ fn politica_processo_age_como_o_agente() -> Resultado {
             });
             achou
         };
-        crate::usuario::lancar(Some(&programa))?;
+        crate::usuario::lancar_como_sistema(Some(&programa))?;
         esperar_ate(|| visto("processo encerrou com codigo 1"), 600)
             .map_err(|_| "lancado pelo sistema, o programa foi recusado")?;
         let desde = crate::log::total_emitidos();
@@ -30127,7 +30142,7 @@ fn fios_o_zumbi_guarda_a_vaga_ate_a_colheita() -> Resultado {
     }
     let desde = crate::log::total_emitidos();
     let programa = alloc::format!("{}/colhedor", crate::usuario::DIRETORIO_DOS_COMPILADOS);
-    crate::usuario::lancar(Some(&programa))?;
+    crate::usuario::lancar_como_sistema(Some(&programa))?;
     esperar_ate(|| dito(desde, "colhedor: pronto").is_some(), 600)
         .map_err(|_| "o colhedor nao ficou pronto")?;
     publicar(tipo::ACAO, 1)?;
@@ -31565,7 +31580,9 @@ fn fios_coletor_recolhe_o_espaco_do_processo_morto() -> Resultado {
         // Um fio que hospeda um processo segura bem mais que a própria
         // pilha: a raiz de tradução, as tabelas e todas as páginas do
         // programa.
-        if crate::usuario::programa::carregar(crate::usuario::exemplo::bytes(), None).is_err() {
+        if crate::usuario::programa::carregar_de_teste(crate::usuario::exemplo::bytes(), None)
+            .is_err()
+        {
             crate::fios::terminar()
         }
 
@@ -31702,7 +31719,9 @@ fn usuario_nenhuma_pagina_gravavel_e_executavel() -> Resultado {
     static AMBOS: AtomicU64 = AtomicU64::new(0);
 
     extern "C" fn inspetor(_argumento: u64) -> ! {
-        if crate::usuario::programa::carregar(crate::usuario::exemplo::bytes(), None).is_err() {
+        if crate::usuario::programa::carregar_de_teste(crate::usuario::exemplo::bytes(), None)
+            .is_err()
+        {
             crate::fios::terminar()
         }
 
@@ -31814,8 +31833,9 @@ fn usuario_dois_processos_coexistem() -> Resultado {
     /// Só pode rodar num fio criado por `fios::criar`, porque `carregar`
     /// instala um espaço de endereços no fio corrente.
     unsafe fn marcar(marca: u64) -> Result<(), &'static str> {
-        let programa = crate::usuario::programa::carregar(crate::usuario::exemplo::bytes(), None)
-            .map_err(|falha| falha.motivo())?;
+        let programa =
+            crate::usuario::programa::carregar_de_teste(crate::usuario::exemplo::bytes(), None)
+                .map_err(|falha| falha.motivo())?;
 
         // O topo da pilha do processo: mapeado por `carregar`, e no mesmo
         // endereço virtual para os dois — que é o ponto do teste.
@@ -32377,7 +32397,9 @@ fn lancar_o_servidor_de_janelas_da_suite() -> Resultado {
         esperar_ate(|| !crate::fios::vivo(anterior), 600)
             .map_err(|_| "o servidor de janelas anterior nao saiu")?;
     }
-    let id = crate::usuario::lancar(Some(&alloc::format!("{DIRETORIO_DOS_COMPILADOS}/janelas")))?;
+    let id = crate::usuario::lancar_como_sistema(Some(&alloc::format!(
+        "{DIRETORIO_DOS_COMPILADOS}/janelas"
+    )))?;
     ULTIMO_SERVIDOR.store(id, SeqCst);
     Ok(())
 }
@@ -32675,7 +32697,7 @@ fn rodar_programa_ate(
     };
     let id = match autoridade {
         Some(a) => crate::usuario::lancar_como(Some(&programa), a)?,
-        None => crate::usuario::lancar(Some(&programa))?,
+        None => crate::usuario::lancar_como_sistema(Some(&programa))?,
     };
     esperar_ate(visto, teto_em_ticks)?;
     Ok(id)
@@ -32974,7 +32996,7 @@ extern "C" fn carregar_adulterado(argumento: u64) -> ! {
     // SAFETY: o ponteiro veio do `Box::into_raw` do caso, este fio é o único
     // que o recebeu, e o reconstrói uma vez só.
     let imagem = unsafe { alloc::boxed::Box::from_raw(argumento as *mut alloc::vec::Vec<u8>) };
-    let visto = match crate::usuario::programa::carregar(&imagem, None) {
+    let visto = match crate::usuario::programa::carregar_de_teste(&imagem, None) {
         Err(crate::usuario::programa::Falha::ProcessoIntacto(_)) => 10,
         // Carregou: o fio larga o espaço novo ao terminar, sem entrar nele.
         _ => 11,
@@ -33077,7 +33099,7 @@ fn nativo_o_fio_acordado_espera_o_mesmo_pedido() -> Resultado {
     let dir = crate::usuario::DIRETORIO_DOS_COMPILADOS;
     let procurada = "processo encerrou com codigo 75";
     let desde = crate::log::total_emitidos();
-    let id = crate::usuario::lancar(Some(&alloc::format!("{dir}/contido")))?;
+    let id = crate::usuario::lancar_como_sistema(Some(&alloc::format!("{dir}/contido")))?;
     // O primeiro pedido dele na fila, e tomado como o executor o toma.
     ate(&|| crate::nativo::pendentes_de_teste() > 0, 600).map_err(|_| "o programa nao pediu")?;
     let (fio, texto, chamador) =
@@ -37870,7 +37892,7 @@ fn fios_a_reexecucao_e_da_chamada() -> Resultado {
     let procurada = "processo encerrou com codigo 75";
     let desde = crate::log::total_emitidos();
     pausa_de_teste::armar("contido");
-    let lancado = crate::usuario::lancar(Some(&programa));
+    let lancado = crate::usuario::lancar_como_sistema(Some(&programa));
     let parou = lancado.is_ok() && girar_ate(pausa_de_teste::parada, 4_000_000_000);
     // Parado depois da chamada e antes da pergunta: atender agora o acorda
     // nessa janela.
@@ -42257,6 +42279,37 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "excecoes: a troca de imagem nao entrega as flags da imagem anterior",
         f: excecoes::excecoes_a_troca_de_imagem_nao_entrega_as_flags_da_anterior,
+    },
+    // O lote A3 do #448, no fim da tabela pelo mesmo motivo — nenhum caso
+    // de antes muda de parte —: os achados do adversário da integração
+    // `f018bee..2c39e80` — a última palavra amarrada à autoridade e ao
+    // caminho do comando, o nome do editor de agora no nascimento, o
+    // desfecho do `user.run` que não lança, o NSF que não para num lote que
+    // não se lê —, e o kernel que não lança mais por conta própria depois do
+    // boot.
+    Caso {
+        nome: "contencao: o lancamento de dentro do user.run so nasce com a autoridade e o caminho do comando",
+        f: nascimento::contencao_o_lancamento_de_dentro_do_user_run_so_nasce_com_a_autoridade_e_o_caminho,
+    },
+    Caso {
+        nome: "codigo: o nascimento grava o nome do editor que a ultima palavra perguntou",
+        f: nascimento::codigo_o_nascimento_grava_o_nome_do_editor_de_agora,
+    },
+    Caso {
+        nome: "contencao: o user.run de um caminho que nao existe grava o desfecho",
+        f: nascimento::contencao_o_user_run_de_um_caminho_que_nao_existe_grava_o_desfecho,
+    },
+    Caso {
+        nome: "contencao: o user.run cujo fio nao nasce grava o desfecho",
+        f: nascimento::contencao_o_user_run_cujo_fio_nao_nasce_grava_o_desfecho,
+    },
+    Caso {
+        nome: "nsf: mais de um lote que nao se le nao para a leitura, e vira uma lacuna",
+        f: nsf_mais_de_um_lote_que_nao_se_le_nao_para_a_leitura,
+    },
+    Caso {
+        nome: "contencao: depois do boot o kernel nao lanca por conta propria",
+        f: nascimento::contencao_depois_do_boot_o_kernel_nao_lanca_por_conta_propria,
     },
 ];
 
@@ -56586,6 +56639,97 @@ fn nsf_o_registro_que_nao_se_le_vira_lacuna() -> Resultado {
     })
 }
 
+/// Mais de um lote de registros que o NSF não lê, seguidos, não param a
+/// leitura (o item 3 do lote A3 do #448). Num lote de `audit.tail` em que
+/// nenhum se lia, `novos == 0` parava a volta, o `LIDO` não andava, e a
+/// volta seguinte pedia o mesmo lote: o NSF ficava cego até os registros
+/// saírem do anel. O caso grava, sem nenhum registro lido antes — o
+/// primeiro que a leitura alcança é um que não se lê —, os registros de uma
+/// volta inteira mais um, todos acima do teto do identificador, e depois um
+/// `system.info`. A primeira volta faz o teto de leituras, todas de
+/// registros que não se leem; a seguinte lê até o `system.info`; e o
+/// buraco inteiro é uma lacuna só, vista nele — também o primeiro que não
+/// se lê, que antes ficava só no log.
+fn nsf_mais_de_um_lote_que_nao_se_le_nao_para_a_leitura() -> Resultado {
+    use politica::Codigo;
+    use seguranca::regras::Regra;
+    const POR_VOLTA: usize = crate::seguranca::LEITURAS_POR_VOLTA;
+    const LOTE: usize = crate::seguranca::LOTE as usize;
+    com_o_nsf(|| {
+        let longo = "x".repeat(politica::auditoria::MAIOR_AGENTE + 1);
+        let n = LOTE * POR_VOLTA + 1;
+        let mut ilegiveis = alloc::vec::Vec::with_capacity(n);
+        for _ in 0..n {
+            ilegiveis.push(crate::autorizacao::auditar_quorum(
+                0,
+                &[longo.as_str()],
+                Some("administrador"),
+                "admin.revoke",
+                "",
+                Codigo::DenyPolicy,
+                b"{}",
+                "um registro que o NSF nao le",
+            ));
+        }
+        let _ = fs_pedir(sistema_aqui(), "system.info", "{}");
+        let (depois, _) = registro_que(|e| e.metodo == "system.info")
+            .ok_or("o pedido depois dos registros nao foi gravado")?;
+        if ilegiveis[0] == 0
+            || ilegiveis.windows(2).any(|p| p[1] != p[0] + 1)
+            || depois != ilegiveis[n - 1] + 1
+        {
+            return Err("os registros que nao se leem nao entraram seguidos na cadeia");
+        }
+        // A primeira volta: o teto de leituras, nenhum registro que se lê.
+        let v = crate::seguranca::passo();
+        if v.leituras != POR_VOLTA
+            || v.ilegiveis != LOTE * POR_VOLTA
+            || v.registros != 0
+            || v.recusadas != 0
+        {
+            crate::log_error!("teste", "{:?}", v);
+            return Err("o NSF parou num lote que nao se le");
+        }
+        // As seguintes, até o `system.info`.
+        let mut vistos = v.ilegiveis;
+        for _ in 0..4 {
+            if crate::seguranca::com_motor_de_teste(|m| m.lido() >= depois) == Some(true) {
+                break;
+            }
+            vistos += crate::seguranca::passo().ilegiveis;
+        }
+        let (lido, perdidos, lacunas) = crate::seguranca::com_motor_de_teste(|m| {
+            (
+                m.lido(),
+                m.contadores.perdidos,
+                m.deteccoes()
+                    .filter(|d| d.regra == Regra::LacunaNaLeitura)
+                    .map(|d| d.registros.clone())
+                    .collect::<alloc::vec::Vec<_>>(),
+            )
+        })
+        .ok_or("o NSF nao esta no ar")?;
+        if lido < depois || vistos != n {
+            crate::log_error!(
+                "teste",
+                "lido {}, depois {}, {} de {} vistos",
+                lido,
+                depois,
+                vistos,
+                n
+            );
+            return Err("o NSF nao leu ate o pedido depois dos registros que nao se leem");
+        }
+        if perdidos != n as u64 || lacunas != [alloc::vec![depois]] {
+            crate::log_error!("teste", "{} perdidos, lacunas {:?}", perdidos, lacunas);
+            return Err(
+                "os registros que nao se leem nao viraram uma lacuna so, vista no seguinte",
+            );
+        }
+        Ok(())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Segurança sem fricção — docs/USABILIDADE.md
 // ---------------------------------------------------------------------------
@@ -60648,29 +60792,49 @@ pub fn executar_todos() -> ! {
 
 /// O executor confere o estado que cada caso devolve
 /// ([`estado_da_suite_devolvido`]): o coletor solto e o journal segurado
-/// reprovam, cada um com o motivo dele, e voltam ao estado da suíte — os
-/// dois juntos também —; o estado da suíte passa.
+/// reprovam, cada um com o motivo dele, e voltam ao estado da suíte; o
+/// estado da suíte passa.
+///
+/// O coletor só se solta com o journal já segurado, em cada passo: segurado,
+/// o journal não grava (`persistencia::gravar_auditoria_se_preciso`), e uma
+/// gravação do coletor solto aqui cairia num caso seguinte. Antes, o caso
+/// soltava o coletor com o journal solto, por um instante (o item 6 do lote
+/// A3 do #448). O passo do coletor solto é com o journal segurado — o
+/// executor diz primeiro o coletor —, e cobre o dos dois juntos de antes.
+/// A conferência devolve os dois na ordem que não abre a janela — pausa o
+/// coletor, depois solta o journal —, e a conta da suíte
+/// (`persistencia::solturas_com_o_journal_solto_de_teste`) diz se o coletor
+/// ficou solto com o journal solto em algum instante do caso: sem ela, só
+/// uma gravação do coletor justo naquele instante mostraria a janela. As
+/// duas marcas moram num atômico só, que o coletor lê de uma vez
+/// (`persistencia::MARCAS_DA_AUDITORIA`): lidas separadas, a devolução —
+/// que pausa e depois solta — deixava o coletor que lesse a pausa antes e o
+/// journal depois gravar, sem a conta ver. E a conta tem o controle
+/// positivo dela: `auditoria: o que nao muda estado vai no registro
+/// seguinte, ou no do coletor` solta o coletor com o journal solto, o
+/// espera gravar e vê a conta ter andado — sem ele, uma conta que nunca
+/// andasse passaria aqui (o achado 6 do adversário do lote A3 do #448).
 fn suite_o_executor_ve_e_devolve_o_coletor_e_o_journal() -> Resultado {
     use crate::persistencia as p;
+    let antes = p::solturas_com_o_journal_solto_de_teste();
+    // O coletor solto, com o journal segurado antes.
+    p::segurar_a_auditoria_de_teste(true);
     p::pausar_a_auditoria_de_teste(false);
     let solto = estado_da_suite_devolvido();
-    let pausado = p::auditoria_pausada_de_teste();
+    let devolvido_o_solto = p::auditoria_pausada_de_teste() && !p::auditoria_segurada_de_teste();
+    // O journal segurado, com o coletor pausado.
     p::segurar_a_auditoria_de_teste(true);
     let segurado = estado_da_suite_devolvido();
-    let solto_de_novo = !p::auditoria_segurada_de_teste();
-    p::pausar_a_auditoria_de_teste(false);
-    p::segurar_a_auditoria_de_teste(true);
-    let os_dois = estado_da_suite_devolvido();
-    let devolvidos = p::auditoria_pausada_de_teste() && !p::auditoria_segurada_de_teste();
+    let devolvido_o_segurado = p::auditoria_pausada_de_teste() && !p::auditoria_segurada_de_teste();
     let o_da_suite = estado_da_suite_devolvido();
-    if solto != Err("o caso deixou o coletor da auditoria solto") || !pausado {
-        return Err("o executor nao viu, ou nao pausou de novo, o coletor solto");
+    if p::solturas_com_o_journal_solto_de_teste() != antes {
+        return Err("o coletor ficou solto com o journal solto no caso do executor");
     }
-    if segurado != Err("o caso deixou o journal segurado") || !solto_de_novo {
+    if solto != Err("o caso deixou o coletor da auditoria solto") || !devolvido_o_solto {
+        return Err("o executor nao viu o coletor solto, ou nao o devolveu com o journal");
+    }
+    if segurado != Err("o caso deixou o journal segurado") || !devolvido_o_segurado {
         return Err("o executor nao viu, ou nao soltou, o journal segurado");
-    }
-    if os_dois.is_ok() || !devolvidos {
-        return Err("o executor nao devolveu o coletor e o journal juntos");
     }
     o_da_suite.map_err(|_| "o executor reprovou o estado da suite")
 }

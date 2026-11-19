@@ -208,7 +208,7 @@ impl Programa {
 /// `editor` é quem selou a imagem, quando ela veio de fora da imagem do
 /// sistema — conferido antes, por [`super::codigo::obter`]. Vai para o
 /// programa do fio junto com o manifesto e o resumo.
-pub fn carregar(imagem: &[u8], editor: Option<[u8; 32]>) -> Result<Programa, Falha> {
+pub(super) fn carregar(imagem: &[u8], editor: Option<[u8; 32]>) -> Result<Programa, Falha> {
     // Tudo até a troca de espaço é recuperável — o primeiro passo —, a troca
     // não falha, e o que vem depois dela não tem volta: os dois `map_err`
     // dizem isso uma vez cada, em vez de em cada `?`.
@@ -236,7 +236,7 @@ pub fn carregar(imagem: &[u8], editor: Option<[u8; 32]>) -> Result<Programa, Fal
 /// fim dos fluxos; o terceiro ([`Trocada::mapear`]) vem com ela já solta —
 /// ver `usuario::executar`. Ouvindo que ela está com outro fio, larga a
 /// preparada, e o processo continua o que era.
-pub struct Preparada<'a> {
+pub(super) struct Preparada<'a> {
     elf: super::elf::Imagem<'a>,
     faixas: [(u64, u64); super::elf::MAX_SEGMENTOS],
     programa: crate::autorizacao::Programa,
@@ -246,7 +246,10 @@ pub struct Preparada<'a> {
 /// O primeiro passo de [`carregar`]: a imagem conferida — o ELF, as faixas
 /// de página dos segmentos, o manifesto —, o programa que ela é, e o espaço
 /// novo, criado e ainda não adotado. Um erro aqui deixa o processo intacto.
-pub fn preparar(imagem: &[u8], editor: Option<[u8; 32]>) -> Result<Preparada<'_>, &'static str> {
+pub(super) fn preparar(
+    imagem: &[u8],
+    editor: Option<[u8; 32]>,
+) -> Result<Preparada<'_>, &'static str> {
     let elf = super::elf::validar(imagem)?;
 
     // As faixas de página de cada segmento, conferidas antes de qualquer
@@ -300,7 +303,7 @@ impl<'a> Preparada<'a> {
     /// passa a ser o ativo. Não falha, e não volta: a imagem anterior deixa
     /// de existir aqui, e o que era dela — o espaço e a resposta que ela não
     /// buscou — vai com a [`Trocada`], para sair no terceiro passo.
-    pub fn trocar(self) -> Trocada<'a> {
+    pub(super) fn trocar(self) -> Trocada<'a> {
         let Preparada {
             elf,
             faixas,
@@ -348,7 +351,7 @@ impl<'a> Preparada<'a> {
 /// não espera por um trabalho que o processo dimensiona — ver
 /// `usuario::executar`.
 #[must_use = "a imagem nova precisa ser mapeada, e o que era da anterior, largado"]
-pub struct Trocada<'a> {
+pub(super) struct Trocada<'a> {
     elf: super::elf::Imagem<'a>,
     faixas: [(u64, u64); super::elf::MAX_SEGMENTOS],
     anterior: Option<crate::paginacao::Espaco>,
@@ -361,7 +364,7 @@ impl Trocada<'_> {
     /// ela não buscou —, e os segmentos e a pilha da nova são mapeados no
     /// espaço dela. Um erro aqui é sem volta: a imagem anterior já não
     /// existe.
-    pub fn mapear(self) -> Result<Programa, &'static str> {
+    pub(super) fn mapear(self) -> Result<Programa, &'static str> {
         let Trocada {
             elf,
             faixas,
@@ -517,18 +520,46 @@ fn faixa_de_paginas(inicio: u64, tamanho: u64) -> Result<(u64, u64), &'static st
 /// O mapeamento **sobrevive** a esta função: o processo continua executando
 /// depois dela, e desmontá-lo aqui puxaria o chão de baixo dele. Quem o desfaz
 /// é a morte deste fio, que larga o espaço de endereços inteiro de uma vez.
-// Os casos da suíte a chamam com imagens estáticas; em produção, quem lança
-// é `usuario::lancar`, que carrega de uma imagem possuída e usa os dois
-// passos — ver [`entrar`].
-#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+///
+/// # Só na compilação da suíte
+///
+/// Entra num programa sem a conferência do código ([`super::codigo`]) e sem
+/// o gate — é o que os casos querem, com as imagens estáticas deles. Em
+/// produção, quem lança é `usuario::lancar_por`, que carrega de uma imagem
+/// possuída e usa os dois passos — ver [`entrar`]. Era `pub` também em
+/// produção, só sem uso; o `xtask` confere que não sai da suíte
+/// (`conferir_os_carregadores`, o item 1 do lote A3 do #448).
+#[cfg(feature = "modo-teste")]
 pub fn executar(imagem: &[u8]) -> Result<core::convert::Infallible, Falha> {
     entrar(carregar(imagem, None)?)
+}
+
+/// Só para a suíte: [`carregar`], que fora dela só o módulo `usuario`
+/// alcança — os casos que conferem a carga sem entrar no programa: a imagem
+/// recusada, as páginas `W^X`, o espaço de cada fio; e o par que carrega,
+/// espera o outro e só depois entra ([`entrar_de_teste`]). Protegido pela
+/// palavra (`NOMES_PROTEGIDOS`, no `xtask`): fora deste arquivo, nenhum
+/// arquivo de produção o nomeia; e `conferir_os_carregadores` confere que
+/// ele só existe na compilação da suíte.
+#[cfg(feature = "modo-teste")]
+pub fn carregar_de_teste(imagem: &[u8], editor: Option<[u8; 32]>) -> Result<Programa, Falha> {
+    carregar(imagem, editor)
+}
+
+/// Só para a suíte: [`entrar`], que fora dela só o módulo `usuario`
+/// alcança — o par de `testes/excecoes.rs`, que carrega
+/// ([`carregar_de_teste`]), espera o outro numa barreira e só depois entra.
+/// Protegido pela palavra, e só na compilação da suíte, como o
+/// [`carregar_de_teste`].
+#[cfg(feature = "modo-teste")]
+pub fn entrar_de_teste(programa: Programa) -> Result<core::convert::Infallible, Falha> {
+    entrar(programa)
 }
 
 /// Desce para o anel sem privilégio num programa já carregado. Nunca
 /// retorna.
 ///
-/// # Por que separada de [`executar`]
+/// # Por que separada do `executar`
 ///
 /// Para quem carrega de uma imagem que **possui**: um `Vec` lido do disco.
 /// `executar` recebe a imagem emprestada e não volta, então quem a possui
@@ -536,7 +567,7 @@ pub fn executar(imagem: &[u8]) -> Result<core::convert::Infallible, Falha> {
 /// sempre, um por programa lançado do disco. Carregar copia os segmentos
 /// para as páginas do processo; entre carregar e entrar a imagem já não
 /// serve para nada, e é ali que quem a possui a larga.
-pub fn entrar(programa: Programa) -> Result<core::convert::Infallible, Falha> {
+pub(super) fn entrar(programa: Programa) -> Result<core::convert::Infallible, Falha> {
     let pilha_de_kernel = crate::fios::pilha_de_kernel_atual();
     if pilha_de_kernel == 0 {
         // Depois da carga, portanto depois da troca: o espaço anterior deste

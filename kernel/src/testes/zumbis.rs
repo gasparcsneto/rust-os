@@ -391,7 +391,8 @@ pub(super) fn zumbis_com_um_titular_no_teto_o_sistema_segue() -> Resultado {
         fio = Some(c.fio);
         let (nascidos, parou) = bifurcar_ate_parar(&c)?;
         let do_kernel = crate::fios::criar("teste-essencial", fio_curto, 0).map(|_| ());
-        let do_sistema = crate::usuario::lancar(Some(&alloc::format!("{dir}/ola"))).map(|_| ());
+        let do_sistema =
+            crate::usuario::lancar_como_sistema(Some(&alloc::format!("{dir}/ola"))).map(|_| ());
         let de_outro =
             crate::usuario::lancar_como(Some(&alloc::format!("{dir}/encerravel")), outro)
                 .map(|_| ());

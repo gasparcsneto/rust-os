@@ -1494,7 +1494,7 @@ extern "C" fn hospedar_em_par(argumento: u64) -> ! {
     );
     PAR_ONDE[papel].store(crate::arch::nucleo_atual() as u64, SeqCst);
     let imagem = exemplo::bytes_da_excecao(PROGRAMAS[indice]);
-    let programa = match crate::usuario::programa::carregar(imagem, None) {
+    let programa = match crate::usuario::programa::carregar_de_teste(imagem, None) {
         Ok(p) => p,
         Err(falha) => {
             crate::log_error!(
@@ -1511,7 +1511,7 @@ extern "C" fn hospedar_em_par(argumento: u64) -> ! {
     while PAR_CARREGADOS.load(SeqCst) < 2 {
         crate::fios::ceder();
     }
-    match crate::usuario::programa::entrar(programa) {
+    match crate::usuario::programa::entrar_de_teste(programa) {
         Ok(_) => unreachable!("entrar nao retorna em caso de sucesso"),
         Err(falha) => {
             crate::log_error!(

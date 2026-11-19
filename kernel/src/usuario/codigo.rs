@@ -3,9 +3,11 @@
 //! # Duas portas, uma regra
 //!
 //! Código vira processo por duas portas: `user.run`, o lançamento pelo
-//! canal, pelo interpretador ou pelo boot ([`super::lancar_como`]), e a
-//! chamada `executar`, com que um processo troca a própria imagem. As duas
-//! passam por [`obter`], e a regra é uma só:
+//! canal, pelo interpretador ou pela interface nativa
+//! ([`super::lancar_conferido`]) — ou o do kernel no boot
+//! ([`super::lancar_como_sistema`]) —, e a chamada `executar`, com que um
+//! processo troca a própria imagem. As duas passam por [`obter`], e a regra
+//! é uma só:
 //!
 //! - o código da **imagem** — os programas embutidos, a raiz do disco —
 //!   roda como sempre rodou: veio com o kernel, a política e as chaves;
@@ -60,12 +62,15 @@ pub struct Codigo {
 }
 
 /// Quem selou o código de fora da imagem, e o quê.
+///
+/// Sem o nome do editor: o registro do nascimento o diz pelo nome que a
+/// última palavra perguntou, e não pelo desta conferência — a chave pode
+/// sair do registro e voltar com outro nome no meio (o item 4 do lote A3
+/// do #448; ver `super::lancar_por`).
 pub struct Selo {
     /// A chave do editor: vai para o programa do fio, e cada pedido do
     /// processo pergunta de novo se o papel confia nela.
     pub editor: [u8; 32],
-    /// O nome do editor no registro, para a auditoria.
-    pub nome: String,
     /// O resumo BLAKE2s do que o editor selou — a identidade do programa.
     pub resumo: [u8; 32],
 }
@@ -107,7 +112,11 @@ impl Recusa {
 
 /// Lê o código de `caminho` e o confere para rodar com a autoridade
 /// `autoridade` — ver o começo do módulo.
-pub fn obter(caminho: &str, autoridade: Autoridade) -> Result<Codigo, Recusa> {
+///
+/// Só o módulo `usuario` a alcança (`pub(super)`): as duas portas que a
+/// usam moram em `usuario/mod.rs`, e o `xtask` confere que a visibilidade
+/// não se alarga (`conferir_os_carregadores`, o item 1 do lote A3 do #448).
+pub(super) fn obter(caminho: &str, autoridade: Autoridade) -> Result<Codigo, Recusa> {
     let (mut bytes, origem) = crate::vfs::ler_tudo_com_origem(caminho).map_err(Recusa::Leitura)?;
     if origem == crate::vfs::Origem::Imagem {
         return Ok(Codigo {
@@ -129,6 +138,17 @@ pub fn obter(caminho: &str, autoridade: Autoridade) -> Result<Codigo, Recusa> {
     })
 }
 
+/// Só para a suíte: [`obter`], que fora dela só o módulo `usuario` alcança
+/// — o caso do heap estilhaçado confere a recusa da leitura e o erro que o
+/// `executar` devolveria. Protegido pela palavra (`NOMES_PROTEGIDOS`, no
+/// `xtask`): fora deste arquivo, nenhum arquivo de produção o nomeia; e
+/// `conferir_os_carregadores` confere que ele só existe na compilação da
+/// suíte.
+#[cfg(feature = "modo-teste")]
+pub fn obter_de_teste(caminho: &str, autoridade: Autoridade) -> Result<Codigo, Recusa> {
+    obter(caminho, autoridade)
+}
+
 /// O selo de `bytes`, e se o papel de `autoridade` confia em quem o selou:
 /// o selo e o tamanho do executável que ele cobre.
 fn conferir(bytes: &[u8], autoridade: Autoridade) -> Result<(Selo, usize), Recusa> {
@@ -142,18 +162,12 @@ fn conferir(bytes: &[u8], autoridade: Autoridade) -> Result<(Selo, usize), Recus
         }
     };
     // O papel de agora: o mesmo que o gate perguntaria no próximo pedido
-    // do processo.
+    // do processo. O nome do editor que ela devolve fica de fora: quem
+    // grava o nascimento pergunta de novo, no último instante.
     let papel = crate::autorizacao::papel_da_autoridade(autoridade);
-    let nome = crate::autorizacao::confianca_no_editor(papel.as_deref(), &editor)
+    crate::autorizacao::confianca_no_editor(papel.as_deref(), &editor)
         .map_err(|(f, motivo)| Recusa::Procedencia(f, motivo))?;
-    Ok((
-        Selo {
-            editor,
-            nome,
-            resumo,
-        },
-        tamanho,
-    ))
+    Ok((Selo { editor, resumo }, tamanho))
 }
 
 fn procedencia(f: Falta) -> Recusa {
