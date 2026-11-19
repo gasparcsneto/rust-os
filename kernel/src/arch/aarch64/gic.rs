@@ -239,7 +239,8 @@ static PRAZO: [AtomicU64; MAX_NUCLEOS] = [const { AtomicU64::new(0) }; MAX_NUCLE
 static ORIGEM: AtomicU64 = AtomicU64::new(0);
 
 /// Só para a suíte: quantos disparos do timer acharam o prazo do núcleo
-/// ainda no futuro — ver [`antecipados_de_teste`].
+/// ainda no futuro, no começo do handler — ver [`conferir_o_prazo_de_teste`]
+/// e [`antecipados_de_teste`].
 #[cfg(feature = "modo-teste")]
 static ANTECIPADOS_DE_TESTE: AtomicU64 = AtomicU64::new(0);
 
@@ -571,10 +572,11 @@ fn armar(ciclos: u32) {
 /// - **O prazo ainda no futuro**, o atraso negativo, não acontece num
 ///   disparo de verdade: o timer só levanta a linha com o contador já no
 ///   prazo, e só este núcleo escreve o dele. Se acontecer, o prazo fica, e
-///   o disparo vem na hora dele; a suíte conta quantas vezes
-///   (`antecipados_de_teste`), e confere que o `PRAZO` é o que o
-///   `CNTP_CVAL_EL0` tem (`divergencias_de_teste`) — sem isso, um `PRAZO`
-///   que deixasse de ser escrito desligaria a conta dos antecipados.
+///   o disparo vem na hora dele; a suíte conta quantas vezes, com o
+///   contador lido no começo do handler, e não aqui (`antecipados_de_teste`,
+///   em [`tratar`]), e confere aqui que o `PRAZO` é o que o `CNTP_CVAL_EL0`
+///   tem (`divergencias_de_teste`) — sem isso, um `PRAZO` que deixasse de
+///   ser escrito desligaria a conta dos antecipados.
 /// - **O prazo escrito no passado.** Entre a leitura do contador e a
 ///   escrita do `CNTP_CVAL_EL0` o núcleo pode parar — o hospedeiro do
 ///   emulador o tira da CPU — e o prazo calculado já ter passado quando é
@@ -592,8 +594,10 @@ fn armar(ciclos: u32) {
 /// - **O `ISTATUS` não é lido.** O handler não confere, no `CNTP_CTL_EL0`,
 ///   se a condição do timer ainda vale antes de contar o tique: com o `isb`,
 ///   o fim da interrupção já vê a linha do prazo novo, e um disparo com o
-///   prazo no futuro só viria de uma pendência de antes do kernel, que o
-///   [`desligar_o_timer`] evita. A suíte conta os que chegarem
+///   prazo no futuro só viria do timer deixado ligado por quem rodou antes:
+///   a pendência que a linha habilitada levantada marcaria, e que o
+///   [`desligar_o_timer`] evita — uma marcada antes do kernel sobraria, e
+///   nenhum caminho de boot daqui a deixa. A suíte conta os que chegarem
 ///   (`antecipados_de_teste`); no x86 a recusa é necessária, e está lá
 ///   (`apic::chegou_o_prazo`).
 fn rearmar(ciclos: u32) {
@@ -601,18 +605,31 @@ fn rearmar(ciclos: u32) {
     let vencido = PRAZO[n].load(Ordering::Relaxed);
     let agora = contador();
     #[cfg(feature = "modo-teste")]
-    {
-        if (agora.wrapping_sub(vencido) as i64) < 0 {
-            ANTECIPADOS_DE_TESTE.fetch_add(1, Ordering::SeqCst);
-        }
-        if CNTP_CVAL_EL0.get() != vencido {
-            DIVERGENCIAS_DE_TESTE.fetch_add(1, Ordering::SeqCst);
-        }
+    if CNTP_CVAL_EL0.get() != vencido {
+        DIVERGENCIAS_DE_TESTE.fetch_add(1, Ordering::SeqCst);
     }
     let proximo = crate::tempo::proximo_prazo(vencido, agora, u64::from(ciclos));
     PRAZO[n].store(proximo, Ordering::Relaxed);
     CNTP_CVAL_EL0.set(proximo);
     barrier::isb(barrier::SY);
+}
+
+/// Só para a suíte: o disparo do timer deste núcleo chegou com o prazo dele
+/// ainda no futuro? Conta em [`ANTECIPADOS_DE_TESTE`].
+///
+/// Chamada no começo do ramo do timer, em [`tratar`], antes do trabalho do
+/// tique. Com o contador lido no fim do handler — no [`rearmar`], onde a
+/// conta morava —, um disparo antecipado a menos de um handler do prazo já o
+/// teria passado, e contava como tique sem ser visto (o achado 5 do
+/// adversário do #455-B). É a leitura do x86, no começo do handler
+/// (`apic::chegou_o_prazo`): lá, para recusar o tique; aqui, só para contar.
+#[cfg(feature = "modo-teste")]
+fn conferir_o_prazo_de_teste() {
+    let n = super::nucleo_atual();
+    let prazo = PRAZO[n].load(Ordering::Relaxed);
+    if (contador().wrapping_sub(prazo) as i64) < 0 {
+        ANTECIPADOS_DE_TESTE.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 /// Só para a suíte: o contador que o [`armar`] do núcleo `i` leu e o
@@ -645,8 +662,8 @@ pub fn divergencias_de_teste() -> u64 {
 }
 
 /// Só para a suíte: quantos disparos do timer, desde o boot, acharam o
-/// prazo do núcleo ainda no futuro. Zero com um prazo por núcleo — ver
-/// [`rearmar`].
+/// prazo do núcleo ainda no futuro no começo do handler. Zero com um prazo
+/// por núcleo — ver [`rearmar`] e [`conferir_o_prazo_de_teste`].
 #[cfg(feature = "modo-teste")]
 pub fn antecipados_de_teste() -> u64 {
     ANTECIPADOS_DE_TESTE.load(Ordering::SeqCst)
@@ -746,6 +763,10 @@ pub fn tratar() -> bool {
     }
 
     if intid == INTID_TIMER {
+        // Na suíte, o disparo conferido contra o prazo antes do trabalho do
+        // tique — ver `conferir_o_prazo_de_teste`.
+        #[cfg(feature = "modo-teste")]
+        conferir_o_prazo_de_teste();
         // Cada núcleo conta o próprio pulso e o oferece ao relógio, que anda
         // uma vez por período por qualquer núcleo vivo — ver `tempo::tick`.
         crate::nucleos::tique_local();
