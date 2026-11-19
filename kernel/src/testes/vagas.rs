@@ -824,6 +824,8 @@ const VITIMAS_POR_LANCADOR: u64 = 120;
 const LANCADORES: usize = 3;
 
 static PARAR: AtomicBool = AtomicBool::new(false);
+/// Solta os lançadores, depois de nascerem todos os fios do caso.
+static COMECAR: AtomicBool = AtomicBool::new(false);
 static VIVOS: AtomicUsize = AtomicUsize::new(0);
 static NASCIDAS: AtomicU64 = AtomicU64::new(0);
 static SEM_VAGA: AtomicU64 = AtomicU64::new(0);
@@ -843,8 +845,12 @@ extern "C" fn vitima(_argumento: u64) -> ! {
     crate::fios::terminar()
 }
 
-/// Faz nascer vítimas até mandarem parar, ou até o teto dele.
+/// Faz nascer vítimas até mandarem parar, ou até o teto dele — depois da
+/// partida ([`COMECAR`]), ou de mandarem parar antes dela.
 extern "C" fn lancador(_argumento: u64) -> ! {
+    while !COMECAR.load(SeqCst) && !PARAR.load(SeqCst) {
+        crate::fios::ceder();
+    }
     let mut feitas = 0;
     while !PARAR.load(SeqCst) && feitas < VITIMAS_POR_LANCADOR {
         match crate::fios::criar("teste-vagas-vitima", vitima, 0) {
@@ -874,6 +880,24 @@ extern "C" fn outro_coletor(_argumento: u64) -> ! {
     }
     VIVOS.fetch_sub(1, SeqCst);
     crate::fios::terminar()
+}
+
+/// Faz nascer `entrada` no núcleo `nucleo`, contado em [`VIVOS`]. A
+/// recusa é um erro do caso, com `erro` — e o motivo dela no log —, e não
+/// um fio a menos em silêncio.
+fn nascer_no_nucleo(
+    nome: &'static str,
+    entrada: extern "C" fn(u64) -> !,
+    nucleo: usize,
+    erro: &'static str,
+) -> Resultado {
+    VIVOS.fetch_add(1, SeqCst);
+    if let Err(motivo) = crate::fios::criar_no_nucleo(nome, entrada, 0, nucleo) {
+        VIVOS.fetch_sub(1, SeqCst);
+        crate::log_error!("teste", "{}: {}", erro, motivo);
+        return Err(erro);
+    }
+    Ok(())
 }
 
 /// Um passo ao `colhedor`, sem esperar o que ele diz — insistindo
@@ -917,6 +941,16 @@ fn sem_zumbis(_: u64) -> bool {
 /// No fim, cada vítima teve a morte solta uma vez — nenhuma perdida,
 /// nenhuma em dobro —, nenhum pedido dela ficou, nenhum zumbi ficou, e as
 /// vagas voltaram todas.
+///
+/// # A montagem
+///
+/// O outro coletor nasce primeiro, e os lançadores, presos, depois; só
+/// então a partida os solta. Soltos, eles enchem a tabela em menos de meio
+/// segundo, e o fio do caso que nascesse depois deles ficava sem vaga. Na
+/// CI 523, no aarch64, foi o outro coletor: a recusa ia em silêncio, ele
+/// não rodou nenhuma passada, e o caso reprovou com "nada correu ao mesmo
+/// tempo" — o que ele confere tinha passado. A recusa de um fio do caso é
+/// agora erro dele: para tudo, espera os que nasceram e falha com o motivo.
 pub(super) fn vagas_tudo_ao_mesmo_tempo() -> Resultado {
     let secundarios: Vec<usize> = nucleos_secundarios().collect();
     if secundarios.is_empty() {
@@ -940,24 +974,32 @@ pub(super) fn vagas_tudo_ao_mesmo_tempo() -> Resultado {
         c.store(0, SeqCst);
     }
     PARAR.store(false, SeqCst);
+    COMECAR.store(false, SeqCst);
     VIVOS.store(0, SeqCst);
     let desde = crate::log::total_emitidos();
     let programa = format!("{}/colhedor", crate::usuario::DIRETORIO_DOS_COMPILADOS);
     let colhedor = crate::usuario::lancar_como_sistema(Some(&programa))?;
     let mut r = ate(colhedor_pronto, desde, "o colhedor nao ficou pronto");
     if r.is_ok() {
-        for &nucleo in secundarios.iter().take(LANCADORES) {
-            VIVOS.fetch_add(1, SeqCst);
-            if crate::fios::criar_no_nucleo("teste-vagas-lancador", lancador, 0, nucleo).is_err() {
-                VIVOS.fetch_sub(1, SeqCst);
-            }
+        r = nascer_no_nucleo(
+            "teste-vagas-coletor",
+            outro_coletor,
+            secundarios[0],
+            "o outro coletor nao nasceu",
+        );
+    }
+    for &nucleo in secundarios.iter().take(LANCADORES) {
+        if r.is_ok() {
+            r = nascer_no_nucleo(
+                "teste-vagas-lancador",
+                lancador,
+                nucleo,
+                "um lancador nao nasceu",
+            );
         }
-        VIVOS.fetch_add(1, SeqCst);
-        if crate::fios::criar_no_nucleo("teste-vagas-coletor", outro_coletor, 0, secundarios[0])
-            .is_err()
-        {
-            VIVOS.fetch_sub(1, SeqCst);
-        }
+    }
+    if r.is_ok() {
+        COMECAR.store(true, SeqCst);
         for _ in 0..20 {
             for a in [
                 COLHEDOR_BIFURCA,
