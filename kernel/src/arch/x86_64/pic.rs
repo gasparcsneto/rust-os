@@ -30,6 +30,8 @@
 //! o primeiro passo de qualquer kernel x86 — movemos as IRQs para 32 e 40,
 //! logo acima da última exceção.
 
+use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+
 use x86_64::instructions::port::Port;
 
 /// Vetor onde a primeira IRQ do PIC mestre passa a chegar.
@@ -414,6 +416,9 @@ unsafe fn medir_os_ciclos() -> Option<(u64, u64)> {
 /// Uma medida de um décimo de segundo; até cinco tentativas, e vale a
 /// primeira com erro de até [`MAIOR_ERRO_PPM`]. `None` sem nenhuma — o
 /// civil cai para os tiques, com a deriva deles.
+///
+/// Mede de novo a cada chamada: quem precisa da frequência a pede a
+/// [`frequencia_do_tsc`], que mede uma vez só.
 pub fn calibrar_ciclos() -> Option<(u64, u64)> {
     const TENTATIVAS: usize = 5;
     // SAFETY: as portas do PIT e a porta B. O canal 2 e o alto-falante não
@@ -450,6 +455,54 @@ pub fn calibrar_ciclos() -> Option<(u64, u64)> {
         melhor.filter(|&(_, erro)| erro <= MAIOR_ERRO_PPM)
     }
 }
+
+/// A frequência do TSC e o erro máximo dela, em ppm — a medida de
+/// [`calibrar_ciclos`], feita na primeira chamada e guardada.
+///
+/// # Uma medida só
+///
+/// Duas leem a mesma frequência: a grade dos tiques do APIC (`apic::PRAZO`),
+/// no começo do boot, e a régua do civil (`hora::contador`), depois. Com uma
+/// medida para cada uma, o relógio do kernel e a régua andariam em
+/// frequências que diferem pelo erro das duas medidas — até 400 ppm —, e a
+/// taxa de um contra a outra (`mono_ppm`) mediria isso. Com a mesma, o
+/// relógio só se afasta da régua pelos tiques que perde.
+///
+/// As duas chamadas são do boot, no primeiro núcleo, antes de os outros
+/// acordarem; os atômicos são por higiene.
+pub fn frequencia_do_tsc() -> Option<(u64, u64)> {
+    match TSC_MEDIDO.load(Ordering::Acquire) {
+        TSC_MEDIDA => {
+            return Some((
+                TSC_HZ.load(Ordering::Relaxed),
+                TSC_ERRO_PPM.load(Ordering::Relaxed),
+            ));
+        }
+        TSC_SEM_MEDIDA => return None,
+        _ => {}
+    }
+    let medida = calibrar_ciclos();
+    match medida {
+        Some((hz, erro)) => {
+            TSC_HZ.store(hz, Ordering::Relaxed);
+            TSC_ERRO_PPM.store(erro, Ordering::Relaxed);
+            TSC_MEDIDO.store(TSC_MEDIDA, Ordering::Release);
+        }
+        None => TSC_MEDIDO.store(TSC_SEM_MEDIDA, Ordering::Release),
+    }
+    medida
+}
+
+/// Os estados de [`TSC_MEDIDO`]: ainda não medida, medida, e medida sem
+/// valer.
+const TSC_NAO_MEDIDA: u8 = 0;
+const TSC_MEDIDA: u8 = 1;
+const TSC_SEM_MEDIDA: u8 = 2;
+
+/// A medida guardada por [`frequencia_do_tsc`]: se já houve uma, e qual.
+static TSC_MEDIDO: AtomicU8 = AtomicU8::new(TSC_NAO_MEDIDA);
+static TSC_HZ: AtomicU64 = AtomicU64::new(0);
+static TSC_ERRO_PPM: AtomicU64 = AtomicU64::new(0);
 
 /// Sinaliza fim de interrupção para o PIC.
 ///

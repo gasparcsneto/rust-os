@@ -1446,7 +1446,7 @@ pub fn init_timer_definitivo() {
 
     crate::log_info!(
         "irq",
-        "timer do APIC a {} Hz no nucleo {} (barramento medido em {} kHz), PIT desligado",
+        "timer do APIC a {} Hz no nucleo {}, pela grade do TSC (barramento medido em {} kHz), PIT desligado",
         efetiva,
         apic::id_do_nucleo().unwrap_or(0),
         apic::frequencia_do_barramento() / 1000
@@ -1959,8 +1959,9 @@ pub fn ciclos() -> u64 {
 }
 
 /// A frequência de [`ciclos`] e o erro máximo dela, em ppm: o x86 não a
-/// declara, e ela é medida contra o PIT — ver [`pic::calibrar_ciclos`].
+/// declara, e ela é medida contra o PIT — ver [`pic::calibrar_ciclos`] —,
+/// uma vez só, e a mesma serve à grade dos tiques ([`pic::frequencia_do_tsc`]).
 /// `None` se a medida não valeu.
 pub fn frequencia_dos_ciclos() -> Option<(u64, u64)> {
-    pic::calibrar_ciclos()
+    pic::frequencia_do_tsc()
 }

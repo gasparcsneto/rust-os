@@ -230,18 +230,30 @@ tratadores! {
     linha12 = 12, linha13 = 13, linha14 = 14, linha15 = 15,
 }
 
-/// Interrupção periódica do timer do APIC local.
+/// Interrupção do timer do APIC local.
 ///
 /// É a gêmea de `atender(0)`, e faz o mesmo trabalho: marcar o tempo e
 /// perguntar ao escalonador. O que muda é quem precisa ser avisado no fim —
-/// o APIC, não o PIC.
+/// o APIC, não o PIC — e o rearme: o timer dispara uma vez por prazo, numa
+/// grade comum no TSC, e o seguinte é escrito aqui (ver `apic::PRAZO`).
 extern "x86-interrupt" fn timer_do_apic(quadro: InterruptStackFrame) {
-    // Cada núcleo tem o seu timer, e cada um conta o próprio pulso e o
-    // oferece ao relógio, que anda uma vez por período por qualquer núcleo
-    // vivo — ver `tempo::tick`. Os dispositivos, só no núcleo deles.
-    crate::nucleos::tique_local();
-    crate::tempo::tick();
-    let preemptar = crate::fios::tique();
+    // Um disparo antes do prazo não é tique: só rearma, para o mesmo prazo.
+    // Os outros: cada núcleo tem o seu timer, e cada um conta o próprio pulso
+    // e o oferece ao relógio, que anda uma vez por período por qualquer
+    // núcleo vivo — ver `tempo::tick`. Os dispositivos, só no núcleo deles.
+    let contou = super::apic::chegou_o_prazo();
+    let preemptar = if contou {
+        crate::nucleos::tique_local();
+        crate::tempo::tick();
+        crate::fios::tique()
+    } else {
+        false
+    };
+
+    // O prazo seguinte no fim, como no ARM: o que passou durante o trabalho
+    // do tique é pulado. Antes do fim da interrupção: sem ele, esta seria a
+    // última.
+    super::apic::rearmar(contou);
 
     crate::irq::contabilizar(super::apic::VETOR_TIMER as usize);
 

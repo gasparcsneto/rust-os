@@ -8,9 +8,10 @@
 //! sistema travou ou apenas está lento, é a diferença entre diagnosticar e
 //! adivinhar.
 //!
-//! Com um timer periódico gerando interrupções, passamos a ter um relógio:
-//! cada interrupção incrementa o contador, e a frequência configurada permite
-//! convertê-lo em milissegundos.
+//! Com um timer gerando uma interrupção por período, passamos a ter um
+//! relógio: cada período incrementa o contador — uma vez, por qualquer
+//! núcleo; ver [`avancar`] —, e a frequência configurada permite convertê-lo
+//! em milissegundos.
 //!
 //! # Por que atômicos e não `Mutex`
 //!
@@ -67,6 +68,35 @@ pub fn tick() {
 /// atômica do valor que viu, e quem viu o mesmo valor e perdeu a troca vê,
 /// no próximo tique, que andou. A frequência é a do timer de quem anda —
 /// todos programados na mesma.
+///
+/// # A grade comum: o que a regra pede dos timers
+///
+/// A regra supõe que um núcleo não tiqueia de novo num ponto cujo avanço já
+/// viu. Os timers das duas arquiteturas — o `gic` do ARM e o `apic` do x86 —
+/// garantem isso com três propriedades, que são invariantes:
+///
+/// 1. todo tique roda no ponto da grade dele ou depois, nunca antes: um
+///    disparo que chega antes do prazo só rearma, e não é tique;
+/// 2. o rearme pula todo ponto que não está no futuro ([`proximo_prazo`]);
+/// 3. todos os núcleos estão na mesma grade: os pontos `origem + k ·
+///    intervalo`, com a origem do primeiro núcleo.
+///
+/// Com as três, o tique de um núcleo pertence a um ponto da grade; o
+/// seguinte do mesmo núcleo, a um ponto depois de tudo o que ele viu; e
+/// dois tiques do mesmo ponto, em núcleos diferentes, andam o relógio uma
+/// vez só. O relógio anda no máximo uma vez por ponto: nunca à frente do
+/// contador da arquitetura. Atrás, sim — um período em que nenhum núcleo
+/// tiqueia não volta, e uma parada do hospedeiro, que anda o contador e
+/// não deixa ninguém tiquear, deixa o relógio para trás.
+///
+/// Sem a terceira — uma grade por núcleo, cada uma na sua fase: o APIC
+/// periódico do x86 desde sempre, e o timer do ARM depois do #455 —, um
+/// tique atrasado que via o avanço de outro núcleo era seguido, no mesmo
+/// núcleo, do tique da grade dele a menos de um período; se esse vinha antes
+/// do próximo do outro, ninguém tinha andado desde o atrasado, e ele andava
+/// o mesmo período de novo. Sob carga, com vários núcleos, o relógio passava
+/// à frente do tempo de verdade — o caso `smp: o relogio nao passa do
+/// contador com os nucleos mascarados em trechos menores que o periodo`.
 fn avancar() {
     let n = crate::nucleos::atual().min(MAX_NUCLEOS - 1);
     let agora = TICKS.load(Ordering::Acquire);
@@ -146,7 +176,8 @@ fn trabalho_dos_dispositivos() {
     crate::grafico::apresentar_pendente();
 }
 
-/// Quantas interrupções de timer ocorreram desde o boot.
+/// Quantos períodos do timer o relógio contou desde o boot — no máximo um
+/// por ponto da grade comum, por qualquer núcleo vivo (ver [`avancar`]).
 pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
@@ -154,6 +185,43 @@ pub fn ticks() -> u64 {
 /// A frequência configurada do timer, ou zero se ainda não há timer.
 pub fn frequencia_hz() -> u32 {
     FREQUENCIA_HZ.load(Ordering::Relaxed)
+}
+
+/// O prazo seguinte a `vencido` na grade de `intervalo` em `intervalo`: o
+/// primeiro dela depois de `agora` — `vencido + k * intervalo`, com o menor
+/// `k >= 1` que passa de `agora`. É a conta do rearme dos timers das duas
+/// arquiteturas, em ciclos do contador de cada uma (o `CNTPCT_EL0` do ARM, o
+/// TSC do x86), e a do primeiro prazo de cada núcleo, com a origem da grade
+/// no lugar de `vencido`. Pura, para a suíte a conferir sem o timer.
+///
+/// # A aritmética
+///
+/// - **O atraso é a diferença, e não a comparação.** `agora - vencido`, com
+///   a volta (`wrapping_sub`), lido com sinal: acerta enquanto os dois
+///   estão a menos de 2^63 ciclos um do outro — séculos, a qualquer
+///   frequência. Os prazos perdidos são `atraso / intervalo`, e o próximo
+///   fica em `(agora, agora + intervalo]`: nunca no passado na hora da
+///   conta, e nunca mais de um período à frente.
+/// - **Nada transborda.** Com o atraso abaixo de 2^63, `(perdidos + 1) *
+///   intervalo` não passa de `atraso + intervalo`, abaixo de 2^64; as somas
+///   são as da volta mesmo assim — a conta roda num handler, onde o
+///   transbordo do kernel de depuração seria um pânico. Um intervalo zero
+///   vale um.
+/// - **O prazo ainda no futuro**, o atraso negativo, fica: a conta devolve
+///   `vencido`. É o disparo que chegou antes do prazo — no x86 acontece, e o
+///   rearme fica no mesmo ponto; no ARM não, e a suíte conta quantas vezes.
+/// - **Um atraso de 2^63 ciclos ou mais** lê-se como negativo, e o prazo
+///   também fica. São séculos a qualquer frequência — ver o `PRAZO` do ARM,
+///   onde o comparador do timer, sem sinal, faz da volta do contador um
+///   período agitado.
+pub(crate) fn proximo_prazo(vencido: u64, agora: u64, intervalo: u64) -> u64 {
+    let intervalo = intervalo.max(1);
+    let atraso = agora.wrapping_sub(vencido);
+    if (atraso as i64) < 0 {
+        return vencido;
+    }
+    let perdidos = atraso / intervalo;
+    vencido.wrapping_add(perdidos.wrapping_add(1).wrapping_mul(intervalo))
 }
 
 /// Tempo desde o boot em milissegundos.

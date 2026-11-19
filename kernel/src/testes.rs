@@ -27658,8 +27658,9 @@ fn smp_todos_os_nucleos_ligam() -> Resultado {
 /// dele, e não do relógio, que outro núcleo anda no lugar. Medido na CI 508,
 /// com a suíte em partes, logo depois da criação concorrente: "relogio
 /// andou 51, o primeiro nucleo contou 40". Desde o #455 ele é rearmado pelo
-/// prazo (`gic::rearmar`), como o APIC periódico do x86 já fazia: o atraso
-/// e o handler só custam tique quando passam do prazo seguinte. A folga
+/// prazo (`gic::rearmar`), como o APIC do x86 — periódico até o #455-B, e
+/// desde então rearmado pela grade do TSC: o atraso e o handler só custam
+/// tique quando passam do prazo seguinte. A folga
 /// fica, porque o caso mede o relógio, e não o atraso de quem veio antes —
 /// esse é do caso `smp: o pulso nao perde tique com o nucleo mascarado em
 /// trechos de 6 ms`. Na suíte inteira quem dava esta folga era o caso
@@ -27771,7 +27772,7 @@ fn smp_o_relogio_anda_sem_o_nucleo_dos_dispositivos() -> Resultado {
 
 // ---------------------------------------------------------------------------
 // O tique com o núcleo mascarado (o #455): o timer do ARM rearmado pelo prazo,
-// e o APIC periódico do x86, que já fazia o mesmo
+// e o do x86, que já pulava os perdidos; e a grade comum dos dois (o #455-B)
 // ---------------------------------------------------------------------------
 
 /// Os ciclos do contador da arquitetura em `us` microssegundos — ver
@@ -27808,8 +27809,9 @@ fn periodos_em(ciclos: u64) -> u64 {
 /// `CNTP_TVAL_EL0`): o disparo que caía num trecho mascarado chegava no fim
 /// dele, e o período seguinte começava dali — cada um durava uns 13 ms, e o
 /// pulso contava uns 38 dos 50. Pelo prazo (`gic::rearmar`), o disparo
-/// chega atrasado e o seguinte vem na hora da grade. No x86 o APIC é
-/// periódico e já passava; o caso confere que continua passando.
+/// chega atrasado e o seguinte vem na hora da grade. No x86 o APIC era
+/// periódico e já passava; desde o #455-B ele dispara uma vez por prazo, na
+/// grade do TSC, e o caso confere que continua passando.
 ///
 /// Medido no ARM em depuração, com o rearme de antes reposto (as mutações
 /// do #455): o relógio andou 49, o pulso 38, e o contador disse 50
@@ -27889,9 +27891,9 @@ fn smp_o_pulso_nao_perde_tique_mascarado_em_trechos() -> Resultado {
 /// O rearme pelo prazo sem pular os perdidos: o prazo seguinte ao que
 /// venceu também já passou, e o timer dispara de novo na hora, e de novo,
 /// até alcançar o contador — três ou quatro tiques de uma vez, e o pulso e
-/// o relógio adiantados por eles. O APIC periódico guarda um disparo
-/// pendente só, e o timer do ARM pelo prazo pula os perdidos
-/// (`gic::proximo_prazo`): logo depois de desmascarar, o pulso anda um —
+/// o relógio adiantados por eles. Os timers das duas arquiteturas pulam os
+/// perdidos (`tempo::proximo_prazo`) — o APIC periódico de antes guardava
+/// um disparo pendente só —: logo depois de desmascarar, o pulso anda um —
 /// ou dois, se o prazo seguinte da grade cair nos 3 ms da medida. Medido no
 /// ARM em depuração, com a rajada (as mutações do #455): três e quatro
 /// tiques logo depois, e o relógio 15 e 16 no caso, contra 13 ou 14 pelo
@@ -27969,45 +27971,75 @@ fn smp_mascarado_por_mais_de_um_periodo_o_timer_volta_sem_rajada() -> Resultado 
     Ok(())
 }
 
-/// O prazo do timer do ARM (o #455), pelo que só este backend tem:
+/// O primeiro prazo de cada núcleo ligado, pelo que o `armar` dele anotou:
+/// o contador que ele leu e o prazo que calculou. O prazo é o primeiro ponto
+/// da grade comum depois do contador — à frente dele, a no máximo um
+/// intervalo, e na grade da origem. Os dois valores são os que a conta
+/// usou: nenhuma parada do hospedeiro muda a distância entre eles.
+fn primeiros_prazos_na_grade(
+    arquitetura: &str,
+    primeiro: impl Fn(usize) -> Option<(u64, u64)>,
+    origem: u64,
+    intervalo: u64,
+) -> Resultado {
+    let ligados = crate::nucleos::mascara_dos_ligados();
+    for i in (0..crate::nucleos::MAX_NUCLEOS).filter(|&i| ligados & crate::nucleos::bit(i) != 0) {
+        let p = primeiro(i);
+        crate::log_info!(
+            "teste",
+            "{}: o nucleo {} armou o primeiro prazo (o contador, o prazo) {:?}; a origem da grade {}, o intervalo {}",
+            arquitetura,
+            i,
+            p,
+            origem,
+            intervalo
+        );
+        let Some((agora, prazo)) = p else {
+            return Err("um nucleo ligado nao armou o primeiro prazo");
+        };
+        if !(1..=intervalo).contains(&prazo.wrapping_sub(agora)) {
+            return Err("o primeiro prazo de um nucleo nao partiu do contador de agora");
+        }
+        if !prazo.wrapping_sub(origem).is_multiple_of(intervalo) {
+            return Err("o primeiro prazo de um nucleo nao esta na grade comum dos nucleos");
+        }
+    }
+    Ok(())
+}
+
+/// O prazo do timer do ARM (o #455 e o #455-B), pelo que só este backend
+/// tem:
 ///
-/// - o primeiro prazo de cada núcleo ligado partiu do contador de agora —
-///   à frente dele, e a no máximo um intervalo —, no boot e ao acordar. Um
-///   prazo zero, ou um que não lesse o contador, dispararia na hora de
-///   ligar o timer;
+/// - o primeiro prazo de cada núcleo ligado é o primeiro ponto da grade
+///   comum depois do contador de agora, no boot e ao acordar — ver
+///   [`primeiros_prazos_na_grade`]. Um prazo zero, um que não lesse o
+///   contador ou um fora da grade comum reprovam;
 /// - nenhum disparo, desde o boot, achou o prazo do núcleo ainda no futuro.
 ///   Com um prazo por núcleo, só chega o disparo do próprio prazo; com um
 ///   prazo só para todos, cada núcleo leria o que outro escreveu, e os
 ///   núcleos marchariam juntos na grade do último que escreveu — os pulsos
 ///   certos, e o defeito invisível nos outros casos;
-/// - a conta do próximo ([`crate::arch::atual::gic::proximo_prazo`]): o
-///   primeiro da grade depois do contador, também na volta dele, e nunca no
-///   passado nem a mais de um intervalo.
+/// - nenhum rearme achou o `PRAZO` do núcleo diferente do `CNTP_CVAL_EL0`
+///   dele: o `PRAZO` é o espelho do registrador, e a conta dos antecipados o
+///   lê — sem a escrita dele no rearme, ela não contaria nunca;
+/// - a conta do próximo ([`crate::tempo::proximo_prazo`]): o primeiro da
+///   grade depois do contador, também na volta dele, e nunca no passado nem
+///   a mais de um intervalo.
 #[cfg(target_arch = "aarch64")]
 fn smp_o_prazo_do_timer_do_arm() -> Resultado {
     use crate::arch::atual::gic;
+    use crate::tempo::proximo_prazo;
     const I: u64 = 100;
     let intervalo = gic::intervalo_de_teste();
     if intervalo == 0 {
         return Err("o timer do ARM nao foi programado");
     }
-    let ligados = crate::nucleos::mascara_dos_ligados();
-    for i in (0..crate::nucleos::MAX_NUCLEOS).filter(|&i| ligados & crate::nucleos::bit(i) != 0) {
-        let distancia = gic::primeira_distancia_de_teste(i);
-        crate::log_info!(
-            "teste",
-            "o nucleo {} ligou o timer com o primeiro prazo a {:?} ciclos do contador; o intervalo e {}",
-            i,
-            distancia,
-            intervalo
-        );
-        if !distancia
-            .and_then(|d| u64::try_from(d).ok())
-            .is_some_and(|d| (1..=intervalo).contains(&d))
-        {
-            return Err("o primeiro prazo de um nucleo nao partiu do contador de agora");
-        }
-    }
+    primeiros_prazos_na_grade(
+        "ARM",
+        gic::primeiro_prazo_de_teste,
+        gic::origem_de_teste(),
+        intervalo,
+    )?;
     let antecipados = gic::antecipados_de_teste();
     if antecipados != 0 {
         crate::log_error!(
@@ -28016,6 +28048,15 @@ fn smp_o_prazo_do_timer_do_arm() -> Resultado {
             antecipados
         );
         return Err("um disparo do timer achou o prazo do nucleo ainda no futuro");
+    }
+    let divergencias = gic::divergencias_de_teste();
+    if divergencias != 0 {
+        crate::log_error!(
+            "teste",
+            "{} rearme(s) acharam o PRAZO do nucleo diferente do CNTP_CVAL_EL0 dele",
+            divergencias
+        );
+        return Err("o PRAZO de um nucleo nao e o que o CNTP_CVAL_EL0 dele tem");
     }
     // A conta, sem o timer, com um intervalo de 100 ciclos: o que venceu, o
     // contador, e o próximo esperado.
@@ -28033,7 +28074,7 @@ fn smp_o_prazo_do_timer_do_arm() -> Resultado {
         (u64::MAX - 49, 30, 50),
         (u64::MAX - 49, 60, 150),
     ] {
-        let proximo = gic::proximo_prazo(vencido, agora, I);
+        let proximo = proximo_prazo(vencido, agora, I);
         if proximo != esperado {
             crate::log_error!(
                 "teste",
@@ -28056,7 +28097,7 @@ fn smp_o_prazo_do_timer_do_arm() -> Resultado {
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
         let agora = x.wrapping_add((x >> 33) % (64 * I));
-        let proximo = gic::proximo_prazo(x, agora, I);
+        let proximo = proximo_prazo(x, agora, I);
         let a_frente = proximo.wrapping_sub(agora);
         if !(1..=I).contains(&a_frente) || !proximo.wrapping_sub(x).is_multiple_of(I) {
             crate::log_error!(
@@ -28070,8 +28111,327 @@ fn smp_o_prazo_do_timer_do_arm() -> Resultado {
             return Err("o proximo prazo saiu da grade, ou de (contador, contador + intervalo]");
         }
     }
-    if gic::proximo_prazo(1_000, 1_005, 0) != 1_006 {
+    if proximo_prazo(1_000, 1_005, 0) != 1_006 {
         return Err("o intervalo zero nao vale um");
+    }
+    Ok(())
+}
+
+/// O tique do x86 pela grade comum do TSC (o #455-B), pelo que só este
+/// backend tem:
+///
+/// - o primeiro prazo de cada núcleo ligado é o primeiro ponto da grade
+///   comum depois do TSC de agora — ver [`primeiros_prazos_na_grade`];
+/// - os disparos antes do prazo que a conversão dá sozinha, desde o boot,
+///   não passam de quatro por tique: um erro de unidade na razão do TSC
+///   para o APIC só aparece neles;
+/// - um disparo antes do prazo não é tique. O caso o provoca no núcleo da
+///   suíte, logo depois de um tique, com o prazo dele a quase um período: o
+///   APIC dispara já (`apic::antecipar_de_teste`), e o handler só rearma —
+///   o pulso não anda, e o prazo fica. Depois vem o tique do prazo, um só, e
+///   o prazo seguinte na grade.
+///
+/// A primeira das três propriedades de `tempo::avancar`: um disparo contado
+/// antes do prazo andaria o relógio num ponto que ainda não chegou, e
+/// contaria o mesmo ponto de novo quando ele chegasse. No x86 a contagem do
+/// APIC é a distância no TSC convertida, e a conversão erra: o disparo antes
+/// do prazo acontece de verdade, e não só no caso.
+///
+/// Uma parada do hospedeiro no meio pode passar do prazo — o disparo
+/// provocado já não seria antes dele —: o caso tenta de novo, até cinco
+/// vezes.
+#[cfg(target_arch = "x86_64")]
+fn smp_o_tique_do_x86_vem_pela_grade_comum_do_tsc() -> Resultado {
+    use crate::arch::atual::apic;
+    const TENTATIVAS: u32 = 5;
+    let (origem, intervalo) = apic::grade_de_teste();
+    let hz_da_regua = crate::hora::contador::hz();
+    if intervalo == 0 || hz_da_regua == 0 {
+        return Err("o timer do x86 nao foi programado pela grade do TSC");
+    }
+    // O período é o do TSC, com a medida da régua do civil — uma só —, e não
+    // o do APIC: o relógio e a régua contam o mesmo oscilador na mesma
+    // frequência.
+    let hz_do_timer = u64::from(crate::tempo::frequencia_hz()).max(1);
+    crate::log_info!(
+        "teste",
+        "x86: a grade dos tiques de {} ciclos do TSC; a regua do civil a {} Hz, o timer a {} Hz",
+        intervalo,
+        hz_da_regua,
+        hz_do_timer
+    );
+    if intervalo != hz_da_regua / hz_do_timer {
+        return Err("o periodo da grade dos tiques nao e o da regua do civil");
+    }
+    primeiros_prazos_na_grade("x86", apic::primeiro_prazo_de_teste, origem, intervalo)?;
+    // Os disparos antes do prazo que a conversão dá sozinha, desde o boot.
+    // Com a razão da calibração e a margem de um milésimo, nenhum: zero em
+    // todas as rodadas do #455-B, e zero até sem a margem. Um erro de unidade
+    // na razão — os ciclos do TSC por decremento dezesseis vezes a mais — põe
+    // dezenas deles em cada tique (medido: 29 021 em 1172 tiques, em
+    // depuração), e nem o relógio nem a conferência contra o PIT o sentem:
+    // eles contam os tiques. Cada disparo antes do prazo cobre só uma parte
+    // da distância, e quanto mais lento o hospedeiro, menos deles cabem num
+    // período: o teto fica bem abaixo dos 25 por tique da medida. A razão
+    // alta sem defeito viria de uma parada do hospedeiro entre as duas
+    // leituras do fim da janela da calibração — um intervalo de
+    // microssegundos —, e só uma parada de dezenas de milissegundos ali a
+    // poria perto do teto.
+    const ANTECIPADOS_POR_TIQUE: u64 = 4;
+    let (antecipados, tiques) = (apic::antecipados_de_teste(), apic::tiques_de_teste());
+    crate::log_info!(
+        "teste",
+        "x86: {} disparo(s) antes do prazo em {} tiques, desde o boot",
+        antecipados,
+        tiques
+    );
+    if tiques == 0 {
+        return Err("o timer do x86 nao contou nenhum tique");
+    }
+    if antecipados > tiques.saturating_mul(ANTECIPADOS_POR_TIQUE) {
+        return Err(
+            "os disparos antes do prazo passam de 4 por tique: a conversao do TSC para o APIC erra demais",
+        );
+    }
+    let eu = crate::arch::sem_interrupcoes(crate::nucleos::atual);
+    let tsc = crate::arch::ciclos;
+    // O pulso deste núcleo mudar de `de`, com um segundo de teto no contador,
+    // e não no relógio: com um núcleo só e o timer dele parado, o relógio
+    // para junto.
+    let o_pulso_mudou = |de: u64| {
+        let (inicio, teto) = (tsc(), ciclos_em_us(1_000_000));
+        while tsc().wrapping_sub(inicio) < teto {
+            if tiques_do_nucleo(eu) != de {
+                return true;
+            }
+            core::hint::spin_loop();
+        }
+        false
+    };
+    for tentativa in 1..=TENTATIVAS {
+        // Logo depois de um tique: o prazo seguinte a quase um período.
+        if !o_pulso_mudou(tiques_do_nucleo(eu)) {
+            return Err("o nucleo da suite nao tiqueou");
+        }
+        let antes = crate::arch::sem_interrupcoes(|| {
+            let prazo = apic::prazo_de_teste();
+            let folga = prazo.wrapping_sub(tsc()) as i64;
+            if folga < (intervalo / 2) as i64 {
+                return None;
+            }
+            let antes = (prazo, tiques_do_nucleo(eu), apic::antecipados_de_teste());
+            // O disparo, já, com o prazo no futuro; fica pendente até a
+            // máscara cair.
+            apic::antecipar_de_teste();
+            girar_por_ciclos(ciclos_em_us(200));
+            Some(antes)
+        });
+        let Some((prazo, pulso_antes, antecipados_antes)) = antes else {
+            continue;
+        };
+        // Desmascarado: o disparo pendente entra aqui.
+        girar_por_ciclos(ciclos_em_us(200));
+        let (pulso_depois, antecipados_depois, prazo_depois, ainda_antes) =
+            crate::arch::sem_interrupcoes(|| {
+                (
+                    tiques_do_nucleo(eu),
+                    apic::antecipados_de_teste(),
+                    apic::prazo_de_teste(),
+                    (tsc().wrapping_sub(prazo) as i64) < 0,
+                )
+            });
+        crate::log_info!(
+            "teste",
+            "x86, tentativa {}: o disparo provocado antes do prazo; o pulso {} e depois {}, os antecipados {} e depois {}, o prazo {} e depois {}",
+            tentativa,
+            pulso_antes,
+            pulso_depois,
+            antecipados_antes,
+            antecipados_depois,
+            prazo,
+            prazo_depois
+        );
+        if !ainda_antes {
+            // O hospedeiro parou o núcleo além do prazo: o disparo pode ter
+            // sido o do prazo, e contado com razão.
+            continue;
+        }
+        // O pulso primeiro: com o prazo ainda no futuro, nenhum tique deste
+        // núcleo é de direito, e um disparo contado como tique também não
+        // conta como antecipado.
+        if pulso_depois != pulso_antes {
+            return Err("um disparo antes do prazo contou tique");
+        }
+        if antecipados_depois == antecipados_antes {
+            return Err("o disparo provocado antes do prazo nao chegou ao handler");
+        }
+        if prazo_depois != prazo {
+            return Err("um disparo antes do prazo mudou o prazo do nucleo");
+        }
+        // O tique do prazo vem depois, e o prazo seguinte fica na grade.
+        if !o_pulso_mudou(pulso_antes) {
+            return Err("depois do disparo antes do prazo, o tique do prazo nao veio");
+        }
+        let seguinte = crate::arch::sem_interrupcoes(apic::prazo_de_teste);
+        if (seguinte.wrapping_sub(prazo) as i64) <= 0
+            || !seguinte.wrapping_sub(origem).is_multiple_of(intervalo)
+        {
+            return Err("depois do tique, o prazo seguinte saiu da grade comum");
+        }
+        return Ok(());
+    }
+    Err("o hospedeiro passou do prazo em todas as tentativas: o caso nao mediu nada")
+}
+
+// ---------------------------------------------------------------------------
+// O adversário do #455: o relógio não passa do contador com os núcleos
+// mascarados em trechos menores que um período
+// ---------------------------------------------------------------------------
+
+/// Um passo do gerador do caso do adversário (xorshift64): a mesma
+/// sequência para a mesma semente, sem estado fora de quem chama.
+fn xorshift_do_adversario(x: &mut u64) -> u64 {
+    *x ^= *x << 13;
+    *x ^= *x >> 7;
+    *x ^= *x << 17;
+    *x
+}
+
+/// Um trecho mascarado de 3 a 9 ms, e depois um aberto de 0,5 a 10 ms, os
+/// dois medidos no contador da arquitetura.
+fn mascarar_um_trecho_do_adversario(x: &mut u64) {
+    let sorteio = xorshift_do_adversario(x);
+    let trecho = ciclos_em_us(3_000 + sorteio % 6_001);
+    let aberta = ciclos_em_us(500 + (sorteio >> 32) % 9_501);
+    crate::arch::sem_interrupcoes(|| girar_por_ciclos(trecho));
+    girar_por_ciclos(aberta);
+}
+
+/// O relógio do sistema não anda à frente do contador da arquitetura com
+/// todos os núcleos mascarados em trechos menores que um período — de 3 a
+/// 9 ms, com 0,5 a 10 ms abertos entre eles, sorteados —, por três
+/// segundos.
+///
+/// # O defeito que este caso pega
+///
+/// `tempo::avancar` anda o relógio pelo núcleo que não viu ninguém andar
+/// desde o próprio tique anterior, e a regra supõe que um núcleo não
+/// tiqueia de novo num ponto cujo avanço já viu. Com o tique pela grade de
+/// cada núcleo — o `CNTP_CVAL_EL0` do #455 no ARM, o APIC periódico no x86
+/// —, um tique atrasado por um trecho mascarado era seguido do próximo na
+/// hora da grade dele, a menos de um período. Se o atrasado tinha visto o
+/// avanço que outro núcleo fez no meio do atraso, e o seguinte chegava
+/// antes do próximo tique desse outro, ninguém tinha andado desde o tique
+/// anterior dele: ele andava o relógio de novo. O mesmo período contava
+/// duas vezes. Desde o #455-B todos os núcleos estão numa grade só — ver
+/// `tempo::avancar`.
+///
+/// Medido antes da correção, sozinho, em depuração, com quatro núcleos: o
+/// relógio andou 307, 332 e 322 no ARM, e 327, 315 e 308 no x86, contra os
+/// 300 períodos do contador — seis reprovações em seis, sem rajada (o maior
+/// pulso, 301 e 300). O modelo do #455-B: mais de dois tiques à frente em
+/// 190 de 200 sementes nas duas arquiteturas, a mediana +21; com a grade
+/// comum, nenhuma, o maior +1.
+///
+/// # O teto: dois tiques
+///
+/// Na grade comum o relógio anda no máximo uma vez por ponto da grade; na
+/// janela cabem os pontos dela, que são os períodos do contador mais um, e
+/// no máximo um avanço de um ponto de antes da janela — o tique atrasado de
+/// um núcleo mascarado quando ela abriu. Mais que dois é o mesmo ponto
+/// contado duas vezes.
+///
+/// # Só para cima
+///
+/// A régua é o contador, como a do caso dos trechos de 6 ms com um núcleo
+/// só, mas aqui com vários, e só como teto: uma parada do hospedeiro — do
+/// processo inteiro do emulador, ou de um núcleo só — anda o contador e
+/// deixa o relógio para trás, e nunca o põe à frente. O relógio para trás,
+/// com todos os núcleos mascarados ao mesmo tempo, é o que se espera, e não
+/// se confere.
+///
+/// O pulso de cada núcleo também não passa do contador: com o pulo dos
+/// perdidos, um núcleo não conta mais tiques que os prazos da grade.
+fn smp_o_relogio_nao_passa_do_contador_com_os_nucleos_mascarados() -> Resultado {
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+    static PARAR: AtomicBool = AtomicBool::new(false);
+    static VIVOS: AtomicU64 = AtomicU64::new(0);
+    const SEGUNDOS: u64 = 3;
+    extern "C" fn mascarar(semente: u64) -> ! {
+        VIVOS.fetch_add(1, SeqCst);
+        let mut x = semente | 1;
+        while !PARAR.load(SeqCst) {
+            mascarar_um_trecho_do_adversario(&mut x);
+        }
+        VIVOS.fetch_sub(1, SeqCst);
+        crate::fios::terminar()
+    }
+    let hz_do_timer = u64::from(crate::tempo::frequencia_hz());
+    if crate::hora::contador::hz() == 0 || hz_do_timer == 0 {
+        return Err("sem a frequencia do contador e a do timer, o caso nao se mede");
+    }
+    let outros = nucleos_secundarios().count() as u64;
+    if outros == 0 {
+        crate::log_info!(
+            "teste",
+            "um nucleo so: o relogio e o pulso dele, e ninguem conta o mesmo periodo duas vezes"
+        );
+        return Ok(());
+    }
+    PARAR.store(false, SeqCst);
+    VIVOS.store(0, SeqCst);
+    // Um fio fixo em cada núcleo secundário, cada um com a sua semente; o
+    // primeiro núcleo é o da suíte, que mascara do mesmo jeito abaixo.
+    for (k, i) in nucleos_secundarios().enumerate() {
+        let semente = 0x9E37_79B9_7F4A_7C15u64.wrapping_mul(k as u64 + 1);
+        if let Err(motivo) = crate::fios::criar_no_nucleo("teste-mascara", mascarar, semente, i) {
+            PARAR.store(true, SeqCst);
+            let _ = esperar_ate(|| VIVOS.load(SeqCst) == 0, 300);
+            return Err(motivo);
+        }
+    }
+    if esperar_ate(|| VIVOS.load(SeqCst) == outros, 300).is_err() {
+        PARAR.store(true, SeqCst);
+        let _ = esperar_ate(|| VIVOS.load(SeqCst) == 0, 300);
+        return Err("os fios que mascaram os outros nucleos nao comecaram");
+    }
+    let pulsos_antes: [u64; crate::nucleos::MAX_NUCLEOS] = core::array::from_fn(tiques_do_nucleo);
+    let relogio_antes = crate::tempo::ticks();
+    let inicio = crate::arch::ciclos();
+    let duracao = ciclos_em_us(SEGUNDOS * 1_000_000);
+    let mut x = 0xD1B5_4A32_D192_ED03u64;
+    while crate::arch::ciclos().wrapping_sub(inicio) < duracao {
+        mascarar_um_trecho_do_adversario(&mut x);
+    }
+    let periodos = periodos_em(crate::arch::ciclos().wrapping_sub(inicio));
+    let relogio = crate::tempo::ticks() - relogio_antes;
+    let pulsos_depois: [u64; crate::nucleos::MAX_NUCLEOS] = core::array::from_fn(tiques_do_nucleo);
+    PARAR.store(true, SeqCst);
+    let parados = esperar_ate(|| VIVOS.load(SeqCst) == 0, 300);
+    let ligados = crate::nucleos::mascara_dos_ligados();
+    let mut maior_pulso = 0;
+    for i in (0..crate::nucleos::MAX_NUCLEOS).filter(|&i| ligados & crate::nucleos::bit(i) != 0) {
+        let pulso = pulsos_depois[i] - pulsos_antes[i];
+        maior_pulso = maior_pulso.max(pulso);
+        crate::log_info!("teste", "o nucleo {} contou {} tiques", i, pulso);
+    }
+    crate::log_info!(
+        "teste",
+        "{} nucleos mascarados em trechos de 3 a 9 ms por {} s: o relogio andou {}, o contador diz {} periodos, o maior pulso {}",
+        outros + 1,
+        SEGUNDOS,
+        relogio,
+        periodos,
+        maior_pulso
+    );
+    parados.map_err(|_| "os fios que mascaram os outros nucleos nao pararam")?;
+    if relogio > periodos + 2 {
+        return Err("o relogio andou a frente do contador: o mesmo periodo contou duas vezes");
+    }
+    if maior_pulso > periodos + 2 {
+        return Err(
+            "um nucleo contou mais tiques que os periodos do contador: o timer disparou em rajada",
+        );
     }
     Ok(())
 }
@@ -42642,8 +43002,8 @@ static CASOS: &[Caso] = &[
     },
     // O #455, no fim da tabela pelo mesmo motivo — nenhum caso de antes muda
     // de parte —: o timer do ARM rearmado pelo prazo (`CNTP_CVAL_EL0`). Os
-    // dois primeiros rodam nas duas arquiteturas — no x86 o APIC periódico
-    // já passava, e eles conferem que continua —; o terceiro é só do ARM.
+    // dois primeiros rodam nas duas arquiteturas — no x86 o APIC já pulava
+    // os perdidos, e eles conferem que continua —; o terceiro é só do ARM.
     Caso {
         nome: "smp: o pulso nao perde tique com o nucleo mascarado em trechos de 6 ms",
         f: smp_o_pulso_nao_perde_tique_mascarado_em_trechos,
@@ -42666,6 +43026,19 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "contencao: o segmento vazio no teto nao ganha a pagina de cima",
         f: nascimento::contencao_o_segmento_vazio_no_teto_nao_ganha_a_pagina_de_cima,
+    },
+    // O #455-B, no fim da tabela pelo mesmo motivo: a grade comum dos tiques.
+    // O caso do adversário do #455 roda nas duas arquiteturas — a conta
+    // dupla de `tempo::avancar` com a grade de cada núcleo, que o x86 tinha
+    // desde o APIC periódico —; o da grade do TSC, só no x86.
+    Caso {
+        nome: "smp: o relogio nao passa do contador com os nucleos mascarados em trechos menores que o periodo",
+        f: smp_o_relogio_nao_passa_do_contador_com_os_nucleos_mascarados,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "smp: o tique do x86 vem pela grade comum do TSC, e o disparo antes do prazo nao conta",
+        f: smp_o_tique_do_x86_vem_pela_grade_comum_do_tsc,
     },
 ];
 

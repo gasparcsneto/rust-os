@@ -21,6 +21,7 @@
 
 use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
+use aarch64_cpu::asm::barrier;
 use aarch64_cpu::registers::{CNTFRQ_EL0, CNTP_CTL_EL0, CNTP_CVAL_EL0, CNTPCT_EL0};
 use tock_registers::interfaces::{Readable, Writeable};
 use tock_registers::register_structs;
@@ -148,7 +149,7 @@ const INTID_ESPURIO: u32 = 1023;
 ///
 /// Guardado porque o timer genérico dispara uma vez por prazo: depois de
 /// disparar, o handler escreve o seguinte — o que venceu mais este
-/// intervalo, ver [`PRAZO`].
+/// intervalo, ver [`PRAZO`]. Sai com `Release`, depois da [`ORIGEM`].
 static INTERVALO: AtomicU32 = AtomicU32::new(0);
 
 /// O próximo disparo de cada núcleo, em ciclos do contador físico
@@ -162,46 +163,102 @@ static INTERVALO: AtomicU32 = AtomicU32::new(0);
 /// cada período durava o intervalo mais o atraso da interrupção e o handler
 /// inteiro. Todo núcleo perdia o atraso de cada interrupção, e com eles o
 /// relógio: a bancada de tempo media o relógio do kernel do ARM a -12 681
-/// ppm do contador, contra -25 no x86. E o núcleo dos dispositivos, que
-/// recolhe os dispositivos e apresenta a tela no tique e no cutucão,
-/// perdia do pulso também tudo o que fazia ali — na CI 508, "relogio andou
-/// 51, o primeiro nucleo contou 40". Essa parte o relógio só sentia com um
-/// núcleo só — com vários, outro o anda no lugar (ver `tempo::tick`) —, e
-/// então todo prazo que mede nele também.
+/// ppm do contador, contra -25 no x86 na mesma rodada — no x86 a taxa
+/// mudava de uma CI para outra, pelo período do APIC (ver `apic::PRAZO`). E
+/// o núcleo dos dispositivos, que recolhe os dispositivos e apresenta a
+/// tela no tique e no cutucão, perdia do pulso também tudo o que fazia ali
+/// — na CI 508, "relogio andou 51, o primeiro nucleo contou 40". Essa parte
+/// o relógio só sentia com um núcleo só — com vários, outro o anda no lugar
+/// (ver `tempo::tick`) —, e então todo prazo que mede nele também.
 ///
-/// Agora cada núcleo tem uma grade: o primeiro prazo parte do contador de
-/// agora ([`armar`], no boot e ao acordar), e cada um dos seguintes é o
-/// que venceu mais um intervalo ([`rearmar`]). Um atraso menor que um
-/// período não custa tique: o disparo chega atrasado, e o seguinte vem na
-/// hora da grade — o que o APIC periódico do x86 faz sozinho.
+/// Agora os núcleos têm uma grade só, a do primeiro ([`ORIGEM`]): o
+/// primeiro prazo de cada um é o primeiro ponto dela depois do contador de
+/// agora ([`armar`], no boot e ao acordar), e cada um dos seguintes é o que
+/// venceu mais um intervalo ([`rearmar`]). Um atraso menor que um período
+/// não custa tique: o disparo chega atrasado, e o seguinte vem na hora da
+/// grade.
+///
+/// # Uma grade só, e não uma por núcleo
+///
+/// O relógio do sistema anda pelo núcleo que não viu ninguém andar desde o
+/// próprio tique anterior (`tempo::avancar`), e a regra supõe que um núcleo
+/// não tiqueia de novo num ponto cujo avanço já viu. O #455 armava o
+/// primeiro prazo de cada núcleo a partir do contador dele — uma grade por
+/// núcleo, cada uma na sua fase —, e um tique atrasado era seguido do
+/// próximo a menos de um período: se o atrasado tinha visto o avanço de
+/// outro núcleo, e o seguinte chegava antes do próximo desse outro, ele
+/// andava o relógio de novo. O mesmo período contava duas vezes, e o
+/// relógio passava à frente do contador sob carga: com os quatro núcleos
+/// mascarados em trechos de 3 a 9 ms por três segundos — o caso do
+/// adversário do #455 —, ele andou 307, 332 e 322 contra 300 períodos, em
+/// depuração. Na mesma grade, o seguinte chega junto com o do outro, e um
+/// só dos dois anda. As três propriedades que a regra pede estão em
+/// `tempo::avancar`.
 ///
 /// # Um atraso maior que um período
 ///
 /// Não vira rajada. O timer guarda o nível, e não a conta: ao desmascarar
 /// chega **um** disparo, e não um por prazo perdido. Os perdidos são
 /// pulados, e o próximo é o primeiro da grade ainda no futuro
-/// ([`proximo_prazo`]). Pular, e não compensar, é o que o APIC periódico
-/// faz — ele guarda um disparo pendente só —, e o relógio do sistema não
-/// depende de um núcleo só. Compensar seria a rajada, e pior que um tique a
+/// ([`crate::tempo::proximo_prazo`]). Pular, e não compensar, é o que o
+/// timer do x86 faz também, e o relógio do sistema não depende de um
+/// núcleo só. Compensar seria a rajada, e pior que um tique a
 /// menos: com outro núcleo andando o relógio durante o atraso, cada disparo
 /// dela — sem ninguém tiqueando no meio — andaria o relógio de novo
 /// (`tempo::avancar`), e o tempo mascarado contaria duas vezes.
 ///
+/// # A volta do contador, e um salto de mais de 2^63
+///
+/// Inalcançáveis, e ditos aqui para quem um dia os alcançar. O contador tem
+/// pelo menos 56 bits, e a arquitetura promete ao menos 40 anos até a
+/// volta; a 62,5 MHz do `cortex-a72` do emulador, 64 bits são uns 9 mil
+/// anos, e a 1 GHz, 584. O comparador do timer não tem sinal: um prazo que
+/// passou de 2^64 antes do contador parece vencido, e o timer dispara
+/// seguido até o contador voltar também — até um período inteiro de
+/// disparos, cada um com o atraso lido negativo, o prazo conservado, um
+/// tique contado e, se este núcleo anda o relógio, um avanço: uns segundos
+/// de relógio de uma vez, uma vez a cada volta. O `CNTP_TVAL_EL0` de antes
+/// tinha a mesma volta. E um contador que saltasse mais de 2^63 à frente
+/// do prazo — só um deslocamento posto perto de 2^64 por um hipervisor ou
+/// um firmware — teria o atraso lido negativo, e o timer dispararia seguido
+/// até a volta seguinte. Nenhum dos dois vira pânico nem trava a conta.
+///
 /// Cada núcleo só lê e escreve o seu, com as interrupções mascaradas — no
 /// handler, ou ao ligar o timer —, e por isso `Relaxed` basta.
 static PRAZO: [AtomicU64; MAX_NUCLEOS] = [const { AtomicU64::new(0) }; MAX_NUCLEOS];
+
+/// A origem da grade de todos os núcleos: o contador quando o primeiro ligou
+/// o timer ([`init_timer`]) — ver [`PRAZO`].
+///
+/// Escrita uma vez, no primeiro núcleo, antes do [`INTERVALO`], que sai com
+/// `Release`: quem lê o intervalo diferente de zero com `Acquire` lê esta
+/// também. E os outros núcleos só a leem depois de acordar, pelo caminho do
+/// intervalo: o `init_timer` roda em `init_interrupcoes`, muito antes de
+/// `nucleos::ligar_os_demais`, e o `smp::partir` de cada núcleo faz um `dsb
+/// sy` (em `limpar_ate_a_ram`) antes do `CPU_ON` que o acorda.
+static ORIGEM: AtomicU64 = AtomicU64::new(0);
 
 /// Só para a suíte: quantos disparos do timer acharam o prazo do núcleo
 /// ainda no futuro — ver [`antecipados_de_teste`].
 #[cfg(feature = "modo-teste")]
 static ANTECIPADOS_DE_TESTE: AtomicU64 = AtomicU64::new(0);
 
-/// Só para a suíte: a distância do primeiro prazo de cada núcleo ao
-/// contador, lida logo depois de ligar o timer — ver
-/// [`primeira_distancia_de_teste`]. `i64::MIN` é "não anotada".
+/// Só para a suíte: quantos rearmes acharam o [`PRAZO`] do núcleo diferente
+/// do `CNTP_CVAL_EL0` dele — ver [`divergencias_de_teste`].
 #[cfg(feature = "modo-teste")]
-static PRIMEIRA_DISTANCIA_DE_TESTE: [core::sync::atomic::AtomicI64; MAX_NUCLEOS] =
-    [const { core::sync::atomic::AtomicI64::new(i64::MIN) }; MAX_NUCLEOS];
+static DIVERGENCIAS_DE_TESTE: AtomicU64 = AtomicU64::new(0);
+
+/// Só para a suíte: o contador que o [`armar`] de cada núcleo leu, e o
+/// primeiro prazo que ele calculou — ver [`primeiro_prazo_de_teste`]. Um
+/// bit por núcleo em [`PRIMEIROS_DE_TESTE`] diz quais anotaram.
+#[cfg(feature = "modo-teste")]
+static PRIMEIRO_AGORA_DE_TESTE: [AtomicU64; MAX_NUCLEOS] =
+    [const { AtomicU64::new(0) }; MAX_NUCLEOS];
+#[cfg(feature = "modo-teste")]
+static PRIMEIRO_PRAZO_DE_TESTE: [AtomicU64; MAX_NUCLEOS] =
+    [const { AtomicU64::new(0) }; MAX_NUCLEOS];
+#[cfg(feature = "modo-teste")]
+static PRIMEIROS_DE_TESTE: AtomicU64 = AtomicU64::new(0);
 
 /// Inicializa o GIC e habilita a linha do timer.
 ///
@@ -224,6 +281,9 @@ pub unsafe fn init() {
     // Liga a interface de CPU.
     gicc.ctlr.set(1);
 
+    // O timer desligado antes de a linha dele valer — ver
+    // `desligar_o_timer`.
+    desligar_o_timer();
     habilitar_linha(INTID_TIMER);
     habilitar_linha(SGI_PARAR);
     habilitar_linha(SGI_CUTUCAO);
@@ -274,20 +334,56 @@ pub unsafe fn ligar_neste_nucleo() {
     let gicc = interface_de_cpu();
     gicc.pmr.set(0xFF);
     gicc.ctlr.set(1);
+    // O timer deste núcleo desligado antes de a linha dele valer — ver
+    // `desligar_o_timer`. Sem intervalo, fica desligado.
+    desligar_o_timer();
     habilitar_linha(INTID_TIMER);
     habilitar_linha(SGI_PARAR);
     habilitar_linha(SGI_CUTUCAO);
     registrar_interface();
 
-    // O primeiro prazo deste núcleo parte do contador de agora, e não da
-    // grade do primeiro: cada núcleo tem a sua — ver `PRAZO`.
-    let intervalo = INTERVALO.load(Ordering::Relaxed);
+    // O primeiro prazo deste núcleo é o primeiro ponto da grade do primeiro
+    // depois do contador de agora: uma grade só — ver `PRAZO`. O intervalo
+    // com `Acquire`: diferente de zero, a origem já está escrita.
+    let intervalo = INTERVALO.load(Ordering::Acquire);
     if intervalo != 0 {
         armar(intervalo);
         CNTP_CTL_EL0.write(CNTP_CTL_EL0::ENABLE::SET + CNTP_CTL_EL0::IMASK::CLEAR);
-        #[cfg(feature = "modo-teste")]
-        anotar_o_primeiro_prazo_de_teste();
     }
+}
+
+/// Desliga o timer físico deste núcleo — sem `ENABLE`, e com o `IMASK` —,
+/// e espera a escrita valer (`isb`). Chamada antes de a linha do timer ser
+/// habilitada no distribuidor, no primeiro núcleo e em cada um que acorda.
+///
+/// # Por que antes da linha
+///
+/// O timer pode vir ligado de quem rodou antes — um firmware, um kernel
+/// anterior —, com o prazo vencido e a linha levantada. O GICv2 do QEMU,
+/// ao habilitar uma linha de nível levantada, a marca pendente (a escrita
+/// do `GICD_ISENABLER` em `hw/intc/arm_gic.c`), e a marca sobrevive à
+/// linha descer: armar o prazo para a frente não a apagaria, e o primeiro
+/// disparo chegaria com o prazo no futuro. Desligado antes, a linha está
+/// baixa quando é habilitada.
+///
+/// Cobre também o `CNTFRQ_EL0` em zero: sem frequência, [`init_timer`] não
+/// arma, e o timer fica desligado — e não ligado pelo firmware, disparando
+/// sem ninguém rearmar.
+///
+/// # A pendência velha não se limpa
+///
+/// Uma pendência marcada antes do kernel — pela linha habilitada levantada,
+/// ou escrita no `GICD_ISPENDR` — sobraria. Nenhum caminho de boot daqui a
+/// deixa: o reset do emulador zera o distribuidor, a linha do timer de cada
+/// núcleo só é habilitada aqui, e o firmware do iniciador não a deixa — o
+/// caso que conta os disparos antecipados passa pelos dois caminhos. E
+/// limpá-la não seria de graça: no GIC do QEMU, o `GICD_ICPENDR` de uma
+/// linha privada limpa a pendência dela em **todos** os núcleos (o próprio
+/// fonte diz que não sabe se é o certo), e um núcleo acordando mexeria no
+/// timer dos que já rodam.
+fn desligar_o_timer() {
+    CNTP_CTL_EL0.write(CNTP_CTL_EL0::ENABLE::CLEAR + CNTP_CTL_EL0::IMASK::SET);
+    barrier::isb(barrier::SY);
 }
 
 /// Manda a SGI `intid` aos núcleos da máscara `nucleos` (bit `i` = núcleo
@@ -429,58 +525,56 @@ fn frequencia_do_contador() -> u32 {
     CNTFRQ_EL0.get() as u32
 }
 
-/// Arma o primeiro disparo deste núcleo: daqui a `ciclos`, a partir do
-/// contador de agora. É o começo da grade dele — ver [`PRAZO`].
+/// O contador físico, lido depois de tudo o que veio antes (`isb`): sem a
+/// barreira, a leitura do `CNTPCT_EL0` pode vir adiantada, de antes das
+/// instruções anteriores — e de antes de outra leitura dele.
+fn contador() -> u64 {
+    barrier::isb(barrier::SY);
+    CNTPCT_EL0.get()
+}
+
+/// Arma o primeiro disparo deste núcleo: o primeiro ponto da grade comum
+/// ([`ORIGEM`], de `ciclos` em `ciclos`) depois do contador de agora — à
+/// frente dele, e a no máximo `ciclos`. Ver [`PRAZO`].
 ///
-/// O prazo vai para o `CNTP_CVAL_EL0` antes de quem chama ligar o timer: o
-/// valor de antes, de reset ou do firmware, não chega a disparar.
+/// O contador é lido depois da barreira ([`contador`]): no primeiro núcleo,
+/// esta leitura vem logo depois da que deu a origem, e adiantada poderia
+/// dar menos que ela — o primeiro prazo seria a própria origem, já
+/// passada. O prazo vai para o `CNTP_CVAL_EL0` antes de quem chama ligar o
+/// timer, e o `isb` depois dele faz a escrita valer antes disso: o valor de
+/// antes, de reset ou do firmware, não chega a disparar.
 fn armar(ciclos: u32) {
-    let prazo = CNTPCT_EL0.get().wrapping_add(u64::from(ciclos));
-    PRAZO[super::nucleo_atual()].store(prazo, Ordering::Relaxed);
+    let origem = ORIGEM.load(Ordering::Relaxed);
+    let agora = contador();
+    let prazo = crate::tempo::proximo_prazo(origem, agora, u64::from(ciclos));
+    let n = super::nucleo_atual();
+    PRAZO[n].store(prazo, Ordering::Relaxed);
     CNTP_CVAL_EL0.set(prazo);
+    barrier::isb(barrier::SY);
+    #[cfg(feature = "modo-teste")]
+    {
+        PRIMEIRO_AGORA_DE_TESTE[n].store(agora, Ordering::SeqCst);
+        PRIMEIRO_PRAZO_DE_TESTE[n].store(prazo, Ordering::SeqCst);
+        PRIMEIROS_DE_TESTE.fetch_or(crate::nucleos::bit(n), Ordering::SeqCst);
+    }
 }
 
 /// Rearma este núcleo, de dentro do handler, para o prazo seguinte ao que
-/// venceu, na grade dele — ver [`PRAZO`] e [`proximo_prazo`].
+/// venceu, na grade comum — ver [`PRAZO`] e [`crate::tempo::proximo_prazo`].
 ///
 /// O contador é lido aqui, no fim do handler: o prazo que passou durante o
 /// trabalho do tique é pulado, e o núcleo dos dispositivos não emenda um
 /// tique no outro.
-fn rearmar(ciclos: u32) {
-    let n = super::nucleo_atual();
-    let vencido = PRAZO[n].load(Ordering::Relaxed);
-    let agora = CNTPCT_EL0.get();
-    #[cfg(feature = "modo-teste")]
-    if (agora.wrapping_sub(vencido) as i64) < 0 {
-        ANTECIPADOS_DE_TESTE.fetch_add(1, Ordering::SeqCst);
-    }
-    let proximo = proximo_prazo(vencido, agora, u64::from(ciclos));
-    PRAZO[n].store(proximo, Ordering::Relaxed);
-    CNTP_CVAL_EL0.set(proximo);
-}
-
-/// O prazo seguinte a `vencido` na grade de `intervalo` em `intervalo`: o
-/// primeiro dela depois de `agora` — `vencido + k * intervalo`, com o menor
-/// `k >= 1` que passa de `agora`. Pura, para a suíte a conferir sem o timer.
 ///
-/// # A aritmética
+/// # O que o rearme supõe do timer
 ///
-/// - **O atraso é a diferença, e não a comparação.** `agora - vencido`, com
-///   a volta (`wrapping_sub`), lido com sinal: acerta enquanto os dois
-///   estão a menos de 2^63 ciclos um do outro — séculos, a qualquer
-///   frequência. Os prazos perdidos são `atraso / intervalo`, e o próximo
-///   fica em `(agora, agora + intervalo]`: nunca no passado na hora da
-///   conta, e nunca mais de um período à frente.
-/// - **Nada transborda.** Com o atraso abaixo de 2^63, `(perdidos + 1) *
-///   intervalo` não passa de `atraso + intervalo`, abaixo de 2^64; as somas
-///   são as da volta mesmo assim — a conta roda num handler, onde o
-///   transbordo do kernel de depuração seria um pânico. Um intervalo zero
-///   vale um.
 /// - **O prazo ainda no futuro**, o atraso negativo, não acontece num
 ///   disparo de verdade: o timer só levanta a linha com o contador já no
 ///   prazo, e só este núcleo escreve o dele. Se acontecer, o prazo fica, e
 ///   o disparo vem na hora dele; a suíte conta quantas vezes
-///   (`antecipados_de_teste`).
+///   (`antecipados_de_teste`), e confere que o `PRAZO` é o que o
+///   `CNTP_CVAL_EL0` tem (`divergencias_de_teste`) — sem isso, um `PRAZO`
+///   que deixasse de ser escrito desligaria a conta dos antecipados.
 /// - **O prazo escrito no passado.** Entre a leitura do contador e a
 ///   escrita do `CNTP_CVAL_EL0` o núcleo pode parar — o hospedeiro do
 ///   emulador o tira da CPU — e o prazo calculado já ter passado quando é
@@ -489,50 +583,70 @@ fn rearmar(ciclos: u32) {
 ///   daquele prazo, que de fato passou, e chega atrasado como chegaria
 ///   mascarado; o handler seguinte pula o que mais tiver passado. Um disparo
 ///   a mais por atraso, e nunca uma rajada.
-/// - **A volta do contador.** Ele tem pelo menos 56 bits, e a arquitetura
-///   promete ao menos 40 anos até a volta; a 62,5 MHz do `cortex-a72` do
-///   emulador, 64 bits são uns 9 mil anos, e a 1 GHz, 584. O comparador do
-///   hardware não tem sinal: um prazo que passou da volta antes do contador
-///   parece vencido, e o timer dispara seguido até o contador voltar também
-///   — menos de um período, uma vez em séculos. O rearme pelo
-///   `CNTP_TVAL_EL0` tinha a mesma volta (`CVAL = CNTPCT + TVAL`). Aqui ela
-///   não vira pânico nem trava: só esse período agitado.
-pub(crate) fn proximo_prazo(vencido: u64, agora: u64, intervalo: u64) -> u64 {
-    let intervalo = intervalo.max(1);
-    let atraso = agora.wrapping_sub(vencido);
-    if (atraso as i64) < 0 {
-        return vencido;
+/// - **O `isb` depois do `CNTP_CVAL_EL0`**: a escrita do registrador de
+///   sistema vale antes do fim da interrupção ([`finalizar`]). Sem ele, num
+///   núcleo com o timer físico de verdade, o fim chegaria ao GIC com a linha
+///   ainda levantada pelo prazo velho, e a interrupção voltaria com o prazo
+///   novo no futuro. No emulador a escrita recalcula a linha na hora, e a
+///   barreira não muda nada que se veja.
+/// - **O `ISTATUS` não é lido.** O handler não confere, no `CNTP_CTL_EL0`,
+///   se a condição do timer ainda vale antes de contar o tique: com o `isb`,
+///   o fim da interrupção já vê a linha do prazo novo, e um disparo com o
+///   prazo no futuro só viria de uma pendência de antes do kernel, que o
+///   [`desligar_o_timer`] evita. A suíte conta os que chegarem
+///   (`antecipados_de_teste`); no x86 a recusa é necessária, e está lá
+///   (`apic::chegou_o_prazo`).
+fn rearmar(ciclos: u32) {
+    let n = super::nucleo_atual();
+    let vencido = PRAZO[n].load(Ordering::Relaxed);
+    let agora = contador();
+    #[cfg(feature = "modo-teste")]
+    {
+        if (agora.wrapping_sub(vencido) as i64) < 0 {
+            ANTECIPADOS_DE_TESTE.fetch_add(1, Ordering::SeqCst);
+        }
+        if CNTP_CVAL_EL0.get() != vencido {
+            DIVERGENCIAS_DE_TESTE.fetch_add(1, Ordering::SeqCst);
+        }
     }
-    let perdidos = atraso / intervalo;
-    vencido.wrapping_add(perdidos.wrapping_add(1).wrapping_mul(intervalo))
+    let proximo = crate::tempo::proximo_prazo(vencido, agora, u64::from(ciclos));
+    PRAZO[n].store(proximo, Ordering::Relaxed);
+    CNTP_CVAL_EL0.set(proximo);
+    barrier::isb(barrier::SY);
 }
 
-/// Só para a suíte: anota a distância do prazo que o timer deste núcleo
-/// tem ao contador, logo depois de ligá-lo — ver
-/// [`primeira_distancia_de_teste`]. Lê os dois registradores, e não o que
-/// [`armar`] calculou: vale o que o hardware recebeu.
+/// Só para a suíte: o contador que o [`armar`] do núcleo `i` leu e o
+/// primeiro prazo que ele calculou, ou `None` se o núcleo não armou. Os dois
+/// valores que a conta usou: a distância entre eles não depende de quando a
+/// suíte olha, nem de uma parada do hospedeiro no meio.
 #[cfg(feature = "modo-teste")]
-fn anotar_o_primeiro_prazo_de_teste() {
-    let agora = CNTPCT_EL0.get();
-    let distancia = CNTP_CVAL_EL0.get().wrapping_sub(agora) as i64;
-    PRIMEIRA_DISTANCIA_DE_TESTE[super::nucleo_atual()].store(distancia, Ordering::SeqCst);
+pub fn primeiro_prazo_de_teste(i: usize) -> Option<(u64, u64)> {
+    if i >= MAX_NUCLEOS || PRIMEIROS_DE_TESTE.load(Ordering::SeqCst) & crate::nucleos::bit(i) == 0 {
+        return None;
+    }
+    Some((
+        PRIMEIRO_AGORA_DE_TESTE[i].load(Ordering::SeqCst),
+        PRIMEIRO_PRAZO_DE_TESTE[i].load(Ordering::SeqCst),
+    ))
 }
 
-/// Só para a suíte: a distância, em ciclos, do primeiro prazo do núcleo `i`
-/// ao contador, logo depois de ele ligar o timer — entre zero e um intervalo
-/// quando o primeiro disparo partiu do contador de agora —, ou `None` se ele
-/// não ligou o timer.
+/// Só para a suíte: a origem da grade comum — ver [`ORIGEM`].
 #[cfg(feature = "modo-teste")]
-pub fn primeira_distancia_de_teste(i: usize) -> Option<i64> {
-    PRIMEIRA_DISTANCIA_DE_TESTE
-        .get(i)
-        .map(|d| d.load(Ordering::SeqCst))
-        .filter(|&d| d != i64::MIN)
+pub fn origem_de_teste() -> u64 {
+    ORIGEM.load(Ordering::SeqCst)
+}
+
+/// Só para a suíte: quantos rearmes, desde o boot, acharam o [`PRAZO`] do
+/// núcleo diferente do `CNTP_CVAL_EL0` dele. Zero: o `PRAZO` é o espelho do
+/// registrador.
+#[cfg(feature = "modo-teste")]
+pub fn divergencias_de_teste() -> u64 {
+    DIVERGENCIAS_DE_TESTE.load(Ordering::SeqCst)
 }
 
 /// Só para a suíte: quantos disparos do timer, desde o boot, acharam o
 /// prazo do núcleo ainda no futuro. Zero com um prazo por núcleo — ver
-/// [`proximo_prazo`].
+/// [`rearmar`].
 #[cfg(feature = "modo-teste")]
 pub fn antecipados_de_teste() -> u64 {
     ANTECIPADOS_DE_TESTE.load(Ordering::SeqCst)
@@ -570,6 +684,9 @@ pub unsafe fn init_timer(hz_desejado: u32) -> u32 {
     // ficar sem relógio do que travar a máquina com um. O resto do kernel já
     // sabe viver assim: `tempo` reporta uptime zero em vez de inventar um
     // número, e `tarefas::relogio::por_ms` degrada para polling com aviso.
+    //
+    // O timer fica desligado: [`init`] o desligou antes de habilitar a linha
+    // dele (`desligar_o_timer`), e sem intervalo nenhum núcleo o arma.
     if frequencia == 0 || hz_desejado == 0 {
         crate::log_error!(
             "irq",
@@ -582,14 +699,14 @@ pub unsafe fn init_timer(hz_desejado: u32) -> u32 {
     // Mínimo de 1 para não armar um timer de zero ciclos, que dispararia
     // continuamente e travaria o sistema numa tempestade de interrupções.
     let intervalo = (frequencia / hz_desejado).max(1);
-    INTERVALO.store(intervalo, Ordering::Relaxed);
 
-    // O primeiro prazo parte do contador de agora; os seguintes, da grade —
-    // ver `PRAZO`.
+    // A grade de todos os núcleos parte do contador de agora, e a origem sai
+    // antes do intervalo — ver `ORIGEM`. O primeiro prazo deste núcleo é o
+    // ponto seguinte dela; os dos outros, o primeiro dela depois de acordarem.
+    ORIGEM.store(contador(), Ordering::Relaxed);
+    INTERVALO.store(intervalo, Ordering::Release);
     armar(intervalo);
     CNTP_CTL_EL0.write(CNTP_CTL_EL0::ENABLE::SET + CNTP_CTL_EL0::IMASK::CLEAR);
-    #[cfg(feature = "modo-teste")]
-    anotar_o_primeiro_prazo_de_teste();
 
     frequencia / intervalo
 }

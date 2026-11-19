@@ -28,8 +28,15 @@
 //! É por isso que o PIT não é desperdício nem dívida: ele é o que torna a
 //! calibração possível. Um kernel que começasse pelo APIC teria de medi-lo
 //! contra alguma outra coisa.
+//!
+//! # O tique pela grade comum do TSC
+//!
+//! O timer não é periódico: dispara uma vez, e o handler escreve a distância
+//! até o ponto seguinte de uma grade só, contada no TSC — ver [`PRAZO`].
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+use crate::nucleos::MAX_NUCLEOS;
 
 use tock_registers::interfaces::{Readable, Writeable};
 use tock_registers::register_structs;
@@ -114,8 +121,10 @@ pub const VETOR_CUTUCAO: u8 = 240;
 /// Bit que liga o APIC por software, no registrador de vetor espúrio.
 const SVR_HABILITADO: u32 = 1 << 8;
 
-/// Modo periódico, nos bits 17-18 do registrador do timer.
-const TIMER_PERIODICO: u32 = 0b01 << 17;
+/// O registrador do timer em disparo único — os bits 17-18 do modo em
+/// zero —, sem máscara, no vetor do timer: o contador desce a contagem
+/// inicial uma vez e para, e o handler escreve a seguinte (ver [`PRAZO`]).
+const LVT_DO_TIMER: u32 = VETOR_TIMER as u32;
 /// Bit de máscara do registrador do timer.
 const TIMER_MASCARADO: u32 = 1 << 16;
 
@@ -143,14 +152,100 @@ static BASE: AtomicU64 = AtomicU64::new(0);
 /// `frequencia / contagem` é autoconsistente sobre a premissa errada.
 static FREQUENCIA_DO_CONTADOR: AtomicU32 = AtomicU32::new(0);
 
-/// A contagem inicial com que o timer foi programado no primeiro núcleo.
+/// A contagem de um período no contador do APIC, no primeiro núcleo — só
+/// para o relatório, e diferente de zero quando o timer foi programado e
+/// conferido ([`pronto`]).
 ///
-/// Os outros núcleos repetem esta, sem calibrar de novo: a calibração mede o
-/// contador contra o PIT, e o PIT é **um** só — calibrar em dois núcleos ao
-/// mesmo tempo seria disputar o mesmo relógio de referência, e calibrar
-/// depois que ele foi mascarado seria medir contra nada. Os contadores de
-/// todos os núcleos andam na frequência do mesmo barramento.
+/// Sai com `Release`, depois da grade ([`ORIGEM`], [`INTERVALO`],
+/// [`CICLOS_POR_DECREMENTO`]); cada núcleo secundário a lê com `Acquire`
+/// antes de armar, e lê a grade inteira. Eles não calibram de novo: a
+/// calibração mede o contador contra o PIT, e o PIT é **um** só — calibrar
+/// em dois núcleos ao mesmo tempo seria disputar o mesmo relógio de
+/// referência, e calibrar depois que ele foi mascarado seria medir contra
+/// nada. Os contadores de todos os núcleos andam na frequência do mesmo
+/// barramento.
 static CONTAGEM: AtomicU32 = AtomicU32::new(0);
+
+/// O próximo disparo de cada núcleo, em ciclos do TSC: um ponto da grade
+/// comum, `ORIGEM + k · INTERVALO`.
+///
+/// # Uma grade só, no TSC
+///
+/// O timer era periódico: cada núcleo carregava a contagem ao ligar o timer,
+/// e cada um disparava na sua grade, na sua fase. O relógio do sistema anda
+/// pelo núcleo que não viu ninguém andar desde o próprio tique anterior
+/// (`tempo::avancar`), e com uma grade por núcleo isso contava o mesmo
+/// período duas vezes: um tique atrasado que tinha visto o avanço de outro
+/// núcleo era seguido do próximo da grade dele a menos de um período, antes
+/// do próximo do outro, e ninguém tinha andado no meio. Agora o APIC dispara
+/// uma vez, e o handler escreve a distância até o ponto seguinte de uma
+/// grade só, contada no TSC — o contador que todos os núcleos leem igual (no
+/// emulador, o mesmo para todos). É o que o ARM faz com o `CNTP_CVAL_EL0`.
+/// O modo do x86 que compara direto com o TSC (o TSC-deadline) não existe no
+/// emulador sem aceleração: o `qemu64` não o anuncia, e o QEMU o tira dos
+/// recursos do TCG. A CI não o exercitaria.
+///
+/// # O período é o do TSC, e não o do APIC
+///
+/// A grade é contada no TSC, com a frequência medida contra o canal 2 do PIT
+/// (`pic::frequencia_do_tsc`) — a mesma medida da régua do civil, com erro
+/// de até 200 ppm. O APIC só mede a distância até o ponto. O período deixou
+/// de depender da calibração do APIC, que mede o contador dele contra os
+/// disparos do PIT vistos por um laço: o laço vê cada disparo depois do
+/// handler inteiro dele, e um handler mais longo na borda do começo que na
+/// do fim encurtava a medida, e o período. Entre as CIs 512 e 520 a bancada
+/// de tempo mediu o relógio do kernel do x86 de -808 a +10 082 ppm do
+/// contador — quatro rodadas acima de +6 000, a ordem de grandeza de uma
+/// calibração 0,6 a 1% curta —, e nos boots da suíte o barramento medido vai
+/// de 855 a 1 131 MHz, contra o 1 GHz do emulador.
+///
+/// # Um disparo antes do prazo
+///
+/// A contagem é a distância no TSC convertida pela razão entre os dois
+/// contadores medida na calibração ([`CICLOS_POR_DECREMENTO`]), arredondada
+/// para cima e com um milésimo a mais. Se ainda assim o APIC disparar antes
+/// do prazo, o disparo não é tique: o handler só rearma para o mesmo prazo
+/// ([`rearmar`]). É a primeira das três propriedades de `tempo::avancar`.
+///
+/// Cada núcleo só lê e escreve o seu, com as interrupções mascaradas, e por
+/// isso `Relaxed` basta.
+static PRAZO: [AtomicU64; MAX_NUCLEOS] = [const { AtomicU64::new(0) }; MAX_NUCLEOS];
+
+/// A origem da grade: o TSC quando o primeiro núcleo ligou o timer — ver
+/// [`PRAZO`]. Sai antes da [`CONTAGEM`].
+static ORIGEM: AtomicU64 = AtomicU64::new(0);
+
+/// O período da grade, em ciclos do TSC. Sai antes da [`CONTAGEM`].
+static INTERVALO: AtomicU64 = AtomicU64::new(0);
+
+/// Quantos ciclos do TSC cabem num decremento do contador do APIC, em ponto
+/// fixo de 16 bits de fração, medidos na mesma janela da calibração — ver
+/// [`calibrar`]. Converte a distância até o prazo em contagem. Sai antes da
+/// [`CONTAGEM`].
+static CICLOS_POR_DECREMENTO: AtomicU64 = AtomicU64::new(0);
+
+/// Quantos disparos do timer, em todos os núcleos, chegaram no prazo ou
+/// depois: os tiques. A conferência contra o PIT ([`conferir_contra_o_pit`])
+/// conta estes, e não as interrupções da linha, que incluem os disparos
+/// antes do prazo.
+static TIQUES: AtomicU64 = AtomicU64::new(0);
+
+/// Só para a suíte: quantos disparos do timer acharam o prazo do núcleo
+/// ainda no futuro — ver [`antecipados_de_teste`].
+#[cfg(feature = "modo-teste")]
+static ANTECIPADOS_DE_TESTE: AtomicU64 = AtomicU64::new(0);
+
+/// Só para a suíte: o TSC que o [`armar_o_primeiro`] de cada núcleo leu, e o
+/// primeiro prazo que ele calculou — ver [`primeiro_prazo_de_teste`]. Um bit
+/// por núcleo em [`PRIMEIROS_DE_TESTE`] diz quais anotaram.
+#[cfg(feature = "modo-teste")]
+static PRIMEIRO_AGORA_DE_TESTE: [AtomicU64; MAX_NUCLEOS] =
+    [const { AtomicU64::new(0) }; MAX_NUCLEOS];
+#[cfg(feature = "modo-teste")]
+static PRIMEIRO_PRAZO_DE_TESTE: [AtomicU64; MAX_NUCLEOS] =
+    [const { AtomicU64::new(0) }; MAX_NUCLEOS];
+#[cfg(feature = "modo-teste")]
+static PRIMEIROS_DE_TESTE: AtomicU64 = AtomicU64::new(0);
 
 /// Os registradores, se o APIC já foi mapeado.
 fn lapic() -> Option<&'static Lapic> {
@@ -253,7 +348,17 @@ fn esperar_disparos(linha: usize, de: u64, quantos: u64) -> Option<u64> {
 /// a função é chamada. Sem isso, o primeiro intervalo seria uma fração
 /// arbitrária de dez milissegundos, e o erro entraria direto na frequência
 /// calculada.
-fn calibrar(lapic: &Lapic) -> Option<u32> {
+///
+/// # E a razão para o TSC
+///
+/// Devolve também quantos ciclos do TSC cabem num decremento do contador,
+/// em ponto fixo de 16 bits de fração ([`CICLOS_POR_DECREMENTO`]): o TSC
+/// lido logo depois de carregar o contador e logo depois de ler o que
+/// restou, a mesma janela dos dois lados. Essa razão não depende das bordas
+/// do PIT — o laço que as vê depois do handler inteiro de cada disparo, o
+/// erro da frequência acima —, e é ela que converte a distância até o prazo
+/// em contagem.
+fn calibrar(lapic: &Lapic) -> Option<(u32, u64)> {
     /// Quantos tiques do PIT esperar. Cinco, a 100 Hz, são cinquenta
     /// milissegundos: tempo suficiente para o erro de meio tique ficar abaixo
     /// de um por cento, e pouco o bastante para não ser notado no boot.
@@ -283,6 +388,7 @@ fn calibrar(lapic: &Lapic) -> Option<u32> {
 
     let comeco = crate::irq::contagem_da_linha(linha);
     lapic.contagem_inicial.set(u32::MAX);
+    let tsc_no_comeco = super::ciclos();
 
     let Some(tiques) = esperar_disparos(linha, comeco, TIQUES_DO_PIT) else {
         // Desarma o contador antes de desistir. Ele foi carregado logo acima e
@@ -293,6 +399,7 @@ fn calibrar(lapic: &Lapic) -> Option<u32> {
     };
 
     let restante = lapic.contagem_atual.get();
+    let tsc_no_fim = super::ciclos();
     lapic.contagem_inicial.set(0);
 
     let andou = u32::MAX.checked_sub(restante)? as u64;
@@ -312,7 +419,11 @@ fn calibrar(lapic: &Lapic) -> Option<u32> {
     // curto um contador que andou um intervalo longo.
     let por_segundo = andou.checked_mul(hz_do_pit)?.checked_div(tiques)?;
 
-    u32::try_from(por_segundo).ok()
+    let ciclos = tsc_no_fim.checked_sub(tsc_no_comeco)?;
+    let razao = (u128::from(ciclos) << 16) / u128::from(andou);
+    let razao = u64::try_from(razao).ok().filter(|&r| r > 0)?;
+
+    Some((u32::try_from(por_segundo).ok()?, razao))
 }
 
 /// Confere, contra o PIT, que o timer está mesmo disparando na taxa pedida.
@@ -333,16 +444,23 @@ fn calibrar(lapic: &Lapic) -> Option<u32> {
 ///
 /// Este é o único instante em que a máquina tem dois relógios independentes.
 ///
-/// # Por que contar linhas, e não tiques do relógio
+/// # Por que contar os disparos de cada um, e não tiques do relógio
 ///
 /// Porque quando esta função roda o timer do APIC **já está armado**, e os
 /// dois timers estão alimentando `tempo::ticks`. Medir um intervalo por ele
 /// daria metade do tempo real, e a primeira versão desta conferência fez
 /// exatamente isso: acusou 50% de desvio num timer que estava certo.
 ///
-/// Foi o mesmo erro que ela existe para pegar, cometido dentro dela. Os
-/// contadores por linha não têm esse problema: cada um é alimentado por
-/// exatamente uma fonte.
+/// Foi o mesmo erro que ela existe para pegar, cometido dentro dela. Do PIT
+/// conta a linha, que só ele alimenta; do APIC, os tiques dele ([`TIQUES`]),
+/// e não a linha: um disparo antes do prazo também é uma interrupção da
+/// linha, e não é tique.
+///
+/// # O que ela confere agora
+///
+/// O período é o da grade no TSC ([`PRAZO`]): a conferência pega um erro de
+/// unidade na frequência do TSC, ou na conversão para o APIC — um fator de
+/// dezesseis, ou de mil —, como pegava na do APIC.
 ///
 /// Devolve `true` se a taxa observada bate com a pedida dentro da tolerância.
 fn conferir_contra_o_pit(hz_pedido: u32) -> bool {
@@ -365,15 +483,14 @@ fn conferir_contra_o_pit(hz_pedido: u32) -> bool {
     }
 
     let linha_do_pit = super::pic::IRQ_TIMER as usize;
-    let linha_do_apic = VETOR_TIMER as usize;
 
     let pit_antes = crate::irq::contagem_da_linha(linha_do_pit);
-    let apic_antes = crate::irq::contagem_da_linha(linha_do_apic);
+    let apic_antes = TIQUES.load(Ordering::Relaxed);
 
     let Some(do_pit) = esperar_disparos(linha_do_pit, pit_antes, DISPAROS_DO_PIT) else {
         return false;
     };
-    let do_apic = crate::irq::contagem_da_linha(linha_do_apic) - apic_antes;
+    let do_apic = TIQUES.load(Ordering::Relaxed) - apic_antes;
 
     // Quantos disparos do APIC caberiam nos do PIT que acabamos de observar,
     // se as duas taxas fossem as pedidas.
@@ -427,6 +544,12 @@ pub unsafe fn init(hz: u32) -> Option<u32> {
     // zero, e escrevê-lo é dizer que a escolha foi feita.
     lapic.tpr.set(0);
 
+    // A frequência do TSC, medida contra o canal 2 do PIT, uma vez só — a
+    // mesma que a régua do civil lê depois. É a régua da grade dos tiques
+    // (ver `PRAZO`). Sem ela, a que a razão medida na calibração dá pela
+    // frequência do contador do APIC: a medida de antes, com o erro dela.
+    let do_tsc = super::pic::frequencia_do_tsc().map(|(hz_do_tsc, _)| hz_do_tsc);
+
     // Mais de uma tentativa, porque calibrar e conferir são medidas, e uma
     // medida pode ser estragada por quem executa a máquina: medido, no QEMU
     // sem aceleração com o hospedeiro ocupado, "o APIC disparou 14 vezes onde
@@ -437,20 +560,33 @@ pub unsafe fn init(hz: u32) -> Option<u32> {
     // um fator de dezesseis ou de mil, e esse se repete em toda tentativa.
     const TENTATIVAS: u32 = 3;
     for _ in 0..TENTATIVAS {
-        let frequencia = calibrar(lapic)?;
+        let (frequencia, razao) = calibrar(lapic)?;
         FREQUENCIA_DO_CONTADOR.store(frequencia, Ordering::Release);
+        CICLOS_POR_DECREMENTO.store(razao, Ordering::Relaxed);
 
-        let contagem = (frequencia / hz.max(1)).max(1);
+        let hz_do_tsc = do_tsc.unwrap_or_else(|| {
+            u64::try_from((u128::from(frequencia) * u128::from(razao)) >> 16).unwrap_or(0)
+        });
+        let intervalo = hz_do_tsc / u64::from(hz.max(1));
+        if intervalo < 1_000 {
+            // Um TSC abaixo de cem mil ciclos por segundo não é um TSC: a
+            // grade de um ciclo armaria o disparo já, sem parar, e a
+            // conferência contra o PIT não sairia da tempestade. O PIT segue.
+            return None;
+        }
+        INTERVALO.store(intervalo, Ordering::Relaxed);
+        ORIGEM.store(super::ciclos(), Ordering::Relaxed);
         lapic.divisor.set(DIVISOR_CODIFICADO);
-        lapic.lvt_timer.set(TIMER_PERIODICO | VETOR_TIMER as u32);
-        lapic.contagem_inicial.set(contagem);
+        lapic.lvt_timer.set(LVT_DO_TIMER);
+        armar_o_primeiro();
 
-        let efetiva = frequencia / contagem;
+        let efetiva = u32::try_from(hz_do_tsc / intervalo).unwrap_or(u32::MAX);
 
         if conferir_contra_o_pit(efetiva) {
-            // Só depois da conferência: um núcleo secundário repete esta
-            // contagem, e ela precisa ser uma que se provou certa.
-            CONTAGEM.store(contagem, Ordering::Release);
+            // Só depois da conferência, e depois da grade: um núcleo
+            // secundário a lê por esta, e ela precisa ser uma que se provou
+            // certa.
+            CONTAGEM.store((frequencia / hz.max(1)).max(1), Ordering::Release);
             return Some(efetiva);
         }
 
@@ -620,8 +756,7 @@ fn esperar_tiques(quantos: u64) {
     }
 }
 
-/// Liga o APIC local **deste** núcleo, com o timer na mesma contagem do
-/// primeiro.
+/// Liga o APIC local **deste** núcleo, com o timer na grade do primeiro.
 ///
 /// # Safety
 ///
@@ -629,14 +764,147 @@ fn esperar_tiques(quantos: u64) {
 /// mascaradas e a IDT dele carregada: o timer começa a contar aqui.
 pub unsafe fn ligar_neste_nucleo() -> Result<(), &'static str> {
     let lapic = lapic().ok_or("sem APIC local")?;
-    let contagem = CONTAGEM.load(Ordering::Acquire);
-    if contagem == 0 {
+    // Com `Acquire`: diferente de zero, a grade inteira está escrita.
+    if CONTAGEM.load(Ordering::Acquire) == 0 {
         return Err("o timer do primeiro nucleo nao foi programado");
     }
     lapic.svr.set(SVR_HABILITADO | VETOR_ESPURIO as u32);
     lapic.tpr.set(0);
     lapic.divisor.set(DIVISOR_CODIFICADO);
-    lapic.lvt_timer.set(TIMER_PERIODICO | VETOR_TIMER as u32);
-    lapic.contagem_inicial.set(contagem);
+    lapic.lvt_timer.set(LVT_DO_TIMER);
+    armar_o_primeiro();
     Ok(())
+}
+
+/// Arma o primeiro disparo deste núcleo: o primeiro ponto da grade comum
+/// depois do TSC de agora — à frente dele, e a no máximo um período. Ver
+/// [`PRAZO`].
+fn armar_o_primeiro() {
+    let n = super::gdt::nucleo_atual();
+    let agora = super::ciclos();
+    let prazo = crate::tempo::proximo_prazo(
+        ORIGEM.load(Ordering::Relaxed),
+        agora,
+        INTERVALO.load(Ordering::Relaxed),
+    );
+    PRAZO[n].store(prazo, Ordering::Relaxed);
+    armar_para(prazo, agora);
+    #[cfg(feature = "modo-teste")]
+    {
+        PRIMEIRO_AGORA_DE_TESTE[n].store(agora, Ordering::SeqCst);
+        PRIMEIRO_PRAZO_DE_TESTE[n].store(prazo, Ordering::SeqCst);
+        PRIMEIROS_DE_TESTE.fetch_or(crate::nucleos::bit(n), Ordering::SeqCst);
+    }
+}
+
+/// Programa o disparo único deste núcleo para o prazo `prazo` do TSC, a
+/// partir do TSC `agora`: a distância convertida em contagem pela razão da
+/// calibração ([`CICLOS_POR_DECREMENTO`]), arredondada para cima e com um
+/// milésimo a mais — a razão medida erra pouco, e o disparo antes do prazo
+/// custa uma interrupção a mais. Um prazo que já passou dispara já (a
+/// contagem um): a contagem zero pararia o timer.
+fn armar_para(prazo: u64, agora: u64) {
+    let Some(lapic) = lapic() else {
+        return;
+    };
+    let falta = prazo.wrapping_sub(agora) as i64;
+    let contagem = if falta <= 0 {
+        1
+    } else {
+        let razao = u128::from(CICLOS_POR_DECREMENTO.load(Ordering::Relaxed).max(1));
+        let exata = (u128::from(falta.unsigned_abs()) << 16).div_ceil(razao);
+        u32::try_from(exata + exata / 1024)
+            .unwrap_or(u32::MAX)
+            .max(1)
+    };
+    lapic.contagem_inicial.set(contagem);
+}
+
+/// O disparo deste núcleo chegou no prazo, ou depois? Chamada no começo do
+/// handler do timer, com o TSC de agora: `false` é um disparo antes do
+/// prazo, que não é tique — ver [`PRAZO`].
+pub fn chegou_o_prazo() -> bool {
+    let n = super::gdt::nucleo_atual();
+    let prazo = PRAZO[n].load(Ordering::Relaxed);
+    let chegou = (super::ciclos().wrapping_sub(prazo) as i64) >= 0;
+    if chegou {
+        TIQUES.fetch_add(1, Ordering::Relaxed);
+    }
+    #[cfg(feature = "modo-teste")]
+    if !chegou {
+        ANTECIPADOS_DE_TESTE.fetch_add(1, Ordering::SeqCst);
+    }
+    chegou
+}
+
+/// Rearma este núcleo, no fim do handler do timer. Depois de um tique
+/// (`contou`), para o ponto seguinte da grade depois do TSC de agora: os
+/// que passaram durante o trabalho do tique, ou mascarados, são pulados
+/// ([`crate::tempo::proximo_prazo`]), e o núcleo dos dispositivos não emenda
+/// um tique no outro. Depois de um disparo antes do prazo, para o mesmo
+/// prazo: ele não foi contado, e não pode ser pulado — se passou durante o
+/// handler, dispara já.
+pub fn rearmar(contou: bool) {
+    let n = super::gdt::nucleo_atual();
+    let vencido = PRAZO[n].load(Ordering::Relaxed);
+    let agora = super::ciclos();
+    let proximo = if contou {
+        crate::tempo::proximo_prazo(vencido, agora, INTERVALO.load(Ordering::Relaxed))
+    } else {
+        vencido
+    };
+    PRAZO[n].store(proximo, Ordering::Relaxed);
+    armar_para(proximo, agora);
+}
+
+/// Só para a suíte: o TSC que o [`armar_o_primeiro`] do núcleo `i` leu e o
+/// primeiro prazo que ele calculou, ou `None` se o núcleo não armou.
+#[cfg(feature = "modo-teste")]
+pub fn primeiro_prazo_de_teste(i: usize) -> Option<(u64, u64)> {
+    if i >= MAX_NUCLEOS || PRIMEIROS_DE_TESTE.load(Ordering::SeqCst) & crate::nucleos::bit(i) == 0 {
+        return None;
+    }
+    Some((
+        PRIMEIRO_AGORA_DE_TESTE[i].load(Ordering::SeqCst),
+        PRIMEIRO_PRAZO_DE_TESTE[i].load(Ordering::SeqCst),
+    ))
+}
+
+/// Só para a suíte: a origem e o período da grade, em ciclos do TSC.
+#[cfg(feature = "modo-teste")]
+pub fn grade_de_teste() -> (u64, u64) {
+    (
+        ORIGEM.load(Ordering::SeqCst),
+        INTERVALO.load(Ordering::SeqCst),
+    )
+}
+
+/// Só para a suíte: o prazo armado deste núcleo, em ciclos do TSC.
+#[cfg(feature = "modo-teste")]
+pub fn prazo_de_teste() -> u64 {
+    PRAZO[super::gdt::nucleo_atual()].load(Ordering::SeqCst)
+}
+
+/// Só para a suíte: quantos disparos do timer, desde o boot, chegaram antes
+/// do prazo do núcleo e só rearmaram.
+#[cfg(feature = "modo-teste")]
+pub fn antecipados_de_teste() -> u64 {
+    ANTECIPADOS_DE_TESTE.load(Ordering::SeqCst)
+}
+
+/// Só para a suíte: quantos disparos do timer, em todos os núcleos e desde o
+/// boot, chegaram no prazo ou depois — os tiques ([`TIQUES`]).
+#[cfg(feature = "modo-teste")]
+pub fn tiques_de_teste() -> u64 {
+    TIQUES.load(Ordering::SeqCst)
+}
+
+/// Só para a suíte: faz o APIC deste núcleo disparar já, com o prazo dele no
+/// futuro — um disparo antes do prazo, de propósito. Mascarado: o disparo
+/// fica pendente até a suíte desmascarar.
+#[cfg(feature = "modo-teste")]
+pub fn antecipar_de_teste() {
+    if let Some(lapic) = lapic() {
+        lapic.contagem_inicial.set(1);
+    }
 }
