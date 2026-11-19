@@ -2252,7 +2252,8 @@ fn lancar_por(
     // (o #467, no lote A4). Recusada, o desfecho — `ERROR`, com o motivo,
     // como a leitura que falha e como o `exec` grava a imagem que falha
     // antes do ponto sem volta —, e quem pediu ouve o motivo. Vale também
-    // para o exemplo embutido: a conta é a mesma, e não custa nada.
+    // para o exemplo embutido: a conta é a mesma, e pequena — sem o resumo
+    // da imagem e sem memória de página.
     if let Err(motivo) = programa::conferir_a_imagem(&imagem) {
         desfecho.gravar(politica::Codigo::Error, motivo);
         crate::log_warn!("usuario", "`{}` nao foi lancado: {}", recurso, motivo);
@@ -2455,8 +2456,8 @@ extern "C" fn hospedar(argumento: u64) -> ! {
 ///
 /// Só a memória do espaço novo — criá-lo, mapear os segmentos e a pilha
 /// —: a imagem foi conferida antes do nascimento, e a conta de novo, no
-/// primeiro passo da carga, é a mesma, sobre os mesmos bytes. Quem pediu já
-/// ouviu `launched: true`; o desfecho vai à auditoria depois do `processo N
+/// primeiro passo da carga, é a mesma, sobre os mesmos bytes. Quem pediu
+/// ouve `launched: true`; o desfecho vai à auditoria depois do `processo N
 /// lancado`, como o do `exec` que falha depois do ponto sem volta —
 /// `ERROR`, com o motivo, em nome de quem o gate decidiu, citando a
 /// decisão; fora de um comando, em nome do kernel —, e o processo acaba

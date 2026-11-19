@@ -6835,11 +6835,11 @@ const NOMES_PROTEGIDOS: &[(&str, &[&str])] = &[
     // O desfecho de um lançamento, guardado no fio do comando para valer no
     // fio novo — a imagem que não se mapeia depois do nascimento (o #467,
     // no lote A4; ver `autorizacao::DesfechoDoLancamento`): é a única
-    // execução gravada depois de o comando responder, e só o lançamento a
-    // guarda. Fora de `autorizacao.rs`, onde se define, só o
-    // `usuario/mod.rs`, que lança, o nomeia — nenhum outro handler grava em
-    // nome de uma decisão depois de responder. A conta da suíte dos vivos é
-    // outra palavra (`desfechos_vivos_de_teste`).
+    // execução gravada fora do fio do comando, e só o lançamento a guarda.
+    // Fora de `autorizacao.rs`, onde se define, só o `usuario/mod.rs`, que
+    // lança, o nomeia — nenhum outro handler grava em nome de uma decisão
+    // fora do fio dele. A conta da suíte dos vivos é outra palavra
+    // (`desfechos_vivos_de_teste`).
     (
         "desfecho_do_lancamento",
         &["kernel/src/autorizacao.rs", "kernel/src/usuario/mod.rs"],
@@ -7529,7 +7529,7 @@ mod testes_dos_nomes_protegidos {
 
     /// O desfecho de um lançamento, guardado para valer no fio novo (o
     /// #467, no lote A4): só onde se define e onde se lança — nenhum outro
-    /// handler grava em nome de uma decisão depois de responder. Pela
+    /// handler grava em nome de uma decisão fora do fio dele. Pela
     /// palavra, em qualquer forma, como os outros nomes protegidos; e a
     /// conta da suíte dos vivos, que é outra palavra, não se acusa.
     #[test]

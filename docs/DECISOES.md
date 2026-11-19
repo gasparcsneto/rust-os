@@ -1940,8 +1940,8 @@ pendência #298.
   ([README](../README.md#decisões-pendentes), "A soma das cotas de
   processos e a cota por sessão", (m) a (z)).
 
-  O lote A4 (#467, #466, #469 e #471), [B], fez a nona — de antes do
-  adversário do lote A3 — e três pontos ao lado dela:
+  O lote A4 (#467, #466, #469 e #471), [B], fez a nona do adversário do
+  lote A3 — um defeito de antes daquele lote — e três pontos ao lado dela:
   - a imagem que se lê e não se carrega é conferida antes de o fio
     nascer (`usuario::programa::conferir_a_imagem`, a conta pura do
     primeiro passo da carga, sobre os mesmos bytes que o fio carrega),
@@ -1963,9 +1963,10 @@ pendência #298.
     citasse a decisão, mudaria o desenho da recusa do gate, e é [C], não
     tomada. A recusa conta uma vez no NSF — no risco, nos contadores e
     no perfil, que só contam decisões. O encerrado na última palavra já
-    tinha o desfecho desde o lote A3 (o `nasce` grava a recusa como a
-    execução da decisão): o que faltava era o das perguntas do começo e
-    o da cota;
+    tinha o desfecho antes do lote A3 (o `nasce` grava a recusa como a
+    execução da decisão desde o `6cea470`, e pergunta pelo encerrado
+    desde o `869dc08`): o que faltava era o das perguntas do começo e o
+    da cota;
   - os registros que o NSF não lê vão ao log numa linha por lote: a
     janela de 512 dava 512 linhas por volta, e o caso dela levava 72 s no
     x86 e 77 s no ARM em depuração, 138 e 149 ms por linha; agora são 8

@@ -1969,12 +1969,12 @@ impl Autorizado {
 /// # A exceção do lançamento
 ///
 /// O comando é procurado **neste fio**, agora. O lançamento de um processo
-/// tem um desfecho que acontece noutro fio, depois de o comando responder —
-/// a imagem que não se mapeia no fio novo —, e guarda a execução do comando
-/// no começo, no fio dele, para gravá-la de lá: o
+/// tem um desfecho que acontece noutro fio, sem esperar a resposta do
+/// comando — a imagem que não se mapeia no fio novo —, e guarda a execução
+/// do comando no começo, no fio dele, para gravá-la de lá: o
 /// [`DesfechoDoLancamento`], com a mesma conta ([`Execucao`]). É a única
-/// execução gravada depois de o comando acabar, e só o lançamento a guarda
-/// — o `xtask` confere quem nomeia o tipo.
+/// execução gravada fora do fio do comando, e só o lançamento a guarda — o
+/// `xtask` confere quem nomeia o tipo.
 pub fn auditar_execucao(recurso: &str, codigo: Codigo, detalhe: &str) -> u64 {
     Execucao::deste_fio().map_or(0, |e| e.gravar(recurso, codigo, detalhe))
 }
@@ -2022,24 +2022,24 @@ impl Execucao {
 ///
 /// [`auditar_execucao`] procura o comando **deste fio**, e o lançamento tem
 /// um desfecho que acontece noutro: a imagem que não se mapeia no fio novo,
-/// depois do nascimento, quando o comando já respondeu `launched: true` — a
-/// memória do espaço novo, dos segmentos, da pilha. Ali a procura não acha
-/// comando nenhum, e a falha cairia em nome do kernel mesmo no `user.run`
-/// de um operador. Guardado no começo do lançamento, no fio do comando, o
-/// desfecho vai em nome de quem o gate decidiu, citando a decisão, como o
-/// `exec` grava a imagem que não se mapeia depois do ponto sem volta
-/// ([`auditar_execucao_do_processo`]): nem em nome do kernel, nem do
-/// programa que não rodou uma instrução (o F2 do adversário do AE-1). No
-/// fio do comando, do começo ao fim do lançamento, é a mesma conta de
-/// [`auditar_execucao`].
+/// depois do nascimento, quando o comando responde, ou já respondeu,
+/// `launched: true` — a memória do espaço novo, dos segmentos, da pilha.
+/// Ali a procura não acha comando nenhum, e a falha cairia em nome do
+/// kernel mesmo no `user.run` de um operador. Guardado no começo do
+/// lançamento, no fio do comando, o desfecho vai em nome de quem o gate
+/// decidiu, citando a decisão, como o `exec` grava a imagem que não se
+/// mapeia depois do ponto sem volta ([`auditar_execucao_do_processo`]): nem
+/// em nome do kernel, nem do programa que não rodou uma instrução (o F2 do
+/// adversário do AE-1). No fio do comando, do começo ao fim do lançamento,
+/// é a mesma conta de [`auditar_execucao`].
 ///
 /// # Só o lançamento o guarda
 ///
-/// É a única execução gravada depois de o comando acabar. O `xtask` confere
+/// É a única execução gravada fora do fio do comando. O `xtask` confere
 /// que, fora deste arquivo, onde se define, só o `usuario/mod.rs` o nomeia
 /// (`NOMES_PROTEGIDOS`): nenhum outro handler grava em nome de uma decisão
-/// depois de responder. Não autoriza nada, e não é credencial: grava, na
-/// mesma cadeia, em nome de quem o gate já decidiu.
+/// fora do fio dele. Não autoriza nada, e não é credencial: grava, na mesma
+/// cadeia, em nome de quem o gate já decidiu.
 #[derive(Clone)]
 pub struct DesfechoDoLancamento {
     /// A execução do comando que lança; `None` fora de um comando decidido

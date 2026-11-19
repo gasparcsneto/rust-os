@@ -6899,9 +6899,11 @@ registro de cada uma no ponto em que nasceu.
   `nenhuma_macro_nos_arquivos_dos_carregadores`, com o trinco pelo caminho
   do pacote nos dois do trinco.
   No lote A4, a recusa de quem pediu encerrado na última palavra não
-  mudou: ela já tinha o desfecho desde este lote — o `nasce` grava a
-  recusa como a execução da decisão —, e o que faltava era o das perguntas
-  do começo e o da cota. Os casos do lote A4: `contencao: a cota contada
+  mudou: ela já tinha o desfecho antes deste lote — o `nasce` grava a
+  recusa da última palavra como a execução da decisão desde as correções
+  da soma das cotas (`6cea470`), e pergunta pelo encerrado desde o lote A
+  do #448 (`869dc08`) —, e o que faltava era o das perguntas do começo e o
+  da cota. Os casos do lote A4: `contencao: a cota contada
   de novo no nascimento do user.run grava o desfecho`, `contencao: o
   user.run de uma imagem que nao se carrega grava o desfecho`, `contencao:
   o user.run cuja imagem nao se mapeia grava o desfecho depois do
@@ -6914,7 +6916,8 @@ registro de cada uma no ponto em que nasceu.
   NSF: a recusa conta uma vez — no risco, nos contadores e no perfil, que
   só contam decisões), `o_resumo_dos_ilegiveis_de_um_lote`
   (`seguranca::evento`) e `o_desfecho_do_lancamento_so_nos_donos`
-  (`xtask`).
+  (`xtask`); e as vinte e quatro mutações (ver [As mutações do ponto sem
+  volta e de quem pede](#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
 - **A margem de memória da compressão concorrente** (de fora da 14.1 e da
   correção da vaga do morto; investigada em 8 de novembro de 2026, sem mudar
   o comportamento): no x86_64 em debug, o caso `compressao: varias ao mesmo
@@ -11317,9 +11320,64 @@ de uma parte, como cresceria o que se acumulasse numa rodada: o primeiro
 décimo de cada parte, logo depois do boot, já vem mais lento, e no ARM
 mais a cada parte — 1,08, 1,22 e 1,31 vez —, com o relógio de parede. E o
 log do kernel tem o mesmo tamanho: 4235 e 4257 linhas na parte 1/3 do x86.
-O caso novo do NSF leva 72 segundos na parte 3/3 do x86 e 77 na do ARM:
-são os 513 avisos que ele escreve no log, 138 ms por linha no x86 e 149 no
-ARM, em depuração.
+O caso novo do NSF levou 72 segundos na parte 3/3 do x86 e 77 na do ARM:
+eram os 513 avisos que ele escrevia no log, 138 ms por linha no x86 e 149
+no ARM, em depuração — o lote A4 os trocou por uma linha por lote (#469),
+e o caso leva agora uns poucos segundos.
+
+#### As do lote A4
+
+Vinte e quatro mutações contra o lote A4 — o #466, o #467, o #469 e o
+#471, no item *A soma das cotas de processos e a cota por sessão*, em
+[Decisões pendentes](#decisões-pendentes) —, uma de cada vez, no
+repositório, e restauradas byte a byte, com o resumo SHA-256 conferido e
+a hora do arquivo renovada para o cargo recompilar. As dezenove da suíte
+rodaram no x86_64 em debug, em vinte e duas rodadas, cada uma contra a
+parte que tem o caso que a deve reprovar (`DUKE_PARTE=<i+1>/1052`: um caso
+por parte, e a cauda, de sete); as cinco do hospedeiro, nos testes do
+`seguranca` e do `xtask`. Todas reprovaram. Depois delas, só mudaram
+comentários: o do `passo`, em `kernel/src/seguranca.rs`; os de
+`kernel/src/testes/fluxo.rs`, cujo caso rodou de novo sobre a árvore
+final; e, com o revisor do lote, os do desfecho em `autorizacao.rs`, em
+`usuario/mod.rs` e no `xtask`.
+
+| Mutação | Reprovada por |
+|---|---|
+| a recusa das perguntas sobre quem pede sem o desfecho do `user.run` (QP1) | `contencao: a recusa do user.run no gate diz o codigo`: "a recusa de quem pede no user.run ficou sem o desfecho" |
+| a cota contada de novo no nascimento sem o desfecho (QP2) | `contencao: a cota contada de novo no nascimento do user.run grava o desfecho`: "a cota contada de novo no nascimento deixou o user.run sem o desfecho" |
+| o desfecho das recusas sobre quem pede gravado também fora de um comando — `gravar_no_comando` como `gravar` (QP3) | o mesmo caso: "a recusa de quem pede fora de um comando ganhou um registro em nome do kernel" |
+| o desfecho com o motivo que quem pediu ouve, e não o detalhe que o gate gravou (QP4) | `contencao: a recusa do user.run no gate diz o codigo`, no editor — o desfecho sem o nome dele: "a recusa de quem pede no user.run ficou sem o desfecho" |
+| o desfecho com `ERROR`, e não o código da recusa (QP5) | o mesmo caso, já na primeira recusa, com a mesma mensagem |
+| um segundo registro da recusa do `fork` (QP6) | `contencao: o encerrado sem o isolamento no meio do fork nao ganha filho` e `contencao: o fork com o journal recusado nao ganha filho`: "a auditoria nao diz so a recusa do fork" |
+| o lançamento sem a conferência da imagem (IM1) | `contencao: o user.run de uma imagem que nao se carrega grava o desfecho`: "o user.run de uma imagem que nao se carrega lancou" — a resposta foi `launched: true`, como antes do lote |
+| a conferência sem o desfecho (IM2) | o mesmo caso: "o user.run de uma imagem que nao se carrega ficou sem o desfecho" |
+| o manifesto que não se lê tomado por nenhum — `politica::manifesto::ler(…).ok()` (IM3) | o mesmo caso, no manifesto: "o user.run de uma imagem que nao se carrega lancou" |
+| a recusa da imagem sempre em nome do kernel (IM4) | o mesmo caso: "o user.run de uma imagem que nao se carrega ficou sem o desfecho" |
+| o fio novo que não grava a falha da carga (IM5) | `contencao: o user.run cuja imagem nao se mapeia grava o desfecho depois do nascimento`: "o user.run cuja imagem nao se mapeou ficou sem o desfecho depois do nascimento" |
+| o comando procurado na hora, no fio novo (IM6) | o mesmo caso, com a mesma mensagem: o desfecho saiu em nome do kernel |
+| o desfecho vivo até `entrar` (IM7) | o mesmo caso: "o desfecho do lancamento ficou vivo depois de o processo entrar ou morrer" — 0 antes, 1 depois |
+| o desfecho vivo até `terminar` (IM8) | o mesmo caso, com a mesma mensagem — 0 antes, 2 depois |
+| o desfecho que cita o registro seguinte à decisão (IM9) | o mesmo caso — o desfecho citou o 8, o nascimento, e a decisão era o 7 —, com a mesma mensagem; e `contencao: o user.run de um caminho que nao existe grava o desfecho`: "o user.run permitido de um caminho que nao existe ficou sem o desfecho" |
+| uma linha de aviso por registro que não se lê, como antes do lote (AV1) | `nsf: mais de um lote que nao se le nao para a leitura, e vira uma lacuna`: "o NSF escreveu uma linha por registro que nao se le: o log perdeu linhas" |
+| nenhuma linha (AV2) | o mesmo caso: "o NSF nao disse uma linha por lote dos registros que nao se leem" |
+| o `exec` da imagem que não se confere com `SEM_MEMORIA`, como antes do lote (EX1) | `fluxo: a troca para a imagem que nao se confere ouve PROGRAMA_DESCONHECIDO`: "a troca que falhou antes do ponto sem volta nao devolveu o erro" — `trocar devolveu -5` |
+| a memória que falta com `PROGRAMA_DESCONHECIDO` (EX3) | o mesmo caso, na falha armada da preparação, e `fluxo: a troca de imagem que falha antes do ponto sem volta`, com a mesma mensagem — `trocar devolveu -7` |
+
+E as do hospedeiro: os dois nomes do desfecho fora de `NOMES_PROTEGIDOS`
+(IMX: `o_desfecho_do_lancamento_so_nos_donos`); e, no resumo dos registros
+que não se leem, um a menos na conta (AV3), o primeiro e o último no lugar
+do menor e do maior (AV4), os sem número fora da conta (AV5) e o motivo do
+último no lugar do do primeiro (AV6), as quatro pelo
+`o_resumo_dos_ilegiveis_de_um_lote`.
+
+O lote A4 não teve rodadas finais locais da suíte inteira. A validação
+inteira foi a da CI 519, 48 de 48: as três partes da suíte de depuração
+nas duas arquiteturas, o release, os iniciadores da UEFI e as bancadas
+(ver o parágrafo dela, depois do da CI 518). Antes dela vieram as 63
+rodadas dirigidas do especialista: cada caso novo e reforçado nas duas
+arquiteturas, em depuração, e os novos também em release; e os casos de
+`contencao:`, `zumbis:`, `recolhimento:`, `nsf:`, `codigo:`, `usuario:` e
+`fluxo:` que passam pelo lançamento ou pela troca de imagem.
 
 ### As mutações do chamado do coletor
 
@@ -14841,6 +14899,19 @@ do x86, a mediana subiu 1,24 vez contra a CI 516, espalhada por quase
 todos os casos, como num runner mais lento; e o caso novo do NSF levou ali
 142,5 segundos, pelos 513 avisos no log — um por registro que não se lê —,
 que o lote A4 trocou por um por lote (#469).
+
+A CI 519 (`7235175`, o lote A4) passou verde, 48 de 48, em 82,1 minutos
+de ponta a ponta, com 1367 de máquina. O maior job foi a persistência do
+x86, na parte 1/3, com 60,8 minutos, e depois a atualização do ARM, com
+52,1; o fim veio do iniciador do ARM, na parte 2/2, que começou aos 40,2
+e rodou 41,9. O caso do NSF dos 513 registros que não se leem levou 3,4
+segundos na parte 3/3 do x86 — oito linhas, uma por lote —, contra 142,5
+na CI 518, e os casos novos do lote, de 1,1 a 6,5. As partes da suíte
+levaram, contra a CI 518, de 0,51 a 1,54 vez, pelo runner e não pelo
+lote: na parte 2/3 do ARM, a de 1,54, a suíte levou 20,8 minutos, contra
+19,9 — a soma dos casos, 1,05 vez —, e os dez minutos a mais foram da
+instalação do emulador; na 3/3 do x86, a de 0,51, a mediana caso a caso
+caiu para 0,49 vez, em quase todos os casos, como num runner mais rápido.
 
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na

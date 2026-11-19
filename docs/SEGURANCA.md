@@ -136,10 +136,12 @@ pontos onde acontece — não num canal paralelo:
   acaba sem rodar. Quem grava de lá é o
   `autorizacao::DesfechoDoLancamento`, guardado no fio do comando no
   começo do lançamento: não autoriza nada — grava, na mesma cadeia, em
-  nome de quem o gate já decidiu —, é a única execução gravada depois de
-  o comando responder, e só o lançamento o nomeia (`NOMES_PROTEGIDOS`,
-  no `xtask`). E as recusas das perguntas sobre quem pede — o journal
-  recusado, quem pede encerrado ou contido, o editor, o papel, a cota,
+  nome de quem o gate já decidiu —, é o único caminho por que a execução
+  de um comando se grava fora do fio dele — no fio novo, que não espera a
+  resposta e em geral grava depois dela —, e só o lançamento o nomeia
+  (`NOMES_PROTEGIDOS`, no `xtask`). E as recusas das perguntas sobre quem
+  pede — o journal recusado, quem pede encerrado ou contido, o editor, o
+  papel, a cota,
   também a contada de novo no nascimento — continuam gravadas como o
   gate as grava (`process.run`, com quem pede, sem citar a decisão);
   dentro de um comando, o `ALLOW` do `user.run` ganha o desfecho delas,
