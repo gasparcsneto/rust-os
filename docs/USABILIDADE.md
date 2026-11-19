@@ -206,9 +206,13 @@ saúde do NSF — nem precisa: ele nunca dependeu dele.
 (`window_ms`). As medidas de tempo vêm do contador da arquitetura — o TSC
 no x86, o `CNTVCT_EL0` no ARM —, convertido em nanossegundos pela razão
 entre ele e o relógio do kernel desde o boot: a mesma conta nas duas
-arquiteturas, sem conhecer a frequência. Cada medida é
-`{samples, avg, max}`. Os contadores são atômicos, sem trava, e **nada
-daqui volta a uma decisão**: o gate escreve, só a consulta lê.
+arquiteturas, sem conhecer a frequência. No ARM, até o #455, o relógio do
+kernel atrasava — a bancada de tempo o media a -12 681 ppm do contador —,
+e as medidas em nanossegundos saíam pouco mais de 1% menores; rearmado
+pelo prazo, ele anda com o contador (a bancada: -24 ppm, como os -25 do
+x86). Cada medida é `{samples, avg, max}`. Os contadores são atômicos,
+sem trava, e **nada daqui volta a uma decisão**: o gate escreve, só a
+consulta lê.
 
 | Membro | O que mede | Métrica da seção 34 |
 |---|---|---|

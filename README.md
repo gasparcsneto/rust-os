@@ -510,7 +510,7 @@ kernel/src/
     └── aarch64/
         ├── mod.rs      boot em assembly, cabeçalho de imagem arm64, MIDR_EL1
         ├── vetores.rs  tabela de vetores de exceção (VBAR_EL1)
-        ├── gic.rs      GIC v2, timer genérico e os avisos entre núcleos (SGI)
+        ├── gic.rs      GIC v2, o timer genérico — o tique pelo prazo de cada núcleo — e os avisos entre núcleos (SGI)
         ├── botao.rs    a tecla de energia do device tree, num PL061: a borda do pino, pela SPI dele
         ├── smp.rs      a partida dos outros núcleos pelo PSCI, e a parada
         ├── mmu.rs      tabelas de tradução e ativação da MMU
@@ -1138,6 +1138,56 @@ mensagens, dos arrendamentos e o piso do relógio da persistência com ele.
 O caso `smp: o relogio anda sem o nucleo dos dispositivos` trava o núcleo
 dos dispositivos de interrupções mascaradas e mede, de outro núcleo, o
 relógio andando.
+
+**O tique do ARM vem pelo prazo.** O timer genérico do ARM compara o
+contador com um prazo e dispara uma vez; o tique periódico é o prazo
+seguinte, escrito a cada disparo. Ele era escrito a partir de agora, no fim
+do handler (o `CNTP_TVAL_EL0`), e cada período durava o intervalo mais o
+atraso da interrupção e o handler inteiro. Todo núcleo perdia o atraso de
+cada interrupção, e com eles o relógio: a bancada de tempo media o relógio
+do kernel do ARM a -12 681 ppm do contador, contra -25 no x86. E o núcleo
+dos dispositivos perdia do pulso também tudo o que fazia no tique e no
+cutucão — na CI 508, "relogio andou 51, o primeiro nucleo contou 40" —:
+com vários núcleos o relógio não sentia essa parte, porque outro o anda no
+lugar; com um núcleo só, sentia, e todo prazo que mede nele também. Desde
+o #455 cada núcleo tem uma grade, no `CNTP_CVAL_EL0` (`gic::PRAZO`): o
+primeiro prazo parte do contador de agora — no boot e ao acordar —, e cada
+um dos seguintes é o que venceu mais um intervalo. Um atraso menor que um
+período não custa tique; um maior não vira rajada — o timer guarda o
+nível, e não a conta —: os prazos perdidos são pulados, e o próximo é o
+primeiro da grade ainda no futuro, como no APIC periódico do x86. Os casos
+`smp: o pulso nao perde tique com o nucleo mascarado em trechos de 6 ms` e
+`smp: mascarado por mais de um periodo, o timer volta com um disparo, sem
+rajada` o conferem nas duas arquiteturas, e `smp: o prazo do timer do ARM
+parte do contador, nunca chega antes, e pula os perdidos`, no ARM. O
+primeiro mascara o núcleo dos dispositivos em trechos de 6 ms, com meio
+milissegundo aberto entre eles, por cinquenta períodos, e confere o pulso
+dele contra o relógio, que outro núcleo anda; com um núcleo só, contra os
+períodos que o contador da arquitetura diz que passaram. O contador só é a
+régua com um núcleo: com vários, uma parada do processo inteiro do
+emulador pelo hospedeiro anda o contador, e não o relógio nem o pulso.
+Medido no ARM em depuração, com o rearme de antes reposto: o relógio andou
+49, o pulso 38, e o contador disse 50 períodos — com um núcleo só, o
+relógio e o pulso 38 —; pelo prazo, 50, 50 e 50, com quatro núcleos e com
+um. E a bancada de tempo do ARM, no holdover: o relógio do kernel a -24
+ppm do contador — 2057 s no relógio do kernel em 2057 do hospedeiro, como
+os -25 do x86 —, contra -12 681 antes, que eram 2030 s em 2056; e no
+máximo 69 s entre duas rodadas sem acordo, contra 70, porque o intervalo
+de 64 s delas é medido no relógio do kernel.
+
+As mutações do #455, no `gic.rs`, cada uma contra os três casos, no ARM em
+depuração, com quatro núcleos:
+
+| Mutação | Reprovada por |
+|---|---|
+| o próximo prazo a partir de agora (`agora + intervalo`) — o rearme de antes | `smp: o pulso nao perde tique...`: o relógio 49, o pulso 38, o contador 50; com um núcleo só, o relógio e o pulso 38 |
+| o `armar` no lugar do `rearmar`, no handler | o mesmo: 49, 38 e 50 |
+| sem pular os perdidos, na conta (`proximo_prazo`) | `smp: mascarado por mais de um periodo...`: três tiques logo depois, e o relógio 15 no caso, contra 13 ou 14 pelo prazo; e `smp: o prazo do timer do ARM...`: "proximo_prazo(1000, 1100, 100) deu 1100, e nao 1200" |
+| sem pular os perdidos, fora da conta | `smp: mascarado por mais de um periodo...`: quatro tiques logo depois, e o relógio 16 |
+| um prazo só, para todos os núcleos | `smp: o prazo do timer do ARM...`: 320 disparos acharam o prazo do núcleo no futuro — com os pulsos e o relógio certos, e os outros dois casos passando |
+| o primeiro prazo sem o contador | `smp: o prazo do timer do ARM...`: o do núcleo 0 a -533 106 ciclos do contador |
+| o prazo zero de quem acorda | o mesmo: o do núcleo 1 a -206 421 764 ciclos |
+| quem acorda pela grade do zero do contador | nenhum — equivalente: o primeiro prazo fica em (agora, agora + intervalo], como o certo; muda só a fase da grade, e nada depende dela |
 
 **O núcleo dos dispositivos.** As interrupções dos dispositivos chegam a
 um núcleo só, o de boot (`NUCLEO_DOS_DISPOSITIVOS`): é nele que o tique
@@ -7002,9 +7052,15 @@ imagem faz as rodadas, não recebe resposta, e o civil fica no RTC.
 **A régua** (`hora::contador`). O civil não mede o tempo pelos tiques do
 timer: tique perdido não volta, e o emulador junta interrupções quando o
 processador emulado fica sem vez no hospedeiro — 5% de perda são 51 s de
-erro entre duas rodadas de 1024 s. Mede pelo contador de ciclos, que é
-lido, e não interrompe: no ARM, com a frequência que o processador declara
-(`CNTFRQ_EL0`); no x86, com a do TSC medida no boot contra o canal 2 do PIT
+erro entre duas rodadas de 1024 s. No ARM, até o #455, o timer rearmado a
+partir de agora perdia também o atraso de cada interrupção — a bancada de
+tempo media o relógio do kernel a -12 681 ppm do contador, contra -25 no
+x86 —; rearmado pelo prazo, só o atraso maior que um período custa tique,
+como no x86, e a bancada o mede a -24 ppm — ver
+[Vários núcleos](#vários-núcleos). Mede pelo contador de
+ciclos, que é lido, e não interrompe: no ARM, com a frequência que o
+processador declara (`CNTFRQ_EL0`); no x86, com a do TSC medida no boot
+contra o canal 2 do PIT
 — um décimo de segundo, até cinco tentativas, e vale a primeira com erro
 de até 200 ppm, que entra na deriva máxima do civil. Sem nenhuma das duas,
 a régua são os tiques, com 5% de deriva: o civil vence o teto da incerteza
@@ -7034,7 +7090,8 @@ síncrona do `mrs` no ARM (`msr_mrs_trap`) —, como um que executa uma
 instrução privilegiada: a contabilidade das falhas (`traps.stats`) e o
 log (`processo morto por …`) dizem qual, e em que instrução. O kernel
 continua lendo o contador no anel zero e no EL1 — esta régua, a das
-medidas de custo, o prazo da parada dos núcleos — e o timer físico do EL1,
+medidas de custo, o prazo da parada dos núcleos e, no ARM, o do tique
+(o #455) — e o timer físico do EL1,
 e os controles não o alcançam. Nenhum dos 57 programas usa o contador, nas
 duas arquiteturas: conferido na desmontagem dos binários — sem `rdtsc`,
 `rdtscp`, `rdpmc` nem `rdpid`, nem `mrs` de `cntvct`, `cntpct`, `cntfrq` ou
@@ -14601,10 +14658,10 @@ de teste, nenhum do kernel, e cada caso agora prepara o próprio estado:
 - o relógio do SMP, no ARM, media logo depois de um caso que deixa
   trabalho para o primeiro núcleo, sem a folga de dez tiques que o `smp:
   todos os nucleos ligam` lhe dava. Ele espera os dez tiques antes de
-  medir. No ARM o timer é rearmado no fim do handler, e o atraso sob carga
-  sai do pulso do primeiro núcleo; o x86 tem o APIC periódico. Rearmar
-  o timer do ARM pelo prazo, sem perder o tique atrasado, é um trabalho
-  [B] à parte.
+  medir. No ARM o timer era rearmado no fim do handler, e o atraso sob
+  carga saía do pulso do primeiro núcleo; o x86 tem o APIC periódico. O
+  #455 rearmou o timer do ARM pelo prazo, sem perder o tique atrasado —
+  ver [Vários núcleos](#vários-núcleos).
 
 A CI 509 achou mais duas, também de teste, e as duas vinham de antes das
 partes:
