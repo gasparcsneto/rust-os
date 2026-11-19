@@ -1171,7 +1171,8 @@ Medido no ARM em depuração, com o rearme de antes reposto: o relógio andou
 relógio e o pulso 38 —; pelo prazo, 50, 50 e 50, com quatro núcleos e com
 um. E a bancada de tempo do ARM, no holdover: o relógio do kernel a -24
 ppm do contador — 2057 s no relógio do kernel em 2057 do hospedeiro, como
-os -25 do x86 —, contra -12 681 antes, que eram 2030 s em 2056; e no
+os -25 do x86 numa rodada; noutra, na CI 520, o x86 mediu +6216, pela
+conta dupla que o #455-B vai corrigir —, contra -12 681 antes, que eram 2030 s em 2056; e no
 máximo 69 s entre duas rodadas sem acordo, contra 70, porque o intervalo
 de 64 s delas é medido no relógio do kernel.
 
@@ -1187,7 +1188,22 @@ depuração, com quatro núcleos:
 | um prazo só, para todos os núcleos | `smp: o prazo do timer do ARM...`: 320 disparos acharam o prazo do núcleo no futuro — com os pulsos e o relógio certos, e os outros dois casos passando |
 | o primeiro prazo sem o contador | `smp: o prazo do timer do ARM...`: o do núcleo 0 a -533 106 ciclos do contador |
 | o prazo zero de quem acorda | o mesmo: o do núcleo 1 a -206 421 764 ciclos |
-| quem acorda pela grade do zero do contador | nenhum — equivalente: o primeiro prazo fica em (agora, agora + intervalo], como o certo; muda só a fase da grade, e nada depende dela |
+| quem acorda pela grade do zero do contador | nenhum — e não é equivalente, como se escreveu: o primeiro prazo fica em (agora, agora + intervalo], como o certo, mas a fase da grade muda, e `tempo::avancar` depende dela (o achado 2 do adversário do #455; ver o #455-B, abaixo) |
+
+**O #455-B: a grade de cada núcleo e o relógio.** O adversário do #455
+achou que `tempo::avancar` — anda o relógio o núcleo que não viu ninguém
+andá-lo desde o próprio tique anterior — supõe que dois tiques seguidos de
+um núcleo distam um período. Com uma grade por núcleo, cada uma na sua
+fase — a do `CNTP_CVAL_EL0` no ARM, desde o #455, e a do APIC periódico no
+x86, desde sempre —, o tique atrasado que viu o avanço de outro núcleo é
+seguido do próximo da grade dele a menos de um período, e ele anda o
+relógio de novo: o mesmo período conta duas vezes, e o relógio passa à
+frente do tempo de verdade. O caso de ataque do adversário — os quatro
+núcleos mascarados em trechos de 3 a 9 ms, por 3 s — reprovou nas seis
+rodadas no QEMU, antes de qualquer correção: o relógio andou de 307 a 332
+no ARM e de 308 a 327 no x86, em 300 períodos do contador; e a CI 520
+mediu o holdover do x86 a +6216 ppm. A correção, [B] e ainda por fazer, é
+o #455-B: os núcleos numa grade só.
 
 **O núcleo dos dispositivos.** As interrupções dos dispositivos chegam a
 um núcleo só, o de boot (`NUCLEO_DOS_DISPOSITIVOS`): é nele que o tique
@@ -6934,12 +6950,14 @@ registro de cada uma no ponto em que nasceu.
   mais de 64 entradas (`elf::MAX_ENTRADAS`: "tabela de segmentos grande
   demais") e as notas que passam de 4 KiB, somadas
   (`elf::ORCAMENTO_DAS_NOTAS`: "segmentos de notas grandes demais"); os
-  executáveis do Duke têm quatro entradas, e a nota do manifesto, no
-  máximo 1044 bytes;
-  (b) a `Carga`, o `hospedar` e o `carregar_a_carga` voltaram a ser itens
-  de dentro de `lancar_por`: no módulo, ao alcance de todo filho do
-  `usuario`, eram um segundo caminho de lançamento que nenhuma palavra de
-  carregador acusava. Quem confere o alcance é o compilador, e o `xtask`
+  executáveis do Duke têm três ou quatro entradas, e a nota do
+  manifesto, no máximo 1044 bytes;
+  (b) a `Carga`, o `hospedar` e o `carregar_a_carga` passaram a ser itens
+  de dentro de `lancar_por` — o `hospedar` voltou para lá, de onde o lote
+  A4 o tirou; a `Carga` já era do módulo, e o `carregar_a_carga` nasceu
+  nele, no lote A4 —: no módulo, ao alcance de todo filho do `usuario`,
+  eram um segundo caminho de lançamento que nenhuma palavra de carregador
+  acusava. Quem confere o alcance é o compilador, e o `xtask`
   confere que eles continuam lá (`fio_novo_fora_do_lancamento`);
   (c) no NSF, a execução que cita uma decisão mais velha que o registro
   que pôs o programa de agora num processo não o troca, nem liga aresta
@@ -6979,15 +6997,15 @@ registro de cada uma no ponto em que nasceu.
   O que fica: (1) o `cargo xtask sdk-conferir` (`manifesto_do_elf`, em
   `xtask/src/sdk.rs`) percorre a tabela de segmentos e as notas sem os
   dois tetos, e o executável de fora com mais de 64 entradas ou de 4 KiB
-  de notas passa nele e é recusado na carga. Fica para um lote seguinte:
-  as constantes no `protocolo`, para os dois lados, mexeriam no contrato
-  público que o `cargo xtask invariantes` confere, e os tetos ficam muito
-  acima dos programas de verdade — três ou quatro entradas, e no máximo
-  1044 bytes de notas; (2) a falta de heap no resto do lançamento — a
+  de notas passa nele e é recusado na carga. Fica para um lote seguinte —
+  as duas constantes em `protocolo::usuario::manifesto`, para os dois
+  lados, um [B] pequeno —: os tetos não são contrato, e ficam muito acima
+  dos programas de verdade — três ou quatro entradas, e no máximo 1044
+  bytes de notas; (2) a falta de heap no resto do lançamento — a
   caixa da carga, o desfecho, o texto da auditoria — é pânico, e não
   erro, pela regra de todo o kernel, e não deste caminho
-  (`kernel/src/heap.rs`; "O heap do kernel tem 8 MiB", em
-  `docs/PERSISTENCIA.md`); só a leitura do executável, o pedaço maior,
+  (`kernel/src/heap.rs`: "falta de heap no kernel é pânico, e não
+  erro"); só a leitura do executável, o pedaço maior,
   pede o heap sem pânico, e a falta dela é o motivo da recusa. Os casos
   do lote A5: `contencao: a imagem de entradas ou de notas demais nao se
   carrega, e a do teto lanca` e `contencao: o segmento vazio no teto nao
@@ -7143,7 +7161,8 @@ processador emulado fica sem vez no hospedeiro — 5% de perda são 51 s de
 erro entre duas rodadas de 1024 s. No ARM, até o #455, o timer rearmado a
 partir de agora perdia também o atraso de cada interrupção — a bancada de
 tempo media o relógio do kernel a -12 681 ppm do contador, contra -25 no
-x86 —; rearmado pelo prazo, só o atraso maior que um período custa tique,
+x86 numa rodada (noutra, +6216, pela conta dupla do #455-B) —; rearmado
+pelo prazo, só o atraso maior que um período custa tique,
 como no x86, e a bancada o mede a -24 ppm — ver
 [Vários núcleos](#vários-núcleos). Mede pelo contador de
 ciclos, que é lido, e não interrompe: no ARM, com a frequência que o
@@ -11477,7 +11496,8 @@ no x86_64 em debug, cada uma contra a parte que tem o caso que a deve
 reprovar (`DUKE_PARTE=<i+1>/1056`: um caso por parte, e a cauda, de sete);
 as dezesseis do hospedeiro, nos testes do `seguranca`, da `politica` e do
 `xtask`, e no `cargo xtask invariantes`. Vinte e quatro reprovaram; as três
-que sobreviveram são equivalentes, e a tabela diz por quê.
+que sobreviveram não mudam o que se aceita nem o que se recusa, e a tabela
+diz por quê — a PG3 muda só o motivo de uma recusa.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -11488,7 +11508,7 @@ que sobreviveram são equivalentes, e a tabela diz por quê.
 | o orçamento por segmento, e não somado (EL5) | o mesmo caso — "o ola com quatro bytes de notas a mais: None, e nao Some(…)" |
 | a faixa de páginas sem o limite de cima (PG1) | `contencao: o segmento vazio no teto nao ganha a pagina de cima`: "o user.run de uma imagem que nao se carrega lancou" — `launched: true` |
 | só o limite de cima (PG2) | sobreviveu, equivalente: o começo da faixa nunca fica abaixo do `BASE` — o destino passou pelo `elf::validar`, que recusa o de baixo dele, e o `BASE` é de página |
-| o limite de cima com `>=` (PG3) | sobreviveu, equivalente: a faixa que acaba no `TETO` invade a pilha, que a conferência seguinte recusa |
+| o limite de cima com `>=` (PG3) | sobreviveu, equivalente na decisão: a faixa que acaba no `TETO` invade a pilha, que a conferência seguinte recusa; muda só o motivo — "um segmento quer paginas fora do espaco do usuario", e não "um segmento invade a pilha do processo" —, que nenhum caso confere |
 | a imagem que não se carrega com o desfecho `ALLOW` (DF1) | `contencao: o user.run de uma imagem que nao se carrega grava o desfecho`: o pânico da guarda, "o desfecho de um lancamento grava so o que nao acontece" (`autorizacao.rs`, no `gravar`) |
 | a recusa do gate sobre quem pede com o desfecho `ALLOW` (DF2) | `contencao: a recusa do user.run no gate diz o codigo`: o mesmo pânico, no `gravar_no_comando` |
 | o `gravar` sem a guarda (DF3) | sobreviveu, equivalente: nenhum chamador de hoje passa um código que permite — a guarda é para o de amanhã, e a DF1 e a DF2 mostram que ela o pega |
@@ -15052,13 +15072,16 @@ caiu para 0,49 vez, em quase todos os casos, como num runner mais rápido.
 
 A CI 520 (`3f5063a`, o #455 e as correções do revisor do lote A4) passou
 verde, 48 de 48, em 89,8 minutos de ponta a ponta, com 1394 de máquina. O
-fim veio da persistência do x86, na parte 2/3, com 86,3 minutos, 1,67 vez
-os 51,5 da CI 519, pelo runner e não pelo código: os vinte casos dela
-levaram de 1,56 a 1,79 vez, todos por igual, a compilação de release 56,8
-segundos contra 41,4, o pacote do emulador 2 minutos e 17 segundos contra
-3, e nenhum código do x86 fora da suíte mudou entre as duas; a
-atualização do x86, na parte 2/2, foi do mesmo jeito, 43,6 minutos contra
-25,8, com o release em 58,5 segundos. O #455 no ARM: na tela virtio-gpu,
+maior job foi a persistência do x86, na parte 2/3, com 86,3 minutos, 1,67
+vez os 51,5 da CI 519, pelo runner e não pelo código: os dezoito casos
+longos dela levaram de 1,56 a 1,79 vez, todos por igual, a compilação de
+release 56,8 segundos contra 41,4, o pacote do emulador baixou em 2
+minutos e 17 segundos, contra 3 segundos, e nenhum código do x86 fora da
+suíte mudou entre as duas; a atualização do x86, na parte 2/2, foi do
+mesmo jeito, 44,5 minutos contra 26,6, com o release em 58,5 segundos. O
+fim veio dos fluxos entre dispositivos (x86_64 e aarch64), que esperaram
+53 minutos por um runner, começaram aos 57,2 e rodaram 32,6, contra 21,8
+na CI 519. O #455 no ARM: na tela virtio-gpu,
 na parte 2/2, o caso dos trechos de 6 ms mascarados mediu o relógio em 50,
 o pulso do núcleo 0 em 50 e o contador em 50 períodos; no holdover da
 bancada de tempo, na parte 3/3, o relógio do kernel andou a -24 ppm do
@@ -15066,7 +15089,7 @@ contador, contra -12 681 antes. Na mesma CI, o holdover do x86 mediu +6216
 ppm — 2069 segundos no relógio do kernel em 2056 do contador —: é a conta
 dupla de `tempo::avancar` com a grade de tiques de cada núcleo, que o
 APIC periódico do x86 tem desde antes do #455 e que o adversário do #455
-achou; a correção é o #455-B. Noutra rodada, o x86 tinha medido -25 ppm: a
+achou; a correção, ainda por fazer, é o #455-B. Noutra rodada, o x86 tinha medido -25 ppm: a
 fase dos núcleos muda a cada boot.
 
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI

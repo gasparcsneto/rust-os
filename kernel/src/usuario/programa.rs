@@ -318,8 +318,8 @@ fn conferida(imagem: &[u8]) -> Result<Conferida<'_>, &'static str> {
 ///
 /// As duas portas a fazem antes do que pede memória. O lançamento
 /// (`usuario::lancar_por`), antes de o fio nascer: a imagem que não é um
-/// ELF deste processador, com um segmento fora do lugar ou com o manifesto
-/// que não se lê é recusada a quem pediu, com o desfecho na auditoria, em
+/// ELF deste processador, com entradas ou notas demais, com um segmento
+/// fora do lugar ou com o manifesto que não se lê é recusada a quem pediu, com o desfecho na auditoria, em
 /// vez de nascer e morrer no fio novo com o erro só no log (o #467). E o
 /// `executar` (`usuario::executar`), antes do espaço novo: a imagem que não
 /// se confere ouve `PROGRAMA_DESCONHECIDO`, e só a memória que falta,

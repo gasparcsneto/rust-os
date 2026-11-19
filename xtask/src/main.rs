@@ -6595,8 +6595,9 @@ const ARQUIVO_DO_LANCAMENTO: &str = "kernel/src/usuario/mod.rs";
 /// palavra de carregador ([`carregadores_nos_irmaos`]): um irmão com uma
 /// `Carga` dele entraria num programa sem o gate, sem a conferência do
 /// código, sem a última palavra, sem o trinco e sem o nascimento na
-/// auditoria. O lote A4 os tinha tirado de dentro, e nada notou (o achado
-/// A2 do adversário dele). Dentro, quem confere o alcance é o compilador;
+/// auditoria. O lote A4 tirou de dentro o `hospedar` e pôs o
+/// `carregar_a_carga` ao lado dele, no módulo, onde a `Carga` já morava, e
+/// nada notou (o achado A2 do adversário dele). Dentro, quem confere o alcance é o compilador;
 /// aqui, que eles continuam lá ([`fio_novo_fora_do_lancamento`]).
 const ITENS_DO_FIO_NOVO: &[(&str, &str)] = &[
     ("struct", "Carga"),
@@ -7203,10 +7204,13 @@ fn tem_a_palavra(linha: &str, nome: &str) -> bool {
 }
 
 /// O que `texto` — a fonte `relativo`, fora da suíte — tem dos
-/// [`NOMES_PROTEGIDOS`]: as linhas que os usam fora dos donos, e as que
-/// renomeiam um deles ([`onde_um_nome_protegido_se_renomeia`]), em
-/// qualquer arquivo; e os índices dos nomes que aparecem aqui, sendo este
-/// arquivo um dono deles — a conta que diz se a conferência está cega.
+/// [`NOMES_PROTEGIDOS`]: as linhas que os usam fora dos donos; em qualquer
+/// arquivo, as que dão outro nome a um deles — pelo `as`
+/// ([`onde_um_nome_protegido_se_renomeia`]), por um `type` ou como valor
+/// ([`onde_um_nome_protegido_se_esconde`]) — e as de um `use` montado por
+/// uma macro ([`onde_um_use_se_monta`]); e os índices dos nomes que
+/// aparecem aqui, sendo este arquivo um dono deles — a conta que diz se a
+/// conferência está cega.
 ///
 /// # A linha que conta
 ///

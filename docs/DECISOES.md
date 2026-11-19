@@ -1993,9 +1993,9 @@ pendência #298.
     programas de verdade, de três ou quatro entradas e no máximo 1044
     bytes de notas, e o `sdk-conferir` sem eles fica para um lote
     seguinte;
-  - a `Carga`, o `hospedar` e o `carregar_a_carga` voltaram para dentro
-    de `lancar_por`, onde o compilador confere o alcance, e o `xtask`
-    confere que continuam lá;
+  - a `Carga`, o `hospedar` e o `carregar_a_carga` passaram para dentro
+    de `lancar_por` — o `hospedar` voltou —, onde o compilador confere o
+    alcance, e o `xtask` confere que continuam lá;
   - no NSF, a execução que cita uma decisão mais velha que o registro
     que pôs o programa de agora não o troca, nem liga aresta: o desfecho
     tardio de um `user.run` nativo voltava quem pediu ao programa de

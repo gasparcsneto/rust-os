@@ -96,8 +96,9 @@ pub const MAX_ENTRADAS: usize = 64;
 /// 1044 bytes — o cabeçalho, o dono e o maior manifesto,
 /// [`protocolo::usuario::manifesto::MAIOR`]. Sem o orçamento, cada
 /// `PT_NOTE` se lia inteiro, por maior que fosse e quantas vezes a tabela o
-/// repetisse; com ele, o achador dá no máximo 341 voltas por imagem — a
-/// menor nota tem 12 bytes —, por mais entradas que ela tenha. Quatro KiB:
+/// repetisse; com ele, o achador lê no máximo 341 notas por imagem — a
+/// menor tem 12 bytes —, por mais entradas que ela tenha, e a volta
+/// seguinte, se houver, recusa a nota cortada. Quatro KiB:
 /// a nota do Duke e as que um ligador põe ao lado dela, com folga. A imagem
 /// que passa do orçamento é recusada, e não lida pela metade: um manifesto
 /// depois do corte seria um manifesto ignorado.

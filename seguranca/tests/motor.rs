@@ -3010,7 +3010,7 @@ fn o_que_nao_diz_o_numero_nao_anda_a_leitura() {
 /// O desfecho de uma recusa de quem pede no `user.run` (o #466, no lote
 /// A4): a recusa do gate — `process.run`, sem citação — é uma decisão; o
 /// desfecho — a execução da decisão do `user.run`, com o mesmo código e o
-/// mesmo detalhe — é uma execução. A recusa conta uma vez, pela decisão, no
+/// detalhe do gate, abreviado acima do teto — é uma execução. A recusa conta uma vez, pela decisão, no
 /// risco, nos contadores e no perfil: os três só contam decisões — o perfil
 /// também (`Ueba::observar`: as execuções já foram contadas na decisão).
 /// O plano do lote esperava o perfil com a recusa duas vezes, e a forma

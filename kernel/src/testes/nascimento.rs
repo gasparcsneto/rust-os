@@ -58,8 +58,9 @@
 //!
 //! E os do lote A4 (o #466 e o #467), no fim do arquivo: a recusa das
 //! perguntas sobre quem pede dentro de um `user.run` ganha o desfecho do
-//! comando — a execução da decisão, com o mesmo código e o mesmo detalhe,
-//! além da recusa do gate, que continua como era —, também a da cota
+//! comando — a execução da decisão, com o mesmo código e, abaixo do teto,
+//! o mesmo detalhe, além da recusa do gate, que continua como era —,
+//! também a da cota
 //! contada de novo no nascimento, pelo gancho de antes dele
 //! (`autorizacao::antes_do_nascimento_do_lancamento_de_teste`); fora de um
 //! comando, só a do gate. A imagem que se lê e não se carrega — o que não é
@@ -1817,7 +1818,8 @@ fn o_desfecho_do_user_run(
 /// auditoria como as perguntas a gravam — `process.run`, com quem pede
 /// (`pelo`, se e um processo) na frente do detalhe `gravado` —; e, desde o
 /// lote A4 (o #466), o `ALLOW` do comando ganha o desfecho: uma execucao da
-/// decisao do `user.run`, com o mesmo codigo e o mesmo detalhe — o editor
+/// decisao do `user.run`, com o mesmo codigo e, abaixo do teto, o mesmo
+/// detalhe — o editor
 /// pelo nome, a contagem da cota —, citando-a ([`o_desfecho_do_user_run`]).
 fn recusado_nas_perguntas_do_gate(
     quem: crate::autorizacao::Chamador,
@@ -1893,7 +1895,8 @@ fn recusado_nas_perguntas_do_gate(
 /// E, desde o lote A4 (o #466), cada recusa vai a auditoria duas vezes,
 /// cada registro uma vez: a do gate, como ele a grava — `process.run`, com
 /// quem pede —, e o desfecho do `user.run` — a execucao da decisao do
-/// comando, com o mesmo codigo e o mesmo detalhe, citando-a. Antes, o
+/// comando, com o mesmo codigo e, abaixo do teto, o mesmo detalhe,
+/// citando-a. Antes, o
 /// `ALLOW` do comando ficava sem nada que o citasse.
 pub(super) fn contencao_a_recusa_do_user_run_no_gate_diz_o_codigo() -> Resultado {
     use politica::Codigo;

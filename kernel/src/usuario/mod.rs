@@ -2004,8 +2004,9 @@ pub enum NaoLancou {
     /// motivo da leitura, `DENY_POLICY` com o da procedência.
     Codigo(codigo::Recusa),
     /// A imagem se leu e não se carrega: não é um ELF64 deste processador,
-    /// um segmento fora do lugar ou que invade a pilha, o manifesto que não
-    /// se lê ([`programa::conferir_a_imagem`]). Conferida antes de o fio
+    /// tem entradas ou notas demais, um segmento fora do lugar ou que
+    /// invade a pilha, o manifesto que não se lê
+    /// ([`programa::conferir_a_imagem`]). Conferida antes de o fio
     /// nascer — antes, o fio nascia, o nascimento ia à auditoria como
     /// "processo N lancado", e o fio novo morria com o erro só no log (a
     /// nona do lote A3 do #448; o #467, no lote A4). Vai à auditoria como o
@@ -2156,7 +2157,8 @@ fn lancar_por(
     // com uma `Carga` dele —, que entraria num programa sem o gate, sem a
     // conferência do código, sem a última palavra, sem o trinco e sem o
     // nascimento na auditoria, sem nomear carregador nenhum (o achado A2
-    // do adversário do lote A4, que os tinha tirado daqui). Quem confere o
+    // do adversário do lote A4, que tirou daqui o `hospedar` e pôs o
+    // `carregar_a_carga` no módulo, ao lado da `Carga`). Quem confere o
     // alcance é o compilador; o `xtask`, que eles continuam aqui
     // (`fio_novo_fora_do_lancamento`).
 
@@ -2342,8 +2344,9 @@ fn lancar_por(
     };
 
     // A imagem, conferida antes de o fio nascer: o ELF — o cabeçalho, a
-    // máquina, os segmentos, `W^X` —, as páginas dos segmentos, que não se
-    // dividem nem invadem a pilha, e o manifesto. É a conta pura do
+    // máquina, a tabela de segmentos e as notas, com teto, os segmentos,
+    // `W^X` —, as páginas dos segmentos, que ficam no espaço do usuário,
+    // não se dividem nem invadem a pilha, e o manifesto. É a conta pura do
     // primeiro passo da carga (`programa::conferir_a_imagem`), sobre os
     // mesmos bytes que o fio vai carregar: ninguém relê o arquivo. Antes, só
     // o fio novo a fazia, depois do nascimento — e a imagem que não é ELF,
