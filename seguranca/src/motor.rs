@@ -303,7 +303,8 @@ impl Motor {
             .chain(self.observacoes.iter())
     }
 
-    /// O último registro da auditoria lido.
+    /// O último registro da auditoria por onde a leitura passou: lido, ou
+    /// que não se lê e disse o número (ver [`Motor::ler_lote`]).
     pub fn lido(&self) -> u64 {
         self.lido
     }
@@ -500,6 +501,37 @@ impl Motor {
                 e.epoca = self.epoca;
             }
             self.processar(e);
+        }
+        novos
+    }
+
+    /// Um lote de um `audit.tail`, lido do JSON fora da trava do motor —
+    /// ver [`evento::lote`]: os registros que se leem, e os que não se
+    /// leem. Devolve quantos registros novos se leram.
+    ///
+    /// # A leitura passa pelos que não se leem
+    ///
+    /// Pelo número — o que o próprio registro diz —, depois de ler os
+    /// outros: um que não se lê voltaria igual a cada leitura depois do
+    /// último lido, e um lote em que nenhum se lê parava a leitura ali — o
+    /// NSF cego até os registros saírem do anel (o item 3 do lote A3 do
+    /// #448). O buraco é a lacuna de sempre, que o monitor de invariantes vê
+    /// no registro seguinte que se lê — também quando o primeiro que o motor
+    /// alcança é um que não se lê ([`Monitor::nao_lido`]): o mesmo tipo de
+    /// detecção, a mesma regra. O que não diz o número não anda a leitura:
+    /// o kernel grava o número em todo registro, e um lote inteiro dos que
+    /// não o tivessem pararia a leitura ali, como antes.
+    pub fn ler_lote(&mut self, registros: Vec<Registro>, ilegiveis: &[evento::Ilegivel]) -> usize {
+        let lido = self.lido;
+        let numeros = || ilegiveis.iter().filter_map(|i| i.seq).filter(|&s| s > lido);
+        let (menor, maior) = (numeros().min(), numeros().max());
+        if let Some(menor) = menor {
+            self.monitor.nao_lido(menor);
+        }
+        let novos = self.ler_registros(registros);
+        if let Some(maior) = maior {
+            self.lido = self.lido.max(maior);
+            self.cabeca = self.cabeca.max(maior);
         }
         novos
     }

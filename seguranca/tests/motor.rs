@@ -125,6 +125,18 @@ impl Auditoria {
             .collect();
         format!(r#"{{"durable_seq":0,"records":[{}]}}"#, corpo.join(","))
     }
+
+    /// O resultado de um `audit.tail {after, count}`.
+    fn lote_depois_de(&self, after: u64, count: usize) -> String {
+        let corpo: Vec<&str> = self
+            .registros
+            .iter()
+            .skip(after as usize)
+            .take(count)
+            .map(String::as_str)
+            .collect();
+        format!(r#"{{"durable_seq":0,"records":[{}]}}"#, corpo.join(","))
+    }
 }
 
 /// Lê tudo o que a auditoria tem de novo.
@@ -2817,29 +2829,27 @@ fn o_quorum_do_maior_grupo_nao_cega_o_motor() {
     assert!(m.saude().saudavel(), "{:?}", m.saude());
 }
 
-/// O que o fio do NSF faz com o resultado de um `audit.tail`: os registros
-/// que se leem vão ao motor, e os que não se leem ficam de fora — ver
-/// `seguranca::evento::lote`.
-fn ler_o_lote(m: &mut Motor, a: &Auditoria) -> Vec<Ilegivel> {
-    let (lidos, ilegiveis) = seguranca::evento::lote(a.depois_de(m.lido()).as_bytes()).unwrap();
-    m.ler_registros(lidos);
+/// O que o fio do NSF faz com o resultado de um `audit.tail` de até `count`
+/// registros depois do último lido: os que se leem e os que não se leem
+/// vão ao motor, que passa pelos que não se leem pelo número — ver
+/// `seguranca::evento::lote` e `Motor::ler_lote`.
+fn ler_um_lote(m: &mut Motor, a: &Auditoria, count: usize) -> Vec<Ilegivel> {
+    let (lidos, ilegiveis) =
+        seguranca::evento::lote(a.lote_depois_de(m.lido(), count).as_bytes()).unwrap();
+    m.ler_lote(lidos, &ilegiveis);
     ilegiveis
 }
 
-/// Um registro que o NSF não lê — aqui, um identificador acima do teto, que
-/// o kernel não grava — não para a leitura. Ele é o último do lote: a
-/// leitura fica antes dele, e ele volta na seguinte, com o que veio depois;
-/// os outros entram, e o buraco é a lacuna de sempre — o monitor a vê no
-/// registro seguinte que se lê, e o NSF fica degradado. A sondagem depois
-/// do buraco abre o incidente de sempre. Antes, o lote inteiro voltava com
-/// erro a cada volta, e a leitura parava nele.
-#[test]
-fn o_registro_que_nao_se_le_vira_lacuna() {
-    let mut a = Auditoria::nova();
-    let mut m = Motor::novo();
-    a.gravar(do_agente("agent.ping", "", Codigo::Allow, ""));
+/// [`ler_um_lote`] com tudo o que a auditoria tem de novo.
+fn ler_o_lote(m: &mut Motor, a: &Auditoria) -> Vec<Ilegivel> {
+    ler_um_lote(m, a, usize::MAX)
+}
+
+/// Um registro que o NSF não lê, gravado como o kernel o gravaria se o
+/// identificador passasse do teto — que o kernel não grava.
+fn gravar_um_ilegivel(a: &mut Auditoria) -> u64 {
     let acima = "x".repeat(politica::auditoria::MAIOR_AGENTE + 1);
-    let ilegivel = a.gravar(R {
+    a.gravar(R {
         titular: Titular::Administrador,
         agente: &acima,
         chave: None,
@@ -2848,7 +2858,23 @@ fn o_registro_que_nao_se_le_vira_lacuna() {
         recurso: "",
         codigo: Codigo::DenyPolicy,
         detalhe: "",
-    });
+    })
+}
+
+/// Um registro que o NSF não lê — aqui, um identificador acima do teto, que
+/// o kernel não grava — não para a leitura. Ele é o último do lote: a
+/// leitura passa por ele, pelo número, e os outros entram; o buraco é a
+/// lacuna de sempre — o monitor a vê no registro seguinte que se lê, e o
+/// NSF fica degradado. A sondagem depois do buraco abre o incidente de
+/// sempre. Antes do `ebc80a9`, o lote inteiro voltava com erro a cada
+/// volta, e a leitura parava nele; até o lote A3 do #448, a leitura ficava
+/// antes dele, e ele voltava na seguinte, com o que veio depois.
+#[test]
+fn o_registro_que_nao_se_le_vira_lacuna() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    a.gravar(do_agente("agent.ping", "", Codigo::Allow, ""));
+    let ilegivel = gravar_um_ilegivel(&mut a);
     let fora = ler_o_lote(&mut m, &a);
     assert_eq!(
         fora,
@@ -2857,12 +2883,16 @@ fn o_registro_que_nao_se_le_vira_lacuna() {
             motivo: "registro sem agent",
         }]
     );
-    assert_eq!(m.lido(), ilegivel - 1);
+    assert_eq!(
+        m.lido(),
+        ilegivel,
+        "a leitura nao passou pelo registro que nao se le"
+    );
     assert!(m.saude().saudavel(), "{:?}", m.saude());
 
     sondar(&mut a);
     let fora = ler_o_lote(&mut m, &a);
-    assert_eq!(fora.len(), 1);
+    assert!(fora.is_empty(), "o registro que nao se le voltou: {fora:?}");
     assert_eq!(m.lido(), a.seq, "a leitura parou no registro que nao se le");
     assert_eq!(m.contadores.perdidos, 1);
     assert!(
@@ -2881,4 +2911,98 @@ fn o_registro_que_nao_se_le_vira_lacuna() {
             .any(|d| d.regra == Regra::SondagemDePrivilegio)
     });
     assert!(sondagem, "a sondagem depois do buraco nao abriu incidente");
+}
+
+/// Um lote inteiro de registros que não se leem não para a leitura: o
+/// motor passa por eles pelo número, e o buraco é a lacuna de sempre, vista
+/// no registro seguinte que se lê. Antes, `lido` não andava, e o mesmo lote
+/// voltava a cada leitura — o NSF cego até os registros saírem do anel (o
+/// item 3 do lote A3 do #448).
+#[test]
+fn o_lote_que_nao_se_le_nao_para_a_leitura() {
+    const LOTE: usize = 64;
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    a.gravar(do_agente("agent.ping", "", Codigo::Allow, ""));
+    assert!(ler_um_lote(&mut m, &a, LOTE).is_empty());
+    let primeiro = a.seq + 1;
+    for _ in 0..LOTE + 1 {
+        gravar_um_ilegivel(&mut a);
+    }
+    sondar(&mut a);
+    // O primeiro lote: só os que não se leem.
+    let fora = ler_um_lote(&mut m, &a, LOTE);
+    assert_eq!(fora.len(), LOTE);
+    assert_eq!(
+        m.lido(),
+        primeiro + LOTE as u64 - 1,
+        "a leitura parou no lote que nao se le"
+    );
+    // O seguinte: o último que não se lê, e a sondagem.
+    let fora = ler_um_lote(&mut m, &a, LOTE);
+    assert_eq!(fora.len(), 1);
+    assert_eq!(m.lido(), a.seq);
+    assert_eq!(m.contadores.perdidos, LOTE as u64 + 1);
+    let depois = primeiro + LOTE as u64 + 1;
+    let lacunas: Vec<&Vec<u64>> = m
+        .deteccoes()
+        .filter(|d| d.regra == Regra::LacunaNaLeitura)
+        .map(|d| &d.registros)
+        .collect();
+    assert_eq!(lacunas, [&vec![depois]], "o buraco nao virou uma lacuna so");
+}
+
+/// O registro que não se lê e é o primeiro que o motor alcança vira
+/// lacuna, pelo número: o monitor não tinha anterior, e dele ficava só o
+/// aviso do log (o item 3 do lote A3 do #448). Os que se leem depois, sem
+/// buraco entre eles, não viram outra.
+#[test]
+fn o_primeiro_que_nao_se_le_vira_lacuna() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    let primeiro = gravar_um_ilegivel(&mut a);
+    sondar(&mut a);
+    let fora = ler_o_lote(&mut m, &a);
+    assert_eq!(fora.len(), 1);
+    assert_eq!(m.lido(), a.seq);
+    assert_eq!(m.contadores.perdidos, 1);
+    let lacunas: Vec<&Vec<u64>> = m
+        .deteccoes()
+        .filter(|d| d.regra == Regra::LacunaNaLeitura)
+        .map(|d| &d.registros)
+        .collect();
+    assert_eq!(
+        lacunas,
+        [&vec![primeiro + 1]],
+        "o primeiro que nao se le nao virou lacuna"
+    );
+    // Sem nenhum que não se lê, o primeiro que o motor alcança não é
+    // buraco: nenhuma lacuna falsa.
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    sondar(&mut a);
+    ler_o_lote(&mut m, &a);
+    assert_eq!(m.contadores.perdidos, 0);
+}
+
+/// O que não diz o número, ou diz um que a leitura já passou, não anda a
+/// leitura: o motor não adivinha onde ele estava.
+#[test]
+fn o_que_nao_diz_o_numero_nao_anda_a_leitura() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    sondar(&mut a);
+    ler_o_lote(&mut m, &a);
+    let lido = m.lido();
+    for seq in [None, Some(lido), Some(lido - 1)] {
+        let novos = m.ler_lote(
+            Vec::new(),
+            &[Ilegivel {
+                seq,
+                motivo: "registro sem seq",
+            }],
+        );
+        assert_eq!((novos, m.lido()), (0, lido), "{seq:?}");
+    }
+    assert_eq!(m.contadores.perdidos, 0);
 }

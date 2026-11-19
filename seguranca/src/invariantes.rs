@@ -33,6 +33,10 @@ pub enum Violacao {
 #[derive(Clone, Debug, Default)]
 pub struct Monitor {
     ultimo: Option<(u64, [u8; 32], u64)>,
+    /// Sem nenhum registro conferido ainda: o número logo antes do
+    /// primeiro que a leitura alcançou e não leu — ver
+    /// [`Monitor::nao_lido`].
+    antes_do_primeiro: Option<u64>,
 }
 
 impl Monitor {
@@ -44,6 +48,25 @@ impl Monitor {
     /// veio antes não é buraco.
     pub fn comecar_em(&mut self, seq: u64, elo: [u8; 32], ts: u64) {
         self.ultimo = Some((seq, elo, ts));
+        self.antes_do_primeiro = None;
+    }
+
+    /// A leitura alcançou o registro `seq` e não o leu: um texto acima do
+    /// teto, um titular ou um código que o NSF não conhece — ver
+    /// [`crate::evento::lote`].
+    ///
+    /// Com um registro conferido antes, não muda nada: o buraco já se vê a
+    /// partir dele, no seguinte que se ler. Sem nenhum, o buraco começa em
+    /// `seq` — o menor de todos os que não se leram assim —, e o primeiro
+    /// conferido depois o vê como a lacuna de sempre ([`Violacao::Lacuna`]).
+    /// Antes, o ilegível que era o primeiro que o motor lia — no boot, o
+    /// mais velho da janela que o journal repôs — não tinha anterior, e dele
+    /// ficava só o aviso do log (o item 3 do lote A3 do #448).
+    pub fn nao_lido(&mut self, seq: u64) {
+        if self.ultimo.is_none() {
+            let antes = seq.saturating_sub(1);
+            self.antes_do_primeiro = Some(self.antes_do_primeiro.map_or(antes, |a| a.min(antes)));
+        }
     }
 
     /// Confere um registro novo — de sequência maior que a do último.
@@ -65,7 +88,15 @@ impl Monitor {
             if r.ts_ms < ts {
                 v.push(Violacao::TempoVolta { seq: r.seq });
             }
+        } else if let Some(antes) = self.antes_do_primeiro
+            && r.seq > antes + 1
+        {
+            v.push(Violacao::Lacuna {
+                de: antes + 1,
+                ate: r.seq - 1,
+            });
         }
+        self.antes_do_primeiro = None;
         self.ultimo = Some((r.seq, r.elo, r.ts_ms));
         v
     }
@@ -119,6 +150,37 @@ mod testes {
         assert_eq!(m.conferir(&volta), [Violacao::TempoVolta { seq: 6 }]);
         // Começar em um ponto: o que veio antes não é buraco.
         let mut m = Monitor::novo();
+        m.comecar_em(4, c[3].elo, c[3].ts_ms);
+        assert!(m.conferir(&c[4]).is_empty());
+    }
+
+    /// O registro que não se leu antes do primeiro conferido é lacuna, a
+    /// partir do menor deles; depois de um conferido, não muda nada; e
+    /// começar num ponto esquece o que não se leu antes dele (o item 3 do
+    /// lote A3 do #448).
+    #[test]
+    fn o_que_nao_se_le_antes_do_primeiro_e_lacuna() {
+        let c = corrente(6);
+        let mut m = Monitor::novo();
+        m.nao_lido(3);
+        m.nao_lido(2);
+        assert_eq!(m.conferir(&c[3]), [Violacao::Lacuna { de: 2, ate: 3 }]);
+        // Depois do primeiro conferido, o que não se leu não muda nada: o
+        // buraco se vê a partir do último conferido.
+        m.nao_lido(5);
+        assert_eq!(m.conferir(&c[5]), [Violacao::Lacuna { de: 5, ate: 5 }]);
+        // O que não se leu e é logo antes do primeiro conferido, sem
+        // buraco entre os dois: só ele.
+        let mut m = Monitor::novo();
+        m.nao_lido(1);
+        assert_eq!(m.conferir(&c[1]), [Violacao::Lacuna { de: 1, ate: 1 }]);
+        // Sem nada que não se leu, o primeiro conferido não tem anterior:
+        // nenhuma lacuna falsa.
+        let mut m = Monitor::novo();
+        assert!(m.conferir(&c[2]).is_empty());
+        // Começar num ponto esquece o que não se leu antes dele.
+        let mut m = Monitor::novo();
+        m.nao_lido(2);
         m.comecar_em(4, c[3].elo, c[3].ts_ms);
         assert!(m.conferir(&c[4]).is_empty());
     }

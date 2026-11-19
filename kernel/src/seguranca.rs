@@ -74,10 +74,10 @@ pub const INTERVALO_MS: u64 = 1_000;
 pub const ESPERA_MAXIMA_MS: u64 = 60_000;
 
 /// Quantos registros cada `audit.tail` traz.
-const LOTE: u64 = 64;
+pub(crate) const LOTE: u64 = 64;
 
 /// Quantos `audit.tail` uma volta faz, no máximo.
-const LEITURAS_POR_VOLTA: usize = 8;
+pub(crate) const LEITURAS_POR_VOLTA: usize = 8;
 
 /// Quantos datagramas cada `net.observe` traz.
 const DATAGRAMAS: u64 = 16;
@@ -235,11 +235,21 @@ pub fn passo() -> Volta {
                     }
                 }
                 volta.ilegiveis += ilegiveis.len();
-                let (novos, ate) =
-                    com_motor(|m| (m.ler_registros(registros), m.lido())).unwrap_or((0, lido));
+                // A leitura anda pelos que se leem e pelos que não se leem,
+                // pelo número (`Motor::ler_lote`): um lote em que nenhum se
+                // lê — `LOTE` seguidos — não volta igual na leitura
+                // seguinte, e a volta segue, até a cabeça ou o teto de
+                // leituras dela. Antes, `novos == 0` parava a volta ali, o
+                // `LIDO` não andava, e a volta seguinte pedia o mesmo lote:
+                // o NSF ficava cego até os registros saírem do anel (o item
+                // 3 do lote A3 do #448). Para quando a leitura não andou —
+                // nada novo, e nenhum que não se lê com o número que se lê
+                // —: o mesmo lote voltaria igual.
+                let (novos, ate) = com_motor(|m| (m.ler_lote(registros, &ilegiveis), m.lido()))
+                    .unwrap_or((0, lido));
                 LIDO.fetch_max(ate, Ordering::AcqRel);
                 volta.registros += novos;
-                if novos == 0 {
+                if ate <= lido {
                     break;
                 }
             }
