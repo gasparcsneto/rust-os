@@ -15372,6 +15372,18 @@ na parte 1/2 — rodados de novo uma vez, em 18,5 e 41,8 minutos. O
 holdover da bancada de tempo, na parte 3/3: o ARM a -13 ppm (2056 s em
 2056), e o x86 a +6283 ppm (2070 s em 2057), como na CI 520.
 
+A CI 523 (`8cc10a2`, o #455-B) passou 47 de 48: o holdover da bancada de
+tempo, na parte 3/3, com a guarda nova, deu o x86 a -260 ppm (2057 s em
+2057), contra +6283 na CI 522, e o ARM a +0 (2056 s em 2056). O que
+reprovou foi a suíte do ARM, na parte 3/3, num caso só, "vagas: termino,
+colheita, coleta e nascimento ao mesmo tempo", com "nada correu ao mesmo
+tempo" — "360 vitimas, 360 vigiadas, 247 sem vaga; 0 passadas do outro
+coletor": a montagem do caso criava os lançadores antes do segundo
+coletor, eles enchiam as 95 vagas da tabela em menos de meio segundo, e a
+criação do coletor falhava em silêncio. O que o caso confere passou —
+nenhuma morte perdida ou em dobro, nenhum pedido, nenhum zumbi —; a
+montagem foi corrigida no lote A6 (ver "As do lote A6").
+
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na
 508 e 58 na 509 —, e o que sobra até o piso é a ordem da fila, que não se

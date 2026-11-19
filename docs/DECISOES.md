@@ -2016,6 +2016,42 @@ pendência #298.
   ([README](../README.md#decisões-pendentes), "A soma das cotas de
   processos e a cota por sessão").
 
+  O lote A6, [B], fez os achados do adversário e do revisor do lote A5 —
+  os quatro baixos, os dois informativos e as observações de teste — e uma
+  observação do especialista dele, sem autoridade, regra, registro ou
+  semântica de auditoria novos:
+  - no `usuario/mod.rs`, cada carregador e cada passo da carga só aparece
+    no item das funções que o usam — o lançamento e a troca de imagem —, e
+    a entrada de um fio novo, a palavra `extern`, só em `lancar_por`: o
+    `xtask` confere pela estrutura, e não pelo nome. Um `const` com um
+    carregador, ou um fio novo com outros nomes no nível do módulo, eram um
+    segundo caminho de lançamento, sem o gate;
+  - a guarda dos nomes protegidos acusa também o nome nos argumentos de
+    uma macro e no corpo de uma definição, no dono inclusive, o `type`
+    montado numa macro, nos donos, e o `self` renomeado de uma lista do
+    `use`; e, num dono, o `use` que passa por um nome protegido e alcança
+    outro arquivo — `pub(crate) use crate::autorizacao::Lancador::Kernel;`
+    dava a variante aos outros sem a palavra —, com `pub`, ou sem ele num
+    módulo com filhos de fora;
+  - a conferência da imagem limita a soma das páginas dos segmentos a 64
+    MiB, o espaço do programa no mapa do usuário: a carga do `exec`, que
+    roda dentro da chamada e mascarada, zerava até quase 256 MiB. Tirar a
+    carga do `exec` de dentro da chamada fica para um lote seguinte; o
+    teto não é contrato, e fica muito acima dos programas de verdade;
+  - no NSF, o nascimento inteiro só se lê num `ALLOW`, como o cortado: um
+    `ERROR` que dissesse `processo N lancado` forjava a proveniência de N.
+    O registro não muda: muda a leitura. A aresta `Executa` que o grafo liga
+    ao processo que ele já esqueceu pelo teto, sem a guarda da execução de
+    uma decisão de antes, fica: não é uma guarda de uma linha, e não muda a
+    proveniência de ninguém;
+  - a suíte confere o motivo de duas recusas da conferência que as
+    mutações EL6 e PG3 mudavam sem nada reprovar, e o de cada avaria de
+    `elf: recusa imagens invalidas`, com a da tabela fora da imagem.
+
+  Dois casos novos, um reforçado, seis testes no hospedeiro e as
+  mutações ([README](../README.md#decisões-pendentes), "A soma das cotas
+  de processos e a cota por sessão").
+
 ### I7
 
 **O resumo sem chave dos parâmetros, no console sem ninguém** — o I7 da

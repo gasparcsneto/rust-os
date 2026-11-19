@@ -511,6 +511,7 @@ continua sendo entrada não confiável.
 | o maior executável | 1 MiB |
 | as entradas da tabela de segmentos de um executável | 64, de todos os tipos; carregáveis, 8 |
 | as notas de um executável, somadas | 4 KiB (a do manifesto, até 1044 bytes) |
+| as páginas dos segmentos carregáveis de um executável, somadas | 64 MiB — o espaço do programa no mapa do usuário, até o começo do que `mapear` dá; a pilha, de 64 KiB, é à parte |
 
 Cada operação paga o orçamento dela: as de dados, o do plano de dados; as
 de controle, a taxa do papel. O aviso não paga nada, porque não pede nada.
@@ -531,7 +532,8 @@ de controle, a taxa do papel. O aviso não paga nada, porque não pede nada.
 3. **Confira**: `cargo xtask sdk-conferir <elf>` diz o nome e as
    permissões do manifesto, o tamanho contra o teto de leitura do kernel,
    o selo, se há, e o resumo BLAKE2s que a auditoria vai citar. Os tetos
-   da tabela de segmentos e das notas ([As cotas](#as-cotas)) ele ainda
+   da tabela de segmentos, das notas e das páginas da imagem
+   ([As cotas](#as-cotas)) ele ainda
    não confere: só a carga os recusa.
 4. **Sele**: `cargo xtask selar <privada do editor> <elf> [--saida
    <arquivo>]`. A ferramenta lê só a chave do editor que recebe — nenhuma

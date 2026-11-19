@@ -130,7 +130,11 @@ pontos onde acontece — não num canal paralelo:
   lugar, o manifesto que não se lê —, conferida antes de o fio nascer,
   desde o lote A4, e com teto desde o lote A5: a tabela de segmentos de
   até 64 entradas, as notas de até 4 KiB, somadas, e as páginas de todo
-  segmento dentro do espaço do usuário). A imagem que não se mapeia no
+  segmento dentro do espaço do usuário; e, desde o lote A6, as páginas
+  dos segmentos, somadas, até 64 MiB, o espaço do programa no mapa do
+  usuário: a carga do `exec`, que roda dentro da chamada, com as
+  interrupções mascaradas, zerava o que a imagem pedisse). A imagem que
+  não se mapeia no
   fio novo, depois do
   nascimento — a memória do espaço novo, dos segmentos, da pilha —,
   grava o mesmo desfecho depois do `processo N lancado`, em nome de quem
@@ -305,7 +309,11 @@ larguras diferentes do mesmo programa não são uma troca: o processo fica
 com a de 16, sem aresta (o lote B2). Um processo nasce uma vez só
 na época — um segundo nascimento do mesmo fio não muda o criador nem a
 autoridade —, e um `filho N` com N até o fio do pai não é nascimento: é o
-pedaço do número de outro processo, num registro cortado. E a execução que
+pedaço do número de outro processo, num registro cortado. E o `processo N
+lancado` só é nascimento num `ALLOW`, inteiro ou cortado: um `ERROR` ou uma
+recusa que o diga — o desfecho de um lançamento que não aconteceu — é uma
+execução, ou uma decisão, e não dá o filho a quem a gravou (o lote A6). E a
+execução que
 cita uma decisão mais velha que o registro que pôs o programa de agora no
 processo não o troca, nem liga aresta
 (`seguranca::grafo::Grafo::executa_no_registro`, o lote A5): o desfecho
