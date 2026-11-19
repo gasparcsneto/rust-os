@@ -230,10 +230,12 @@ static CICLOS_POR_DECREMENTO: AtomicU64 = AtomicU64::new(0);
 /// antes do prazo.
 static TIQUES: AtomicU64 = AtomicU64::new(0);
 
-/// Só para a suíte: quantos disparos do timer acharam o prazo do núcleo
-/// ainda no futuro — ver [`antecipados_de_teste`].
-#[cfg(feature = "modo-teste")]
-static ANTECIPADOS_DE_TESTE: AtomicU64 = AtomicU64::new(0);
+/// Quantos disparos do timer, em todos os núcleos, acharam o prazo do
+/// núcleo ainda no futuro, e só rearmaram ([`chegou_o_prazo`]). A
+/// conferência contra o PIT os conta também: uma conversão do TSC para o
+/// APIC curta demais — a razão alta — não muda os tiques, e só aparece
+/// aqui.
+static ANTECIPADOS: AtomicU64 = AtomicU64::new(0);
 
 /// Só para a suíte: o TSC que o [`armar_o_primeiro`] de cada núcleo leu, e o
 /// primeiro prazo que ele calculou — ver [`primeiro_prazo_de_teste`]. Um bit
@@ -458,24 +460,28 @@ fn calibrar(lapic: &Lapic) -> Option<(u32, u64)> {
 ///
 /// # O que ela confere agora
 ///
-/// O período é o da grade no TSC ([`PRAZO`]): a conferência pega um erro de
-/// unidade na frequência do TSC, ou na conversão para o APIC — um fator de
-/// dezesseis, ou de mil —, como pegava na do APIC.
+/// O período é o da grade no TSC ([`PRAZO`]): os tiques pegam um erro de
+/// unidade na frequência do TSC, ou na conversão para o APIC para o lado
+/// longo — as contagens grandes demais perdem tiques —, como pegavam na do
+/// APIC. O lado curto da conversão — a razão alta, as contagens pequenas
+/// demais — não muda os tiques: cada disparo antes do prazo só rearma
+/// ([`chegou_o_prazo`]). Ele aparece nos disparos antes do prazo
+/// ([`ANTECIPADOS`]), e a conferência recusa a tentativa com mais de quatro
+/// por tique, o teto do caso da suíte: com a razão dezesseis vezes alta, uns
+/// 24 por tique, e o boot passava com eles. A tentativa seguinte calibra de
+/// novo; a razão alta sem defeito, de uma parada do hospedeiro no fim da
+/// janela da calibração, não se repete.
 ///
-/// Devolve `true` se a taxa observada bate com a pedida dentro da tolerância.
+/// O veredito sai dos números da tentativa ([`julgar_a_conferencia`]), que
+/// vão para o log do boot quando ela aprova.
+///
+/// Devolve `true` se a taxa observada bate com a pedida dentro da tolerância,
+/// e os disparos antes do prazo não passam do teto.
 fn conferir_contra_o_pit(hz_pedido: u32) -> bool {
     /// Quantos disparos do PIT observar. Vinte, a 100 Hz, são duzentos
     /// milissegundos — tempo para o APIC disparar vinte vezes e o erro de
     /// arredondamento de uma delas não dominar a conta.
     const DISPAROS_DO_PIT: u64 = 20;
-
-    /// Quanto a taxa observada pode se afastar da pedida, em porcento.
-    ///
-    /// Vinte e cinco é frouxo de propósito. O que precisa ser pego é um erro
-    /// de unidade — um fator de dezesseis, ou de mil —, não um desvio de
-    /// alguns por cento entre dois osciladores emulados. Uma tolerância
-    /// apertada aqui trocaria um defeito real por um boot instável.
-    const TOLERANCIA: u64 = 25;
 
     let hz_do_pit = crate::tempo::frequencia_hz() as u64;
     if hz_do_pit == 0 || hz_pedido == 0 {
@@ -486,32 +492,144 @@ fn conferir_contra_o_pit(hz_pedido: u32) -> bool {
 
     let pit_antes = crate::irq::contagem_da_linha(linha_do_pit);
     let apic_antes = TIQUES.load(Ordering::Relaxed);
+    let antecipados_antes = ANTECIPADOS.load(Ordering::Relaxed);
 
-    let Some(do_pit) = esperar_disparos(linha_do_pit, pit_antes, DISPAROS_DO_PIT) else {
+    let Some(pit) = esperar_disparos(linha_do_pit, pit_antes, DISPAROS_DO_PIT) else {
         return false;
     };
-    let do_apic = TIQUES.load(Ordering::Relaxed) - apic_antes;
+    let conferencia = Conferencia {
+        pit,
+        tiques: TIQUES.load(Ordering::Relaxed) - apic_antes,
+        antecipados: ANTECIPADOS.load(Ordering::Relaxed) - antecipados_antes,
+    };
+    #[cfg(feature = "modo-teste")]
+    for (lugar, valor) in CONFERENCIA_DE_TESTE.iter().zip([
+        conferencia.pit,
+        conferencia.tiques,
+        conferencia.antecipados,
+    ]) {
+        lugar.store(valor, Ordering::SeqCst);
+    }
 
-    // Quantos disparos do APIC caberiam nos do PIT que acabamos de observar,
-    // se as duas taxas fossem as pedidas.
-    let esperados = hz_pedido as u64 * do_pit / hz_do_pit;
+    match julgar_a_conferencia(conferencia, hz_pedido, hz_do_pit) {
+        Ok(()) => {
+            crate::log_info!(
+                "irq",
+                "conferencia contra o PIT: {} tique(s) do APIC e {} disparo(s) antes do prazo em {} disparo(s) do PIT",
+                conferencia.tiques,
+                conferencia.antecipados,
+                conferencia.pit
+            );
+            true
+        }
+        Err(Recusa::SemMedida) => false,
+        Err(Recusa::Taxa { esperados, desvio }) => {
+            crate::log_warn!(
+                "irq",
+                "o APIC disparou {} vezes onde {} eram esperadas ({}% de desvio)",
+                conferencia.tiques,
+                esperados,
+                desvio
+            );
+            false
+        }
+        Err(Recusa::Antecipados) => {
+            crate::log_warn!(
+                "irq",
+                "o APIC disparou {} vezes antes do prazo em {} tiques: a conversao do TSC para o APIC esta curta",
+                conferencia.antecipados,
+                conferencia.tiques
+            );
+            false
+        }
+    }
+}
+
+/// O que uma conferência contra o PIT viu ([`conferir_contra_o_pit`]): os
+/// disparos do PIT e, no mesmo intervalo, os tiques do APIC e os disparos
+/// dele antes do prazo, em todos os núcleos — no boot, só no primeiro.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Conferencia {
+    /// Os disparos do PIT, pela contagem da linha dele.
+    pub pit: u64,
+    /// Os tiques do APIC: os disparos no prazo ou depois ([`TIQUES`]).
+    pub tiques: u64,
+    /// Os disparos do APIC antes do prazo ([`ANTECIPADOS`]).
+    pub antecipados: u64,
+}
+
+/// Por que uma conferência reprovou — ver [`julgar_a_conferencia`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recusa {
+    /// Nenhum tique do APIC caberia nos disparos do PIT observados: não há
+    /// taxa a comparar.
+    SemMedida,
+    /// Os tiques do APIC longe da taxa pedida: quantos eram `esperados`, e o
+    /// `desvio`, em porcento, acima da tolerância.
+    Taxa { esperados: u64, desvio: u64 },
+    /// Disparos antes do prazo demais por tique: a conversão do TSC para o
+    /// APIC curta.
+    Antecipados,
+}
+
+/// Quanto a taxa observada pode se afastar da pedida, em porcento.
+///
+/// Vinte e cinco é frouxo de propósito. O que precisa ser pego é um erro de
+/// unidade — um fator de dezesseis, ou de mil —, não um desvio de alguns por
+/// cento entre dois osciladores emulados. Uma tolerância apertada aqui
+/// trocaria um defeito real por um boot instável.
+const TOLERANCIA_DA_TAXA: u64 = 25;
+
+/// Quantos disparos antes do prazo, por tique, a conferência tolera — o teto
+/// do caso `smp: o tique do x86 vem pela grade comum do TSC`. O código certo
+/// dá zero.
+pub const ANTECIPADOS_POR_TIQUE: u64 = 4;
+
+/// O veredito de uma conferência contra o PIT, pelos números dela: os tiques
+/// do APIC na taxa pedida (`hz_pedido`), contra os disparos do PIT na dele
+/// (`hz_do_pit`), dentro da tolerância; e os disparos antes do prazo até o
+/// teto por tique. Pura: a suíte a confere sem o PIT, que depois do boot
+/// está mascarado.
+pub fn julgar_a_conferencia(c: Conferencia, hz_pedido: u32, hz_do_pit: u64) -> Result<(), Recusa> {
+    // Quantos tiques do APIC caberiam nos disparos do PIT observados, se as
+    // duas taxas fossem as pedidas.
+    let esperados = u64::from(hz_pedido)
+        .saturating_mul(c.pit)
+        .checked_div(hz_do_pit)
+        .unwrap_or(0);
     if esperados == 0 {
-        return false;
+        return Err(Recusa::SemMedida);
     }
-
-    let desvio = do_apic.abs_diff(esperados) * 100 / esperados;
-    if desvio > TOLERANCIA {
-        crate::log_warn!(
-            "irq",
-            "o APIC disparou {} vezes onde {} eram esperadas ({}% de desvio)",
-            do_apic,
-            esperados,
-            desvio
-        );
-        return false;
+    let desvio = c.tiques.abs_diff(esperados).saturating_mul(100) / esperados;
+    if desvio > TOLERANCIA_DA_TAXA {
+        return Err(Recusa::Taxa { esperados, desvio });
     }
+    // A conversão curta: os tiques certos, e disparos antes do prazo demais
+    // entre eles — ver [`conferir_contra_o_pit`].
+    if c.antecipados > c.tiques.saturating_mul(ANTECIPADOS_POR_TIQUE) {
+        return Err(Recusa::Antecipados);
+    }
+    Ok(())
+}
 
-    true
+/// Só para a suíte: os números da última conferência contra o PIT — os
+/// campos de [`Conferencia`], na ordem —, escritos no primeiro núcleo, no
+/// boot, antes de os outros acordarem. Ver [`conferencia_de_teste`].
+#[cfg(feature = "modo-teste")]
+static CONFERENCIA_DE_TESTE: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+
+/// Só para a suíte: os números da última conferência contra o PIT — a que
+/// aprovou o APIC, quando ele é o timer —, ou zeros se nenhuma chegou a
+/// contar.
+#[cfg(feature = "modo-teste")]
+pub fn conferencia_de_teste() -> Conferencia {
+    let [pit, tiques, antecipados] =
+        core::array::from_fn(|i| CONFERENCIA_DE_TESTE[i].load(Ordering::SeqCst));
+    Conferencia {
+        pit,
+        tiques,
+        antecipados,
+    }
 }
 
 /// Liga o APIC local e programa o timer dele na frequência pedida.
@@ -829,10 +947,8 @@ pub fn chegou_o_prazo() -> bool {
     let chegou = (super::ciclos().wrapping_sub(prazo) as i64) >= 0;
     if chegou {
         TIQUES.fetch_add(1, Ordering::Relaxed);
-    }
-    #[cfg(feature = "modo-teste")]
-    if !chegou {
-        ANTECIPADOS_DE_TESTE.fetch_add(1, Ordering::SeqCst);
+    } else {
+        ANTECIPADOS.fetch_add(1, Ordering::Relaxed);
     }
     chegou
 }
@@ -889,7 +1005,7 @@ pub fn prazo_de_teste() -> u64 {
 /// do prazo do núcleo e só rearmaram.
 #[cfg(feature = "modo-teste")]
 pub fn antecipados_de_teste() -> u64 {
-    ANTECIPADOS_DE_TESTE.load(Ordering::SeqCst)
+    ANTECIPADOS.load(Ordering::SeqCst)
 }
 
 /// Só para a suíte: quantos disparos do timer, em todos os núcleos e desde o

@@ -28212,6 +28212,10 @@ fn smp_o_prazo_do_timer_do_arm() -> Resultado {
 /// - os disparos antes do prazo que a conversão dá sozinha, desde o boot,
 ///   não passam de quatro por tique: um erro de unidade na razão do TSC
 ///   para o APIC só aparece neles;
+/// - a conferência contra o PIT, no boot, recusa a tentativa com mais de
+///   quatro por tique, e a que aprovou o APIC não os tinha — o veredito
+///   conferido pelos números dela e por números fixos
+///   (`apic::julgar_a_conferencia`);
 /// - um disparo antes do prazo não é tique. O caso o provoca no núcleo da
 ///   suíte, logo depois de um tique, com o prazo dele a quase um período: o
 ///   APIC dispara já (`apic::antecipar_de_teste`), e o handler só rearma —
@@ -28222,7 +28226,8 @@ fn smp_o_prazo_do_timer_do_arm() -> Resultado {
 /// antes do prazo andaria o relógio num ponto que ainda não chegou, e
 /// contaria o mesmo ponto de novo quando ele chegasse. No x86 a contagem do
 /// APIC é a distância no TSC convertida, e a conversão erra: o disparo antes
-/// do prazo acontece de verdade, e não só no caso.
+/// do prazo pode acontecer de verdade — no hardware, ou com a razão medida
+/// alta —, e não só no caso.
 ///
 /// Uma parada do hospedeiro no meio pode passar do prazo — o disparo
 /// provocado já não seria antes dele —: o caso tenta de novo, até cinco
@@ -28252,19 +28257,19 @@ fn smp_o_tique_do_x86_vem_pela_grade_comum_do_tsc() -> Resultado {
     }
     primeiros_prazos_na_grade("x86", apic::primeiro_prazo_de_teste, origem, intervalo)?;
     // Os disparos antes do prazo que a conversão dá sozinha, desde o boot.
-    // Com a razão da calibração e a margem de um milésimo, nenhum: zero em
-    // todas as rodadas do #455-B, e zero até sem a margem. Um erro de unidade
-    // na razão — os ciclos do TSC por decremento dezesseis vezes a mais — põe
+    // Com a razão da calibração e a margem de 1/1024, nenhum: zero em todas
+    // as rodadas do #455-B, e zero até sem a margem. Um erro de unidade na
+    // razão — os ciclos do TSC por decremento dezesseis vezes a mais — põe
     // dezenas deles em cada tique (medido: 29 021 em 1172 tiques, em
-    // depuração), e nem o relógio nem a conferência contra o PIT o sentem:
-    // eles contam os tiques. Cada disparo antes do prazo cobre só uma parte
-    // da distância, e quanto mais lento o hospedeiro, menos deles cabem num
-    // período: o teto fica bem abaixo dos 25 por tique da medida. A razão
-    // alta sem defeito viria de uma parada do hospedeiro entre as duas
-    // leituras do fim da janela da calibração — um intervalo de
-    // microssegundos —, e só uma parada de dezenas de milissegundos ali a
-    // poria perto do teto.
-    const ANTECIPADOS_POR_TIQUE: u64 = 4;
+    // depuração), e o relógio não o sente: ele conta os tiques. A
+    // conferência contra o PIT os conta no boot, e recusa a tentativa acima
+    // deste mesmo teto (`apic::conferir_contra_o_pit`); este caso, desde o
+    // boot. Cada disparo antes do prazo cobre só uma parte da distância, e
+    // quanto mais lento o hospedeiro, menos deles cabem num período: o teto
+    // fica bem abaixo dos 25 por tique da medida. A razão alta sem defeito
+    // viria de uma parada do hospedeiro entre as duas leituras do fim da
+    // janela da calibração — um intervalo de microssegundos —, e só uma
+    // parada de dezenas de milissegundos ali a poria perto do teto.
     let (antecipados, tiques) = (apic::antecipados_de_teste(), apic::tiques_de_teste());
     crate::log_info!(
         "teste",
@@ -28275,11 +28280,12 @@ fn smp_o_tique_do_x86_vem_pela_grade_comum_do_tsc() -> Resultado {
     if tiques == 0 {
         return Err("o timer do x86 nao contou nenhum tique");
     }
-    if antecipados > tiques.saturating_mul(ANTECIPADOS_POR_TIQUE) {
+    if antecipados > tiques.saturating_mul(apic::ANTECIPADOS_POR_TIQUE) {
         return Err(
             "os disparos antes do prazo passam de 4 por tique: a conversao do TSC para o APIC erra demais",
         );
     }
+    conferencia_do_boot_do_x86()?;
     let eu = crate::arch::sem_interrupcoes(crate::nucleos::atual);
     let tsc = crate::arch::ciclos;
     // O pulso deste núcleo mudar de `de`, com um segundo de teto no contador,
@@ -28368,6 +28374,71 @@ fn smp_o_tique_do_x86_vem_pela_grade_comum_do_tsc() -> Resultado {
         return Ok(());
     }
     Err("o hospedeiro passou do prazo em todas as tentativas: o caso nao mediu nada")
+}
+
+/// A conferência do timer do x86 contra o PIT, no boot (o #455-C), pelo
+/// caso `smp: o tique do x86 vem pela grade comum do TSC...`: a última
+/// tentativa — a que aprovou o APIC, quando ele é o timer — passa no
+/// veredito pelos números dela, e o veredito, com números fixos, aprova na
+/// taxa e até quatro disparos antes do prazo por tique, e recusa acima
+/// deles, fora da tolerância da taxa, ou sem medida.
+#[cfg(target_arch = "x86_64")]
+fn conferencia_do_boot_do_x86() -> Resultado {
+    use crate::arch::atual::apic::{self, Conferencia, Recusa};
+    let hz = crate::tempo::frequencia_hz();
+    let conferencia = apic::conferencia_de_teste();
+    crate::log_info!(
+        "teste",
+        "x86: na conferencia contra o PIT do boot, {} tique(s) do APIC e {} disparo(s) antes do prazo em {} disparo(s) do PIT",
+        conferencia.tiques,
+        conferencia.antecipados,
+        conferencia.pit
+    );
+    if apic::pronto() && apic::julgar_a_conferencia(conferencia, hz, u64::from(hz)) != Ok(()) {
+        return Err("o boot aceitou o APIC com a conferencia contra o PIT reprovada");
+    }
+    let c = |pit, tiques, antecipados| Conferencia {
+        pit,
+        tiques,
+        antecipados,
+    };
+    for (conferencia, esperado) in [
+        (c(20, 20, 0), Ok(())),
+        (c(20, 20, 80), Ok(())),
+        (c(20, 20, 81), Err(Recusa::Antecipados)),
+        // A razão dezesseis vezes alta: uns 24 por tique.
+        (c(20, 20, 480), Err(Recusa::Antecipados)),
+        (c(20, 25, 0), Ok(())),
+        (
+            c(20, 26, 0),
+            Err(Recusa::Taxa {
+                esperados: 20,
+                desvio: 30,
+            }),
+        ),
+        (c(20, 15, 0), Ok(())),
+        (
+            c(20, 14, 0),
+            Err(Recusa::Taxa {
+                esperados: 20,
+                desvio: 30,
+            }),
+        ),
+        (c(0, 0, 0), Err(Recusa::SemMedida)),
+    ] {
+        let veredito = apic::julgar_a_conferencia(conferencia, 100, 100);
+        if veredito != esperado {
+            crate::log_error!(
+                "teste",
+                "a conferencia {:?} deu {:?}, e nao {:?}",
+                conferencia,
+                veredito,
+                esperado
+            );
+            return Err("o veredito da conferencia contra o PIT nao e o esperado");
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
