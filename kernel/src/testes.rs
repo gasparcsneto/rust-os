@@ -27668,11 +27668,20 @@ fn smp_todos_os_nucleos_ligam() -> Resultado {
 /// ela é deste.
 fn smp_o_relogio_anda_uma_vez_por_tique() -> Resultado {
     esperar_ticks(10);
-    let relogio_antes = crate::tempo::ticks();
-    let antes: [u64; crate::nucleos::MAX_NUCLEOS] = core::array::from_fn(tiques_do_nucleo);
+    // As pontas mascaradas, com os pulsos por fora do relógio: no começo
+    // antes dele, no fim depois — ver [`Janela`]. O fio da suíte é fixo no
+    // primeiro núcleo, e o pulso dele não anda entre as leituras.
+    let (antes, relogio_antes) = crate::arch::sem_interrupcoes(|| {
+        let antes: [u64; crate::nucleos::MAX_NUCLEOS] = core::array::from_fn(tiques_do_nucleo);
+        (antes, crate::tempo::ticks())
+    });
     esperar_ticks(50);
-    let relogio = crate::tempo::ticks() - relogio_antes;
-    let primeiro = tiques_do_nucleo(0) - antes[0];
+    let (relogio, depois) = crate::arch::sem_interrupcoes(|| {
+        let relogio = crate::tempo::ticks() - relogio_antes;
+        let depois: [u64; crate::nucleos::MAX_NUCLEOS] = core::array::from_fn(tiques_do_nucleo);
+        (relogio, depois)
+    });
+    let primeiro = depois[0] - antes[0];
 
     crate::log_info!(
         "teste",
@@ -27686,7 +27695,7 @@ fn smp_o_relogio_anda_uma_vez_por_tique() -> Resultado {
         return Err("o relogio do sistema nao anda junto com o timer do primeiro nucleo");
     }
     for i in nucleos_secundarios() {
-        let andou = tiques_do_nucleo(i) - antes[i];
+        let andou = depois[i] - antes[i];
         if andou < relogio / 2 || andou > relogio * 2 {
             crate::log_error!(
                 "teste",
@@ -27799,6 +27808,80 @@ fn periodos_em(ciclos: u64) -> u64 {
     u64::try_from(u128::from(ciclos) * timer / hz).unwrap_or(u64::MAX)
 }
 
+/// A janela dos casos que comparam o pulso de um núcleo com o relógio — que
+/// os outros núcleos andam — ou, com um núcleo só, com os períodos do
+/// contador: as três leituras de cada ponta, com o núcleo mascarado e o
+/// pulso por fora. No começo, o pulso, o contador e o relógio; no fim, o
+/// relógio, o contador e o pulso.
+///
+/// # O pulso por fora, mascarado
+///
+/// Mascarado, nada deste núcleo roda entre as leituras de uma ponta: nem o
+/// tique dele, nem outro fio no lugar do da suíte — a troca de fio vem do
+/// tique. Sobra a parada do núcleo pelo hospedeiro, que a máscara não
+/// impede: nela o pulso deste núcleo não anda, e o relógio — pelos outros
+/// núcleos — e o contador andam. O relógio, a régua com vários núcleos, é
+/// lido por último no começo e primeiro no fim: uma parada entre duas
+/// leituras de uma ponta fica fora da janela dele, e o pulso ganha no
+/// máximo o disparo que ficou pendente, quando a máscara do começo cai. Na
+/// ordem de antes — no fim, o pulso lido antes do relógio, sem máscara —,
+/// uma parada de uns 30 ms entre as duas leituras punha três avanços do
+/// relógio na janela dele e nenhum na do pulso, e o caso dos 35 ms, com
+/// folga de dois, reprovava sem defeito (o achado 1 do adversário do
+/// #455-B). Com um núcleo só a régua é o contador, lido entre os dois, e o
+/// relógio para junto com o núcleo.
+///
+/// A ordem só cuida das pontas. Dentro da janela, uma parada deste núcleo
+/// pesa em qualquer ordem — o pulso perde os tiques dela, menos o pendente,
+/// e o relógio não —, e é a folga de cada caso que a cobre.
+#[derive(Clone, Copy)]
+struct Janela {
+    eu: usize,
+    pulso: u64,
+    contador: u64,
+    relogio: u64,
+}
+
+/// O que andou numa [`Janela`].
+struct Medida {
+    pulso: u64,
+    relogio: u64,
+    periodos: u64,
+}
+
+impl Janela {
+    /// O começo: o pulso do núcleo `eu` — o da suíte —, o contador e o
+    /// relógio, nessa ordem e mascarado.
+    fn abrir(eu: usize) -> Janela {
+        crate::arch::sem_interrupcoes(|| {
+            let pulso = tiques_do_nucleo(eu);
+            let contador = crate::arch::ciclos();
+            let relogio = crate::tempo::ticks();
+            Janela {
+                eu,
+                pulso,
+                contador,
+                relogio,
+            }
+        })
+    }
+
+    /// O fim: o relógio, os períodos do contador e o pulso desde o começo,
+    /// nessa ordem e mascarado.
+    fn fechar(self) -> Medida {
+        crate::arch::sem_interrupcoes(|| {
+            let relogio = crate::tempo::ticks() - self.relogio;
+            let periodos = periodos_em(crate::arch::ciclos().wrapping_sub(self.contador));
+            let pulso = tiques_do_nucleo(self.eu) - self.pulso;
+            Medida {
+                pulso,
+                relogio,
+                periodos,
+            }
+        })
+    }
+}
+
 /// O pulso não perde tique com o núcleo mascarado em trechos de 6 ms — mais
 /// da metade do período de 10 ms, e menos de um inteiro —, separados por
 /// janelas abertas de meio milissegundo, por cinquenta períodos.
@@ -27845,20 +27928,21 @@ fn smp_o_pulso_nao_perde_tique_mascarado_em_trechos() -> Resultado {
     let eu = crate::arch::sem_interrupcoes(crate::nucleos::atual);
     let (trecho, aberta) = (ciclos_em_us(TRECHO_US), ciclos_em_us(ABERTA_US));
     let duracao = ciclos_em_us(PERIODOS * 1_000_000 / hz_do_timer);
-    // A janela começa quieta, como a do caso do relógio.
+    // A janela começa quieta, como a do caso do relógio, e as pontas são
+    // lidas com o pulso por fora — ver [`Janela`].
     esperar_ticks(10);
-    let relogio_antes = crate::tempo::ticks();
-    let pulso_antes = tiques_do_nucleo(eu);
-    let inicio = crate::arch::ciclos();
+    let janela = Janela::abrir(eu);
     let mut trechos = 0u64;
-    while crate::arch::ciclos().wrapping_sub(inicio) < duracao {
+    while crate::arch::ciclos().wrapping_sub(janela.contador) < duracao {
         crate::arch::sem_interrupcoes(|| girar_por_ciclos(trecho));
         girar_por_ciclos(aberta);
         trechos += 1;
     }
-    let periodos = periodos_em(crate::arch::ciclos().wrapping_sub(inicio));
-    let relogio = crate::tempo::ticks() - relogio_antes;
-    let pulso = tiques_do_nucleo(eu) - pulso_antes;
+    let Medida {
+        pulso,
+        relogio,
+        periodos,
+    } = janela.fechar();
     crate::log_info!(
         "teste",
         "o nucleo {} mascarado em {} trechos de 6 ms: o relogio andou {}, o pulso dele {}, o contador diz {} periodos",
@@ -27907,7 +27991,9 @@ fn smp_o_pulso_nao_perde_tique_mascarado_em_trechos() -> Resultado {
 /// O ritmo da grade, nos períodos seguintes, se mede com a régua do caso
 /// `smp: o pulso nao perde tique com o nucleo mascarado em trechos de 6
 /// ms`, e pelo mesmo motivo: com vários núcleos, o relógio na mesma janela;
-/// com um só, os períodos do contador.
+/// com um só, os períodos do contador. As pontas dessa janela são lidas com
+/// o pulso por fora ([`Janela`]): o fim lia o pulso antes do relógio, e uma
+/// parada de uns 30 ms entre as duas leituras reprovava o caso sem defeito.
 fn smp_mascarado_por_mais_de_um_periodo_o_timer_volta_sem_rajada() -> Resultado {
     const MASCARADO_US: u64 = 35_000;
     const LOGO_DEPOIS_US: u64 = 3_000;
@@ -27927,14 +28013,15 @@ fn smp_mascarado_por_mais_de_um_periodo_o_timer_volta_sem_rajada() -> Resultado 
         (antes, tiques_do_nucleo(eu) - antes)
     });
     girar_por_ciclos(ciclos_em_us(LOGO_DEPOIS_US));
-    let logo_depois = tiques_do_nucleo(eu) - antes;
-    let meio = tiques_do_nucleo(eu);
-    let relogio_no_meio = crate::tempo::ticks();
-    let inicio = crate::arch::ciclos();
+    // Os períodos seguintes, com o pulso por fora — ver [`Janela`].
+    let janela = Janela::abrir(eu);
+    let logo_depois = janela.pulso - antes;
     girar_por_ciclos(ciclos_em_us(PERIODOS_DEPOIS * 1_000_000 / hz_do_timer));
-    let periodos = periodos_em(crate::arch::ciclos().wrapping_sub(inicio));
-    let seguintes = tiques_do_nucleo(eu) - meio;
-    let relogio_nos_seguintes = crate::tempo::ticks() - relogio_no_meio;
+    let Medida {
+        pulso: seguintes,
+        relogio: relogio_nos_seguintes,
+        periodos,
+    } = janela.fechar();
     let relogio = crate::tempo::ticks() - relogio_antes;
     crate::log_info!(
         "teste",
@@ -28350,6 +28437,13 @@ fn mascarar_um_trecho_do_adversario(x: &mut u64) {
 /// com todos os núcleos mascarados ao mesmo tempo, é o que se espera, e não
 /// se confere.
 ///
+/// Para isso o contador é lido por fora das outras leituras: antes do
+/// relógio e dos pulsos, no começo, e depois deles, no fim. Lido por dentro,
+/// uma parada deste núcleo entre a leitura do contador e a do relógio — o
+/// hospedeiro que tira a vCPU, um handler longo, outro fio no quantum —
+/// deixava fora dos períodos os avanços que os outros núcleos faziam nela, e
+/// com uns 30 ms o caso reprovava sem defeito.
+///
 /// O pulso de cada núcleo também não passa do contador: com o pulo dos
 /// perdidos, um núcleo não conta mais tiques que os prazos da grade.
 fn smp_o_relogio_nao_passa_do_contador_com_os_nucleos_mascarados() -> Resultado {
@@ -28395,17 +28489,19 @@ fn smp_o_relogio_nao_passa_do_contador_com_os_nucleos_mascarados() -> Resultado 
         let _ = esperar_ate(|| VIVOS.load(SeqCst) == 0, 300);
         return Err("os fios que mascaram os outros nucleos nao comecaram");
     }
+    // O contador por fora das outras leituras: antes delas aqui, e depois
+    // delas no fim — ver "Só para cima".
+    let inicio = crate::arch::ciclos();
     let pulsos_antes: [u64; crate::nucleos::MAX_NUCLEOS] = core::array::from_fn(tiques_do_nucleo);
     let relogio_antes = crate::tempo::ticks();
-    let inicio = crate::arch::ciclos();
     let duracao = ciclos_em_us(SEGUNDOS * 1_000_000);
     let mut x = 0xD1B5_4A32_D192_ED03u64;
     while crate::arch::ciclos().wrapping_sub(inicio) < duracao {
         mascarar_um_trecho_do_adversario(&mut x);
     }
-    let periodos = periodos_em(crate::arch::ciclos().wrapping_sub(inicio));
     let relogio = crate::tempo::ticks() - relogio_antes;
     let pulsos_depois: [u64; crate::nucleos::MAX_NUCLEOS] = core::array::from_fn(tiques_do_nucleo);
+    let periodos = periodos_em(crate::arch::ciclos().wrapping_sub(inicio));
     PARAR.store(true, SeqCst);
     let parados = esperar_ate(|| VIVOS.load(SeqCst) == 0, 300);
     let ligados = crate::nucleos::mascara_dos_ligados();
