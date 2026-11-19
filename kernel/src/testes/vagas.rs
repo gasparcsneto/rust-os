@@ -949,8 +949,9 @@ fn sem_zumbis(_: u64) -> bool {
 /// segundo, e o fio do caso que nascesse depois deles ficava sem vaga. Na
 /// CI 523, no aarch64, foi o outro coletor: a recusa ia em silêncio, ele
 /// não rodou nenhuma passada, e o caso reprovou com "nada correu ao mesmo
-/// tempo" — o que ele confere tinha passado. A recusa de um fio do caso é
-/// agora erro dele: para tudo, espera os que nasceram e falha com o motivo.
+/// tempo" — o que ele conferiu antes disso tinha passado. A recusa de um
+/// fio do caso é agora erro dele: para tudo, espera os que nasceram e falha
+/// com o motivo.
 pub(super) fn vagas_tudo_ao_mesmo_tempo() -> Resultado {
     let secundarios: Vec<usize> = nucleos_secundarios().collect();
     if secundarios.is_empty() {

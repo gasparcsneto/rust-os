@@ -7191,8 +7191,9 @@ registro de cada uma no ponto em que nasceu.
   (ver *As do lote A5*, em [As mutações do ponto sem volta e de quem
   pede](#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
   No lote A6, [B], os achados do adversário e do revisor do lote A5 — os
-  quatro baixos, os dois informativos e as observações de teste —, sem
-  autoridade, regra, registro ou semântica de auditoria novos:
+  quatro baixos, os dois informativos e as observações de teste — e a
+  observação 6 do especialista do lote A6, sem autoridade, regra, registro
+  ou semântica de auditoria novos:
   (a) no `usuario/mod.rs`, que pode nomear os carregadores, a carga de um
   programa só aparece onde se usa: cada carregador e cada passo da carga —
   o `obter`, o `carregar`, o `preparar`, o `trocar`, o `mapear`, o
@@ -9092,8 +9093,12 @@ o `pub(super)` não separa os irmãos: o `xtask` confere que, fora do
 `usuario/mod.rs` e do arquivo de cada um, nenhum arquivo do módulo nomeia
 os carregadores, o que só a suíte tem e os passos da carga, em forma
 nenhuma (`carregadores_nos_irmaos`); que nenhum arquivo do módulo, nem o
-`usuario/mod.rs`, lhes dá outro nome (`carregadores_renomeados`); e que
-os dois arquivos dos carregadores não têm macro nenhuma.
+`usuario/mod.rs`, lhes dá outro nome — pelo `as`, também o do `self` de uma
+lista do `use` (`carregadores_renomeados`); que, no próprio
+`usuario/mod.rs`, cada carregador e cada passo da carga só aparece no item
+das funções do lançamento e da troca de imagem, e a palavra `extern` só
+dentro de `lancar_por` (`carga_fora_do_lugar`, desde o lote A6); e que os
+dois arquivos dos carregadores não têm macro nenhuma.
 
 ### Da rede ao processo
 
@@ -11848,7 +11853,9 @@ também no `cargo xtask invariantes` —; e as quatro provas de ligação — o
 desvio do adversário no `usuario/mod.rs` de verdade —, no `cargo xtask
 invariantes` e no `cargo check` do kernel nas duas arquiteturas, com a
 suíte: o desvio compila, e a guarda o reprova. As vinte e oito reprovaram;
-a EL6 e a PG3 são as duas que sobreviviam aos casos do lote A5.
+a EL6 e a PG3 sobreviviam aos casos do lote A5, e a EL7 — que não rodou
+contra eles — muda um caminho, a tabela fora da imagem, a que nenhuma
+avaria do lote A5 chegava.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -11879,7 +11886,7 @@ a EL6 e a PG3 são as duas que sobreviviam aos casos do lote A5.
 | o B1 no `usuario/mod.rs` de verdade (CG1) | o kernel compila nas duas, com a suíte; o `cargo xtask invariantes` reprova — o `carregar` e o `entrar` fora de `lancar_por` |
 | o B2 (CG2) | o mesmo — o `extern`, o `carregar` e o `entrar` |
 | o D1 (MC1) | o mesmo — o tipo no corpo da macro e o nome nos argumentos dela |
-| o D15 (MC2) | o mesmo — o `Lancador as` |
+| o D15 (MC2) | o mesmo — o `Lancador as`, e o `use` do dono que passa por `Lancador::` e alcança outro arquivo |
 
 Antes delas, as rodadas dirigidas do lote, todas verdes: os dois casos
 novos e `elf: recusa imagens invalidas`, nas duas arquiteturas, em depuração
@@ -11888,22 +11895,23 @@ e em release; e a regressão — os 36 casos de `contencao:`, `elf:`,
 pela conferência da imagem, pelo lançamento, pela troca de imagem ou pelo
 grafo —, nas duas, em depuração. A suíte inteira ficou com a CI.
 
-E a montagem do caso `vagas: termino, colheita, coleta e nascimento ao
-mesmo tempo`, que a CI 523 reprovou no aarch64 com "nada correu ao mesmo
-tempo: o caso nao conferiu nada" — "360 vitimas, 360 vigiadas, 247 sem
-vaga; 0 passadas do outro coletor": os três lançadores enchiam a tabela
-antes de o caso criar o segundo coletor, a recusa dele ia em silêncio, e o
-que o caso confere tinha passado. O outro coletor nasce agora primeiro, os
-lançadores esperam a partida, e a recusa de um fio do caso é erro dele. A
-demonstração, fora do commit, com o caso esperando a tabela encher antes do
-coletor: no x86_64, o código de antes reprovou com "nada correu ao mesmo
-tempo" ("14 sem vaga; 0 passadas do outro coletor"); no aarch64, onde a
-tabela desta máquina não enchia sozinha, com o coletor do kernel segurado,
-como o do runner, também ("1137 sem vaga; 0 passadas"); e o novo passou nas
-duas. Sem a partida, a corrida passava a um lançador: "um lancador nao
-nasceu: nao ha vaga livre para outro fio". O caso novo, sozinho, passou
-cinco vezes em cada arquitetura (`DUKE_PARTE=385/1060` e `384/1045`), duas
-delas com a tabela cheia (228 e 84 sem vaga).
+E a montagem do caso
+`vagas: termino, colheita, coleta e nascimento ao mesmo tempo`, que a CI 523
+reprovou no aarch64 com "nada correu ao mesmo tempo: o caso nao conferiu
+nada" — "360 vitimas, 360 vigiadas, 247 sem vaga; 0 passadas do outro
+coletor": os três lançadores enchiam a tabela antes de o caso criar o
+segundo coletor, a recusa dele ia em silêncio, e o que o caso conferiu antes
+disso tinha passado. O outro coletor nasce agora primeiro, os lançadores
+esperam a partida, e a recusa de um fio do caso é erro dele. A demonstração,
+fora do commit, com o caso esperando a tabela encher antes do coletor: no
+x86_64, o código de antes reprovou com "nada correu ao mesmo tempo" ("14 sem
+vaga; 0 passadas do outro coletor"); no aarch64, onde a tabela desta máquina
+não enchia sozinha, com o coletor do kernel segurado, como o do runner,
+também ("1137 sem vaga; 0 passadas"); e o novo passou nas duas. Sem a
+partida, a corrida passava a um lançador: "um lancador nao nasceu: nao ha
+vaga livre para outro fio". O caso novo, sozinho, passou cinco vezes em cada
+arquitetura (`DUKE_PARTE=385/1060` no x86_64 e `384/1045` no aarch64), uma
+vez em cada com a tabela cheia (84 sem vaga no x86_64 e 228 no aarch64).
 
 ### As mutações do chamado do coletor
 
@@ -15486,10 +15494,22 @@ reprovou foi a suíte do ARM, na parte 3/3, num caso só, "vagas: termino,
 colheita, coleta e nascimento ao mesmo tempo", com "nada correu ao mesmo
 tempo" — "360 vitimas, 360 vigiadas, 247 sem vaga; 0 passadas do outro
 coletor": a montagem do caso criava os lançadores antes do segundo
-coletor, eles enchiam as 95 vagas da tabela em menos de meio segundo, e a
-criação do coletor falhava em silêncio. O que o caso confere passou —
-nenhuma morte perdida ou em dobro, nenhum pedido, nenhum zumbi —; a
-montagem foi corrigida no lote A6 (ver "As do lote A6").
+coletor, eles enchiam a tabela de fios, de 95 vagas, em menos de meio
+segundo, e a criação do coletor falhava em silêncio. O que o caso conferiu
+antes disso passou — nenhuma morte perdida ou em dobro, nenhum pedido,
+nenhum zumbi —, e as duas conferências de depois, a da recusa por outro
+motivo e a das vagas de volta, não chegaram a rodar; a montagem foi
+corrigida no lote A6 (ver "As do lote A6").
+
+A CI 524 (`72e2201`, o lote A6 e a montagem do caso das vagas) passou
+verde, 48 de 48, na primeira tentativa, em 86,4 minutos e 1339 de máquina.
+O caso das vagas passou nas duas arquiteturas sem nenhum lançador sem vaga
+— 3924 passadas do outro coletor no ARM, na parte 3/3, e 3653 no x86, na
+parte 1/3 —, e os casos do lote também. O holdover da bancada de tempo, na
+parte 3/3: o x86 a -259 ppm (2057 s em 2057) e o ARM a -49 ppm (2056 s em
+2056), os dois dentro da guarda. O último job foi o dos fluxos entre
+dispositivos (x86_64 e aarch64), que esperou 47 minutos na fila e rodou
+33,1; o maior, a persistência do x86, parte 1/3, com 68,7.
 
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na

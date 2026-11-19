@@ -6381,8 +6381,9 @@ fn carregadores_renomeados(relativo: &str, fonte: &str) -> Vec<String> {
         .into_iter()
         .map(|(linha, nome)| {
             format!(
-                "{relativo}:{linha}: `{nome} as`: a carga de um programa não ganha outro nome no \
-                 módulo `usuario`, nem no `usuario/mod.rs`"
+                "{relativo}:{linha}: `{nome} as` — ou o `self` de uma lista dele com o `as` —: a \
+                 carga de um programa não ganha outro nome no módulo `usuario`, nem no \
+                 `usuario/mod.rs`"
             )
         })
         .collect()

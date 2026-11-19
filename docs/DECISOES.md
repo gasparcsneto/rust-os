@@ -1813,7 +1813,7 @@ como [C].
 | Id | O que se faz | O estado |
 |---|---|---|
 | [A1-4](#a1-4) | a recusa da cota diz quantos dos contados são mortos que esperam o coletor | feito, no `ee4ea45` |
-| [F4](#f4) | o `exec` decide de novo no ponto sem volta | feito, no `869dc08`, e o resto que o adversário do lote achou, no `97ea728`; o que o adversário da integração achou, no lote A3 do #448; o desfecho da imagem que não se carrega e o das recusas sobre quem pede, e o erro do `exec` da imagem que não se confere, no lote A4 |
+| [F4](#f4) | o `exec` decide de novo no ponto sem volta | feito, no `869dc08`, e o resto que o adversário do lote achou, no `97ea728`; o que o adversário da integração achou, no lote A3 do #448; o desfecho da imagem que não se carrega e o das recusas sobre quem pede, e o erro do `exec` da imagem que não se confere, no lote A4; o que o adversário do lote A4 achou, no lote A5; e o que o adversário e o revisor do lote A5 acharam, no lote A6 |
 | [I7](#i7) | o comando que existe, num console sem ninguém, gravado sem o resumo dos parâmetros | feito, no lote B do #448; a troca da própria senha com algo na linha, no lote B2 |
 | [A9-RESUMO](#a9-resumo) | o resumo de 16 dígitos na descrição de um programa | feito, no lote B do #448; o que o adversário do lote achou — o número da regra do firewall que se perde no corte, e o par misturado de duas descrições inteiras — no lote B2 |
 | [DN-4](#dn-4) | o handoff como o próximo marco da fase 15 | decidido pelo roteiro |
@@ -2048,9 +2048,9 @@ pendência #298.
     mutações EL6 e PG3 mudavam sem nada reprovar, e o de cada avaria de
     `elf: recusa imagens invalidas`, com a da tabela fora da imagem.
 
-  Dois casos novos, um reforçado, seis testes no hospedeiro e as
-  mutações ([README](../README.md#decisões-pendentes), "A soma das cotas
-  de processos e a cota por sessão").
+  Dois casos novos, um reforçado, seis testes no hospedeiro e vinte e oito
+  mutações, todas reprovadas ([README](../README.md#decisões-pendentes), "A
+  soma das cotas de processos e a cota por sessão").
 
 ### I7
 

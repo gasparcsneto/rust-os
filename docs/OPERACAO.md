@@ -71,7 +71,7 @@ primeira máquina diz no log o que viu de cada uma.
 | Vídeo | o modo que o firmware deixa (o protocolo de vídeo da UEFI) | o da VGA do OVMF |
 | Energia | o registrador de reinício da FADT, 0xCF9 ou o 8042; o S5 pela FADT e pela DSDT | o mesmo ACPI |
 | Botão de energia | o botão fixo da ACPI, pelo SCI — a FADT que o diz de método de controle, e a de hardware reduzido, deixam a máquina sem botão, e o `system.info` diz por quê | o mesmo ACPI |
-| Relógio | o CMOS, e o TSC medido contra o canal 2 do PIT | o mesmo |
+| Relógio | o CMOS, e o TSC medido contra o canal 2 do PIT — invariante, que o `CPUID` anuncia, e igual em todos os núcleos: sem o anúncio, o boot avisa, e a sincronia não se confere | o mesmo, sem o anúncio do TSC invariante: o boot do x86 avisa |
 
 O NVMe e a placa ficam atrás de uma porta raiz do PCIe, num barramento
 que o firmware numerou: a varredura segue as pontes que ele numerou, e um
