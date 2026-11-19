@@ -690,7 +690,15 @@ fn classificar(r: &Registro, d: &Detalhe) -> Tipo {
     if r.titular == Titular::Servico && matches!(r.metodo.as_str(), "audit.tail" | "net.observe") {
         return Tipo::Leitura;
     }
-    if let Some(filho) = numero_apos(&d.resto, "processo ")
+    // O nascimento, inteiro ou cortado, só num `ALLOW`: o kernel grava todo
+    // nascimento assim (`autorizacao::auditar_nascimento`). Um `ERROR` ou
+    // uma recusa que diga `processo N lancado` — o desfecho de um
+    // lançamento que não aconteceu — é uma execução, ou uma decisão; lido
+    // como nascimento, daria o filho a quem gravou o registro, e o
+    // nascimento de verdade, depois, não entraria (o I1 do adversário do
+    // lote A5). O registro não muda: muda a leitura.
+    if r.codigo == Codigo::Allow
+        && let Some(filho) = numero_apos(&d.resto, "processo ")
         && (d.resto.contains(" lancado") || nascimento_cortado(r, d, filho))
     {
         return Tipo::Nascimento { filho };
@@ -1465,6 +1473,43 @@ pub(crate) mod testes {
             assert!(
                 !matches!(Evento::de(&r, 0).tipo, Tipo::Nascimento { .. }),
                 "{metodo} {detalhe}"
+            );
+        }
+    }
+
+    /// O nascimento inteiro, como o cortado, só num `ALLOW` (o I1 do
+    /// adversário do lote A5): o kernel grava todo nascimento assim, e um
+    /// `ERROR` ou uma recusa que diga `processo N lancado` — o desfecho de um
+    /// lançamento que não aconteceu — é uma execução, quando cita a decisão,
+    /// ou uma decisão. O `ALLOW` continua nascimento, também sem a decisão
+    /// citada — o do kernel, fora de um comando.
+    #[test]
+    fn o_nascimento_inteiro_so_num_allow() {
+        let tipo = |codigo: Codigo, detalhe: &str| {
+            let r = registro(1, [0; 32], |r| {
+                r.metodo = "user.run".to_string();
+                r.codigo = codigo;
+                r.detalhe = detalhe.to_string();
+            });
+            Evento::de(&r, 0).tipo
+        };
+        for detalhe in ["processo 13 lancado; decisao 4", "processo 13 lancado"] {
+            assert_eq!(
+                tipo(Codigo::Allow, detalhe),
+                Tipo::Nascimento { filho: 13 },
+                "{detalhe}"
+            );
+        }
+        for codigo in [Codigo::Error, Codigo::DenyPolicy, Codigo::DenyContained] {
+            assert_eq!(
+                tipo(codigo, "processo 13 lancado; decisao 4"),
+                Tipo::Execucao,
+                "{codigo:?}"
+            );
+            assert_eq!(
+                tipo(codigo, "processo 13 lancado"),
+                Tipo::Decisao,
+                "{codigo:?}"
             );
         }
     }

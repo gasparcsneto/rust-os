@@ -3186,3 +3186,68 @@ fn o_desfecho_tardio_nao_troca_o_programa_de_quem_pediu() {
     let p = m.grafo.processo(0, 40).expect("o processo 40");
     assert_eq!((p.programa.as_deref(), p.programa_desde), (Some(z), de_z));
 }
+
+/// Um `ERROR` que diz `processo N lancado` não é nascimento (o I1 do
+/// adversário do lote A5). A guarda do `DesfechoDoLancamento`, desde o lote
+/// A5, confere o código — nenhum que permita —, e o NSF lia o nascimento
+/// inteiro pelo texto do detalhe, sem olhar o código: um desfecho `ERROR`
+/// com `processo 41 lancado` — de um chamador de amanhã, ou de um handler
+/// pelo `auditar_execucao`, que não tem guarda — era lido como o nascimento
+/// do 41 por quem pediu, e, como o primeiro nascimento de um fio fica
+/// (`Grafo::nasceu`), o 41 de verdade, que nasce depois, de outro, não
+/// entrava. Agora o nascimento inteiro exige o `ALLOW`, como o cortado já
+/// exigia: o `ERROR` é uma execução da decisão que cita, e a proveniência
+/// do 41 é a de quem o lançou de verdade. O registro não muda: muda a
+/// leitura.
+#[test]
+fn o_erro_que_diz_lancado_nao_e_nascimento() {
+    let mut a = Auditoria::nova();
+    let pelo = "pelo processo 40 (x 0a0b0c0d4e5f6071)";
+    let caminho = "/programas/x86_64/grande";
+    // O 40 pede um `user.run`, e o desfecho dele — `ERROR` — diz
+    // `processo 41 lancado`.
+    let d = a.gravar(do_agente("user.run", caminho, Codigo::Allow, pelo));
+    a.gravar(do_agente(
+        "user.run",
+        caminho,
+        Codigo::Error,
+        &format!("{pelo}: processo 41 lancado; decisao {d}"),
+    ));
+    // O 41 de verdade nasce depois, de outro agente.
+    const OUTRO: [u8; 32] = [0xB2; 32];
+    fn do_outro(detalhe: &str) -> R<'_> {
+        R {
+            titular: Titular::Agente,
+            agente: "outro",
+            chave: Some(OUTRO),
+            papel: "operador",
+            metodo: "user.run",
+            recurso: "/programas/x86_64/y",
+            codigo: Codigo::Allow,
+            detalhe,
+        }
+    }
+    let d2 = a.gravar(do_outro(""));
+    let nasceu = format!("processo 41 lancado; decisao {d2}");
+    a.gravar(do_outro(&nasceu));
+    let mut m = Motor::novo();
+    ler(&mut m, &a);
+
+    let tipos: Vec<Tipo> = m.eventos().map(|e| e.tipo).collect();
+    assert_eq!(
+        tipos,
+        [
+            Tipo::Decisao,
+            Tipo::Execucao,
+            Tipo::Decisao,
+            Tipo::Nascimento { filho: 41 },
+        ],
+        "o ERROR com `processo 41 lancado` foi lido como nascimento"
+    );
+    let prov = m.grafo.proveniencia(0, 41);
+    assert_eq!(
+        prov.raiz.as_deref(),
+        Some(format!("agent:{}", hex(&OUTRO)).as_str()),
+        "a proveniencia do 41 ficou com quem gravou o ERROR"
+    );
+}

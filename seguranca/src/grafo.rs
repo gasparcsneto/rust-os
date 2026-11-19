@@ -304,9 +304,13 @@ impl Grafo {
     /// leitura do NSF.
     ///
     /// A que cita a decisão que pôs o programa de agora, ou uma depois dela,
-    /// troca como sempre: a falha do `exec` depois do ponto sem volta cita a
-    /// decisão do `exec`, que a imagem de antes pediu, e já diz a imagem
-    /// nova. E o mesmo programa, numa descrição que diz mais — a inteira
+    /// troca como sempre. No kernel, ela diz o programa da decisão que cita,
+    /// e a troca ali não tem caso: a falha do `exec` depois do ponto sem
+    /// volta cita a decisão do `exec` e diz a imagem de antes, que a pediu —
+    /// a nova não rodou uma instrução, e registro nenhum a disse —; o
+    /// processo já está nela, nada muda, e ele acaba (a documentação dizia
+    /// que essa falha já dizia a imagem nova; o adversário do lote A5 viu que
+    /// não). E o mesmo programa, numa descrição que diz mais — a inteira
     /// depois da abreviada, a de 16 dígitos depois da de 8 —, entra também
     /// pela execução de antes: não é troca.
     pub fn executa_no_registro(

@@ -2075,7 +2075,9 @@ impl DesfechoDoLancamento {
     /// lancado` no detalhe seria lido pelo NSF como um nascimento em nome de
     /// quem o gate decidiu: uma proveniência forjada, gravada fora do fio do
     /// comando (o I5 do adversário do lote A4). O nascimento é do `nasce`,
-    /// pela última palavra.
+    /// pela última palavra. E só o `ALLOW` é lido assim: desde o lote A6, o
+    /// NSF não lê nascimento num `ERROR` nem numa recusa, que antes bastava
+    /// dizer o texto (o I1 do adversário do lote A5).
     pub fn gravar(&self, codigo: Codigo, detalhe: &str) -> u64 {
         debug_assert!(
             !codigo.permite(),
