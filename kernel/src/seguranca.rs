@@ -216,23 +216,19 @@ pub fn passo() -> Volta {
                 // que se ler — a lacuna. Antes, o lote inteiro voltava vazio
                 // a cada volta, e o NSF parava ali, cego para o que viesse
                 // depois.
+                //
+                // E o log diz numa linha só o que o lote não leu — quantos,
+                // entre que números, quantos sem número e o motivo do
+                // primeiro; um só, o número e o motivo dele —, e não uma por
+                // registro: uma janela de registros que não se leem dava até
+                // `LEITURAS_POR_VOLTA` × `LOTE` linhas por volta, 512, a
+                // 138 ms cada no x86 em depuração — a serial e a tela —, e as
+                // 513 linhas do caso dos registros que não se leem levavam
+                // 70,9 s (o #469, no lote A4). A auditoria e a lacuna não
+                // dependem do log.
                 let (registros, ilegiveis) = seguranca::evento::lote(&r).unwrap_or_default();
-                for i in &ilegiveis {
-                    match i.seq {
-                        Some(seq) => crate::log_warn!(
-                            "nsf",
-                            "o registro {} da auditoria nao se le: {}",
-                            seq,
-                            i.motivo
-                        ),
-                        None => {
-                            crate::log_warn!(
-                                "nsf",
-                                "um registro da auditoria nao se le: {}",
-                                i.motivo
-                            )
-                        }
-                    }
+                if let Some(resumo) = seguranca::evento::resumo_dos_ilegiveis(&ilegiveis) {
+                    crate::log_warn!("nsf", "{}", resumo);
                 }
                 volta.ilegiveis += ilegiveis.len();
                 // A leitura anda pelos que se leem e pelos que não se leem,

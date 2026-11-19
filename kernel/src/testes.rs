@@ -56657,6 +56657,34 @@ fn nsf_o_registro_que_nao_se_le_vira_lacuna() -> Resultado {
     })
 }
 
+/// As linhas de aviso do `nsf` emitidas desde `desde`, na ordem; `Err` se o
+/// anel do log já perdeu alguma linha desde ali — a volta escreveu mais do
+/// que ele guarda (128 linhas, `log::CAPACIDADE`).
+fn avisos_do_nsf_desde(desde: u64) -> Result<alloc::vec::Vec<alloc::string::String>, &'static str> {
+    let ate = crate::log::total_emitidos();
+    let mut vistos = 0u64;
+    let mut linhas = alloc::vec::Vec::new();
+    crate::log::ultimos(usize::MAX, crate::log::Level::Trace, |r| {
+        if r.seq >= desde && r.seq < ate {
+            vistos += 1;
+            if r.subsistema == "nsf" && r.level == crate::log::Level::Warn {
+                linhas.push(alloc::string::String::from(r.mensagem()));
+            }
+        }
+    });
+    if vistos < ate - desde {
+        crate::log_error!(
+            "teste",
+            "{} linhas desde {}, {} no anel",
+            ate - desde,
+            desde,
+            vistos
+        );
+        return Err("o NSF escreveu uma linha por registro que nao se le: o log perdeu linhas");
+    }
+    Ok(linhas)
+}
+
 /// Mais de um lote de registros que o NSF não lê, seguidos, não param a
 /// leitura (o item 3 do lote A3 do #448). Num lote de `audit.tail` em que
 /// nenhum se lia, `novos == 0` parava a volta, o `LIDO` não andava, e a
@@ -56668,6 +56696,12 @@ fn nsf_o_registro_que_nao_se_le_vira_lacuna() -> Resultado {
 /// registros que não se leem; a seguinte lê até o `system.info`; e o
 /// buraco inteiro é uma lacuna só, vista nele — também o primeiro que não
 /// se lê, que antes ficava só no log.
+///
+/// E o log diz uma linha por lote, e não uma por registro (o #469, no lote
+/// A4): a primeira volta, oito — cada uma com os 64 do lote, entre o
+/// primeiro e o último número dele, e o motivo do primeiro —; a seguinte,
+/// a de um registro só, como sempre. Antes, 512 linhas na primeira volta,
+/// 138 ms cada no x86 em depuração, e o anel do log as perdia.
 fn nsf_mais_de_um_lote_que_nao_se_le_nao_para_a_leitura() -> Resultado {
     use politica::Codigo;
     use seguranca::regras::Regra;
@@ -56698,8 +56732,11 @@ fn nsf_mais_de_um_lote_que_nao_se_le_nao_para_a_leitura() -> Resultado {
         {
             return Err("os registros que nao se leem nao entraram seguidos na cadeia");
         }
-        // A primeira volta: o teto de leituras, nenhum registro que se lê.
+        // A primeira volta: o teto de leituras, nenhum registro que se lê —
+        // e uma linha de aviso por lote, e não uma por registro.
+        let desde = crate::log::total_emitidos();
         let v = crate::seguranca::passo();
+        let avisos = avisos_do_nsf_desde(desde)?;
         if v.leituras != POR_VOLTA
             || v.ilegiveis != LOTE * POR_VOLTA
             || v.registros != 0
@@ -56708,13 +56745,39 @@ fn nsf_mais_de_um_lote_que_nao_se_le_nao_para_a_leitura() -> Resultado {
             crate::log_error!("teste", "{:?}", v);
             return Err("o NSF parou num lote que nao se le");
         }
-        // As seguintes, até o `system.info`.
+        let esperadas: alloc::vec::Vec<alloc::string::String> = (0..POR_VOLTA)
+            .map(|k| {
+                alloc::format!(
+                    "{LOTE} registros da auditoria nao se leem, entre {} e {}; o primeiro: ",
+                    ilegiveis[k * LOTE],
+                    ilegiveis[k * LOTE + LOTE - 1]
+                )
+            })
+            .collect();
+        if avisos.len() != POR_VOLTA
+            || avisos
+                .iter()
+                .zip(&esperadas)
+                .any(|(a, e)| !a.starts_with(e.as_str()) || a.len() == e.len())
+        {
+            crate::log_error!("teste", "{} aviso(s): {:?}", avisos.len(), avisos);
+            return Err("o NSF nao disse uma linha por lote dos registros que nao se leem");
+        }
+        // As seguintes, até o `system.info`: a última, um registro só — a
+        // linha de sempre.
+        let desde = crate::log::total_emitidos();
         let mut vistos = v.ilegiveis;
         for _ in 0..4 {
             if crate::seguranca::com_motor_de_teste(|m| m.lido() >= depois) == Some(true) {
                 break;
             }
             vistos += crate::seguranca::passo().ilegiveis;
+        }
+        let avisos = avisos_do_nsf_desde(desde)?;
+        let um = alloc::format!("o registro {} da auditoria nao se le: ", ilegiveis[n - 1]);
+        if avisos.len() != 1 || !avisos[0].starts_with(&um) || avisos[0].len() == um.len() {
+            crate::log_error!("teste", "{} aviso(s): {:?}", avisos.len(), avisos);
+            return Err("o NSF nao disse o registro que nao se le da ultima volta");
         }
         let (lido, perdidos, lacunas) = crate::seguranca::com_motor_de_teste(|m| {
             (

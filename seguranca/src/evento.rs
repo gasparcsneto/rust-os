@@ -199,8 +199,9 @@ pub struct Ilegivel {
 /// se leu fica de fora: o monitor de invariantes vê o buraco no registro
 /// seguinte que se lê, como a lacuna de um registro que saiu do anel antes
 /// da leitura ([`crate::invariantes::Violacao::Lacuna`]), e o NSF fica
-/// degradado (`audit-gap`). O kernel diz no log qual não se leu, e por
-/// quê.
+/// degradado (`audit-gap`). O kernel diz no log, numa linha por lote,
+/// quantos não se leram — o número e o motivo, quando é um só
+/// ([`resumo_dos_ilegiveis`]).
 pub fn lote(resultado: &[u8]) -> Result<(Vec<Registro>, Vec<Ilegivel>), &'static str> {
     let lista = Json(resultado)
         .member("records")
@@ -219,6 +220,82 @@ pub fn lote(resultado: &[u8]) -> Result<(Vec<Registro>, Vec<Ilegivel>), &'static
         i += 1;
     }
     Ok((lidos, ilegiveis))
+}
+
+/// O que o kernel diz no log dos registros de um lote que não se leram:
+/// uma linha só, e não uma por registro.
+///
+/// # Por que uma linha por lote
+///
+/// Uma janela grande de registros que não se leem — muitos registros
+/// seguidos acima de um teto — virava uma inundação do log: até
+/// `LEITURAS_POR_VOLTA` × `LOTE` linhas por volta do NSF, 512, cada uma na
+/// serial e na tela. No caso `nsf: mais de um lote que nao se le nao para a
+/// leitura, e vira uma lacuna`, 513 linhas levavam 70,9 s no x86 em
+/// depuração — 138 ms por linha — e 76,2 s no ARM (o #469, no lote A4). A
+/// auditoria e a lacuna não dependem do log ([`crate::Motor::ler_lote`]):
+/// ele diz que aconteceu, quanto e por quê.
+///
+/// Os números são um intervalo — o menor e o maior entre os que o dizem
+/// —, e não a promessa de que os do meio também não se leram: um lote pode
+/// ter, entre os que não se leem, os que se leem.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResumoDosIlegiveis {
+    /// Quantos não se leram.
+    pub quantos: usize,
+    /// O menor e o maior número entre os que o dizem; `None` se nenhum
+    /// diz.
+    pub numeros: Option<(u64, u64)>,
+    /// Quantos não dizem nem o número.
+    pub sem_numero: usize,
+    /// O primeiro, na ordem do lote: o número, se ele o diz, e o porquê.
+    pub primeiro: Ilegivel,
+}
+
+/// O [`ResumoDosIlegiveis`] dos registros de um lote que não se leram;
+/// `None` se todos se leram.
+pub fn resumo_dos_ilegiveis(ilegiveis: &[Ilegivel]) -> Option<ResumoDosIlegiveis> {
+    let primeiro = *ilegiveis.first()?;
+    let mut numeros: Option<(u64, u64)> = None;
+    let mut sem_numero = 0;
+    for i in ilegiveis {
+        match i.seq {
+            Some(s) => {
+                numeros =
+                    Some(numeros.map_or((s, s), |(menor, maior)| (menor.min(s), maior.max(s))));
+            }
+            None => sem_numero += 1,
+        }
+    }
+    Some(ResumoDosIlegiveis {
+        quantos: ilegiveis.len(),
+        numeros,
+        sem_numero,
+        primeiro,
+    })
+}
+
+/// A linha do log, em ASCII. Um registro só sai como sempre saiu — com o
+/// número, se ele se lê, e o motivo —; vários, numa linha: quantos, entre
+/// que números, quantos sem número, e o motivo do primeiro.
+impl core::fmt::Display for ResumoDosIlegiveis {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let motivo = self.primeiro.motivo;
+        if self.quantos == 1 {
+            return match self.primeiro.seq {
+                Some(seq) => write!(f, "o registro {seq} da auditoria nao se le: {motivo}"),
+                None => write!(f, "um registro da auditoria nao se le: {motivo}"),
+            };
+        }
+        write!(f, "{} registros da auditoria nao se leem", self.quantos)?;
+        if let Some((menor, maior)) = self.numeros {
+            write!(f, ", entre {menor} e {maior}")?;
+        }
+        if self.sem_numero > 0 {
+            write!(f, ", {} sem numero", self.sem_numero)?;
+        }
+        write!(f, "; o primeiro: {motivo}")
+    }
 }
 
 /// O que o detalhe diz além do texto.
@@ -923,6 +1000,96 @@ pub(crate) mod testes {
         );
         assert_eq!(lote(b"{}"), Err("o resultado nao tem records"));
         assert_eq!(lote(br#"{"records":[]}"#), Ok((Vec::new(), Vec::new())));
+    }
+
+    /// O log de um lote que não se lê: uma linha só, com quantos, o menor e
+    /// o maior número — e não o primeiro e o último —, quantos sem número e
+    /// o motivo do primeiro; um registro só, a linha de sempre (o #469, no
+    /// lote A4).
+    #[test]
+    fn o_resumo_dos_ilegiveis_de_um_lote() {
+        let i = |seq: Option<u64>, motivo: &'static str| Ilegivel { seq, motivo };
+        assert_eq!(resumo_dos_ilegiveis(&[]), None);
+
+        // Um só: a linha de sempre, com o número ou sem ele.
+        let um = resumo_dos_ilegiveis(&[i(Some(7), "registro sem agent")]).unwrap();
+        assert_eq!(
+            (um.quantos, um.numeros, um.sem_numero),
+            (1, Some((7, 7)), 0)
+        );
+        assert_eq!(
+            alloc::format!("{um}"),
+            "o registro 7 da auditoria nao se le: registro sem agent"
+        );
+        let sem = resumo_dos_ilegiveis(&[i(None, "registro sem seq")]).unwrap();
+        assert_eq!((sem.quantos, sem.numeros, sem.sem_numero), (1, None, 1));
+        assert_eq!(
+            alloc::format!("{sem}"),
+            "um registro da auditoria nao se le: registro sem seq"
+        );
+
+        // Fora de ordem, com um sem número no meio: o menor e o maior — e
+        // não o primeiro e o último —, o motivo do primeiro — e não o do
+        // último —, e os sem número contados.
+        let varios = [
+            i(Some(12), "a"),
+            i(Some(9), "b"),
+            i(None, "c"),
+            i(Some(30), "d"),
+            i(Some(20), "e"),
+        ];
+        let r = resumo_dos_ilegiveis(&varios).unwrap();
+        assert_eq!(
+            (r.quantos, r.numeros, r.sem_numero, r.primeiro),
+            (5, Some((9, 30)), 1, varios[0])
+        );
+        assert_eq!(
+            alloc::format!("{r}"),
+            "5 registros da auditoria nao se leem, entre 9 e 30, 1 sem numero; o primeiro: a"
+        );
+
+        // O primeiro sem número: o motivo é o dele, e os números, dos
+        // outros.
+        let r = resumo_dos_ilegiveis(&[i(None, "x"), i(Some(4), "y"), i(Some(3), "z")]).unwrap();
+        assert_eq!(
+            alloc::format!("{r}"),
+            "3 registros da auditoria nao se leem, entre 3 e 4, 1 sem numero; o primeiro: x"
+        );
+
+        // Nenhum com número.
+        let r = resumo_dos_ilegiveis(&[i(None, "x"), i(None, "y")]).unwrap();
+        assert_eq!((r.quantos, r.numeros, r.sem_numero), (2, None, 2));
+        assert_eq!(
+            alloc::format!("{r}"),
+            "2 registros da auditoria nao se leem, 2 sem numero; o primeiro: x"
+        );
+
+        // Um lote inteiro, 64 seguidos.
+        let inteiro: Vec<Ilegivel> = (100..164)
+            .map(|s| i(Some(s), "registro sem agent"))
+            .collect();
+        assert_eq!(
+            alloc::format!("{}", resumo_dos_ilegiveis(&inteiro).unwrap()),
+            "64 registros da auditoria nao se leem, entre 100 e 163; o primeiro: registro sem agent"
+        );
+
+        // E o que o kernel lê de um `audit.tail`: os dois que não se leem
+        // do lote de quatro, numa linha.
+        let um = registro(1, [0; 32], |_| {});
+        let dois = registro(2, um.elo, |_| {});
+        let tres = registro(3, dois.elo, |_| {});
+        let estragado = json(&dois).replace(r#""holder":"agent""#, r#""holder":"marciano""#);
+        let sem_numero = json(&tres).replace(r#""seq":3,"#, r#""seq":"tres","#);
+        let texto = alloc::format!(
+            r#"{{"durable_seq":0,"records":[{},{estragado},{sem_numero}]}}"#,
+            json(&um)
+        );
+        let (_, ilegiveis) = lote(texto.as_bytes()).unwrap();
+        assert_eq!(
+            alloc::format!("{}", resumo_dos_ilegiveis(&ilegiveis).unwrap()),
+            "2 registros da auditoria nao se leem, entre 2 e 2, 1 sem numero; o primeiro: \
+             registro com titular desconhecido"
+        );
     }
 
     #[test]
