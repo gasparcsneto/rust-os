@@ -419,7 +419,8 @@ pub static COMANDOS: &[Command] = &[
     Command {
         nome: "user.run",
         resumo: "Lanca um programa no anel sem privilegio, num fio proprio. \
-                 Sem `path`, lanca o exemplo embutido. \
+                 O `path` e o recurso que o gate decide: sem ele, quem tem process.run \
+                 ouve DENY_RESOURCE, porque nenhum papel alcanca o recurso vazio. \
                  O codigo de fora da imagem (o armazem) so roda com o selo de um editor \
                  em que o seu papel confia: sem ele, `launched` e false, com `code` \
                  CODE_UNSIGNED, CODE_TAMPERED ou CODE_UNTRUSTED. \
@@ -429,7 +430,8 @@ pub static COMANDOS: &[Command] = &[
             tipo: TipoParam::Texto,
             obrigatorio: false,
             descricao: "Caminho do programa na arvore de arquivos, por exemplo \
-                        `/bin/leitor` (padrao: o exemplo embutido).",
+                        `/bin/leitor` ou `/bin/exemplo`, o exemplo embutido. Sem ele, \
+                        quem tem process.run ouve DENY_RESOURCE.",
         }],
         acesso: Acesso::Exige(Permissao::ProcessRun),
         recurso: Some("path"),
