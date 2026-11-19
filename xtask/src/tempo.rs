@@ -984,6 +984,48 @@ fn incerteza_sem_acordo(
     Ok(true)
 }
 
+/// A taxa do relógio do kernel contra o contador da régua (`mono_ppm`, do
+/// boot até a leitura): ele fica para trás — perde os tiques que nenhum
+/// núcleo atende, numa parada do hospedeiro —, e nunca à frente.
+///
+/// # Os dois limites
+///
+/// - **À frente: +100 ppm.** Desde o #455-B o relógio e a régua contam o
+///   mesmo oscilador na mesma frequência — no ARM, o contador e o timer na
+///   frequência que o `CNTFRQ_EL0` declara; no x86, a grade dos tiques e a
+///   régua com a mesma medida do TSC — e o relógio anda no máximo uma vez
+///   por ponto da grade comum. À frente, só um período contado duas vezes,
+///   ou o período fora da régua: os dois, defeitos. Cem ppm são dez vezes a
+///   quantização das duas leituras em meia hora. Antes, o x86 mediu de
+///   +6 194 a +10 082 ppm em quatro das oito CIs de 512 a 520 — a ordem de
+///   grandeza do período do APIC calibrado curto —, e o caso do adversário
+///   do #455 mediu a conta dupla nas duas arquiteturas.
+/// - **Para trás: -3 000 ppm.** Largo, para as paradas do hospedeiro — seis
+///   segundos sem tique em meia hora —, e estreito para o relógio que perdia
+///   o atraso de cada interrupção: o ARM antes do #455, de -8 318 a -12 681
+///   ppm nas CIs. Depois dele, -24.
+fn taxa_do_relogio(mono_ppm: Option<i64>) -> Result<i64, String> {
+    const A_FRENTE_PPM: i64 = 100;
+    const ATRAS_PPM: i64 = -3_000;
+    let Some(ppm) = mono_ppm else {
+        return Err(
+            "o system.info nao disse a taxa do relogio do kernel contra o contador (mono_ppm)"
+                .into(),
+        );
+    };
+    if ppm > A_FRENTE_PPM {
+        return Err(format!(
+            "o relogio do kernel anda a {ppm:+} ppm do contador, a frente: um periodo contou duas vezes (o teto e +{A_FRENTE_PPM})"
+        ));
+    }
+    if ppm < ATRAS_PPM {
+        return Err(format!(
+            "o relogio do kernel anda a {ppm:+} ppm do contador, atras demais para as paradas do hospedeiro (o piso e {ATRAS_PPM})"
+        ));
+    }
+    Ok(ppm)
+}
+
 /// Os vereditos de cada fonte, pela auditoria: o nome da fonte e o detalhe.
 /// São os registros de execução de `time.sync` do serviço que dizem o que a
 /// entrega deu — e não a decisão do gate, cujo recurso é o id do pedido.
@@ -3999,6 +4041,8 @@ fn o_holdover(b: &mut Bancada) -> Result<String, String> {
             maior_vao.as_secs()
         ));
     }
+    // A taxa do relógio do kernel contra o contador, em meia hora quieta.
+    let mono_ppm = taxa_do_relogio(holdover.mono_ppm)?;
     let n = nsf_em(&mut m, "holdover", SINCRONIZADO + Duration::from_secs(40))?;
     // Em holdover, a hora ainda é autenticada — a incerteza abaixo do teto
     // —: a validade é a do civil, e o programa diz o estado.
@@ -4050,7 +4094,7 @@ fn o_holdover(b: &mut Bancada) -> Result<String, String> {
         h.incerteza_ms.unwrap_or(0),
         passou.as_secs(),
         holdover.uptime_ms.saturating_sub(h.uptime_ms) / 1000,
-        holdover.mono_ppm.unwrap_or(0),
+        mono_ppm,
         holdover.incerteza_ms.unwrap_or(0),
         maior_vao.as_secs(),
         n.estado,
@@ -4237,5 +4281,25 @@ mod testes {
         // Igual: absorvendo, ainda pode haver ajuste; sem ajuste, não.
         assert_eq!(incerteza_sem_acordo(1_000, 1_000, s(15), true), Ok(true));
         assert_eq!(incerteza_sem_acordo(1_000, 1_000, s(15), false), Ok(false));
+    }
+
+    /// A guarda da taxa do relógio no holdover, com os números das CIs.
+    #[test]
+    fn o_relogio_do_kernel_nao_anda_a_frente_do_contador_no_holdover() {
+        // O ARM depois do #455, o x86 perto de zero, e paradas do hospedeiro.
+        for ppm in [-24, -25, -34, 10, 16, -808, 100, -3_000] {
+            assert_eq!(taxa_do_relogio(Some(ppm)), Ok(ppm), "{ppm}");
+        }
+        // À frente: o x86 das CIs 516, 517, 519 e 520, e um ppm acima do teto.
+        for ppm in [6_194, 8_648, 10_082, 6_216, 101] {
+            assert!(taxa_do_relogio(Some(ppm)).is_err(), "{ppm}");
+        }
+        // Atrás demais: o ARM antes do #455, nas CIs 512 a 519 e na bancada
+        // de 17/11, e um ppm abaixo do piso.
+        for ppm in [-8_318, -10_667, -12_326, -12_681, -3_001] {
+            assert!(taxa_do_relogio(Some(ppm)).is_err(), "{ppm}");
+        }
+        // Sem a taxa, não há o que conferir: reprova.
+        assert!(taxa_do_relogio(None).is_err());
     }
 }
