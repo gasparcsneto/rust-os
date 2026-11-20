@@ -1390,6 +1390,43 @@ a parada vai por uma SGI só dela, que **não** atravessa a máscara: um
 núcleo mascarado fica de fora, e o relatório o lista em
 `fatal_unanswered_mask`.
 
+**A entrada nova não pede `tlbi`.** No ARM, o `mapear_frame` invalidava a
+TLB a cada página que mapeava — um `tlbi vaae1is`, difundido —, e no
+emulador cada `tlbi …is` para os outros núcleos virtuais e espera por eles:
+medido, de 20 a 40 µs com quatro núcleos e de 6 a 14 com dois, contra meio
+com um (o `invlpg` do x86 é local, e custa uns 0,2 µs com quantos núcleos
+houver). A carga da imagem no teto das páginas — 16 384, o segmento grande
+somente leitura, e por isso três `tlbi` por página: o de mapeá-la gravável,
+o de desmapeá-la e o de mapeá-la com a permissão final — fazia 49 166, e
+levava de 1,77 a 1,92 s em release com quatro núcleos, contra 0,21 a 0,22
+com um; o `mapear` cheio — 45 056 páginas, um `tlbi` cada —, de 1,92 a 2,01
+s. Mas a arquitetura não deixa a TLB guardar uma entrada que gera falha de
+tradução (o manual da Arm, em *General TLB maintenance requirements*):
+trocar uma entrada inválida por uma válida não tem o que invalidar, e basta
+publicar a escrita, com `dsb ishst; isb`. É o que fazem agora o
+`mapear_frame` — que recusa a entrada já válida — e as tabelas novas do
+`descer`, com um `dsb ishst` entre os zeros da tabela e o descritor que
+aponta para ela. Continuam com o `tlbi` a remoção, a troca de permissão e de
+marca — a cópia na escrita — e, inteiras, a desmontagem e a troca de
+espaço. Depois, com quatro núcleos, o `mapear` cheio levou de 0,17 a 0,21 s,
+sem `tlbi` nenhum, e a carga, com os 16 383 da remoção que sobram no passo
+que troca a permissão do segmento, de 0,51 a 0,78 s (em depuração, de 2,8–3,2
+s a 0,55–0,65, e de 2,6–2,8 a 1,2–1,4). Esses que sobram são o resto: num
+experimento fora do commit, com a remoção numa página do espaço privado
+ativo invalidando só a TLB deste núcleo — como o `invlpg` do x86 —, a carga
+levou de 0,12 a 0,14 s. As mutações, em depuração com quatro núcleos,
+contra os casos da memória, da paginação e da cópia na escrita: sem o `tlbi`
+também na troca de válida para válida, reprova só o caso novo
+`memoria: marcar a copia na escrita derruba a traducao gravavel da TLB,
+neste nucleo e noutro`, nas duas metades — a escrita depois da marca ia pela
+tradução gravável velha, sem falha, e o outro dono a via —; sem o `tlbi` da
+remoção, `smp: desmapear do kernel vale em todo nucleo` — que antes da
+correção não a pegaria: o `tlbi` do mapeamento seguinte a cobria —; sem o
+`dsb ishst` da entrada nova, ou sem o dos zeros da tabela nova, nenhum caso:
+equivalentes no emulador, cujo percorredor lê a memória do convidado na
+ordem do programa — as barreiras fecham janelas que só um processador de
+verdade abre.
+
 **As travas são justas.** O `spin::Mutex` é um teste-e-troca: ganha quem
 chegar primeiro naquele instante, e um núcleo que solta e pede de novo ganha
 quase sempre. Medido: um processo num núcleo secundário escrevendo no log,
@@ -7387,6 +7424,11 @@ registro de cada uma no ponto em que nasceu.
   interrupções voltam, e os outros pontos da grade se perdem — o rearme os
   pula —: um tique em release, e de 26 a 34 em depuração. Um núcleo que pede
   a trava da paginação no meio espera com as interrupções mascaradas também.
+  A carga da imagem no teto, medida junto — num fio do kernel, de fora da
+  máscara —, levava no aarch64 com quatro núcleos 1,85 s em release, contra
+  0,21 com um: era o `tlbi` difundido de cada entrada nova, que saiu depois
+  do lote (ver "A entrada nova não pede `tlbi`", em
+  [Vários núcleos](#vários-núcleos)), e a carga caiu para 0,51 a 0,78 s.
   Fica com a (1) do lote A6, a carga do `exec` dentro da chamada, para o
   mesmo lote seguinte; (2) o `obter`, no `codigo.rs`, não tem tabela:
   sozinho, ele não entra num programa, e o arquivo fica com a regra do
