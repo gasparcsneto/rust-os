@@ -422,7 +422,7 @@ kernel/src/
 │   │   ├── par/
 │   │   │   └── aviso.rs os casos do aviso com o fluxo entre dois Dukes: a suspensão e o esquecimento do dispositivo avisam o fim, e o fluxo saindo e chegando avisa pelo crédito e pelos dados do par
 │   │   └── troca.rs os casos da decisão de novo no ponto sem volta do `exec` — o F4 e os achados do adversário do lote A do #448: a troca de imagem parada no meio pela pausa da suíte, decidida e com a imagem preparada, e a chave revogada, a política nova, o processo isolado ou a confiança no editor da imagem nova — o `ola` selado no armazém — tirada de fora, que a recusam — nada trocado, `NEGADO`, a execução da decisão na auditoria e a imagem de antes rodando —, e o fim pedido sem o isolamento, que a recusa e morre na volta, sem o fim dos fluxos pela troca; com quem é ponta de fluxo e com quem não é, e a rodada da ponta repetida quando a volta pausada é adiada, até passar pela decisão de novo; sem mudança no meio, a troca de sempre; e a decisão de novo presa ao fio e ao `ALLOW` da decisão
-│   ├── nascimento.rs os casos do que muda no meio do nascimento de um processo, pelo gancho da suíte — o pai isolado, com a credencial suspensa, que sai, com o fim pedido sem o isolamento, com o journal recusado ou com a confiança no editor tirada no meio do `fork`, que não ganha filho; o processo isolado, encerrado — também sem o isolamento, o fim pedido com o teto cheio e o morto podado — no meio do `user.run` que ele pede pela interface nativa, e a pessoa que sai, a chave revogada e a política nova no meio do dela, que não lançam, e ouvem o código da recusa; e o processo encerrado enquanto nasce, que morre no primeiro ponto seguro, também quando a vaga volta sem ele nascer —; o `user.run` recusado nas perguntas do gate sobre quem pede, com o código e o motivo de cada recusa, sem a explicação do comando; o desconhecido — o pedido nativo sem o programa decidido, o lançamento fora de um comando — que recusa, e o kernel que lança por conta própria; a confiança no editor do código selado tirada no meio do nascimento — pelo `user.run` e pelo kernel fora de um comando —, que não lança; o lançamento dentro de um comando que não é o `user.run` — um `fs.verify`, pelo gancho da verificação —, recusado; e o `system.reboot` com a tabela de fios cheia, pelo fio `energia` do boot, e o despertar dele sem pedido, que não age; e os do lote A3 do #448: o lançamento de dentro do `user.run`, que só nasce com a autoridade e o caminho do comando — o do sistema, o de outro caminho, o de outra autoridade, o de outra pessoa e o exemplo embutido, pelo gancho de antes das perguntas do gate, e os dois de um caminho que não existe, recusados no começo do lançamento —, o nascimento que grava o editor pelo nome que a última palavra perguntou — pelo gancho do meio, que troca o nome da chave —, o `user.run` permitido que não lança e grava o desfecho — o caminho que não existe, e o fio que não nasce, com a tabela cheia —, e o kernel que não lança por conta própria depois do boot, com o trinco fechado; e os do lote A4: a recusa de quem pede com o desfecho do `user.run` — também a cota contada de novo no nascimento, pelo gancho de antes dele, e, fora de um comando, só a recusa do gate —, a imagem que não se carrega — o que não é ELF e o manifesto que não se lê —, que não lança e grava o desfecho, e a que não se mapeia, com o desfecho depois do `processo N lancado`, em nome de quem o gate decidiu, e nenhum desfecho guardado vivo depois; e os do lote A5: a imagem de entradas ou de notas demais, recusada pelo motivo novo — e a do teto, que lança —, e o segmento vazio no teto do espaço do usuário, recusado — e o mesmo dentro do espaço, que lança; e os do lote A6: o motivo de duas recusas da conferência da imagem — as notas acima do orçamento, recusadas antes de o achador ler o segmento, e o segmento que acaba no teto, que invade a pilha —, e a imagem cujos segmentos pedem, somados, mais páginas que o espaço do programa, recusada pela conta pura, sem carregar — e a do teto, que se confere
+│   ├── nascimento.rs os casos do que muda no meio do nascimento de um processo, pelo gancho da suíte — o pai isolado, com a credencial suspensa, que sai, com o fim pedido sem o isolamento, com o journal recusado ou com a confiança no editor tirada no meio do `fork`, que não ganha filho; o processo isolado, encerrado — também sem o isolamento, o fim pedido com o teto cheio e o morto podado — no meio do `user.run` que ele pede pela interface nativa, e a pessoa que sai, a chave revogada e a política nova no meio do dela, que não lançam, e ouvem o código da recusa; e o processo encerrado enquanto nasce, que morre no primeiro ponto seguro, também quando a vaga volta sem ele nascer —; o `user.run` recusado nas perguntas do gate sobre quem pede, com o código e o motivo de cada recusa, sem a explicação do comando; o desconhecido — o pedido nativo sem o programa decidido, o lançamento fora de um comando — que recusa, e o kernel que lança por conta própria; a confiança no editor do código selado tirada no meio do nascimento — pelo `user.run` e pelo kernel fora de um comando —, que não lança; o lançamento dentro de um comando que não é o `user.run` — um `fs.verify`, pelo gancho da verificação —, recusado; e o `system.reboot` com a tabela de fios cheia, pelo fio `energia` do boot, e o despertar dele sem pedido, que não age; e os do lote A3 do #448: o lançamento de dentro do `user.run`, que só nasce com a autoridade e o caminho do comando — o do sistema, o de outro caminho, o de outra autoridade, o de outra pessoa e o exemplo embutido, pelo gancho de antes das perguntas do gate, e os dois de um caminho que não existe, recusados no começo do lançamento —, o nascimento que grava o editor pelo nome que a última palavra perguntou — pelo gancho do meio, que troca o nome da chave —, o `user.run` permitido que não lança e grava o desfecho — o caminho que não existe, e o fio que não nasce, com a tabela cheia —, e o kernel que não lança por conta própria depois do boot, com o trinco fechado; e os do lote A4: a recusa de quem pede com o desfecho do `user.run` — também a cota contada de novo no nascimento, pelo gancho de antes dele, e, fora de um comando, só a recusa do gate —, a imagem que não se carrega — o que não é ELF e o manifesto que não se lê —, que não lança e grava o desfecho, e a que não se mapeia, com o desfecho depois do `processo N lancado`, em nome de quem o gate decidiu, e nenhum desfecho guardado vivo depois; e os do lote A5: a imagem de entradas ou de notas demais, recusada pelo motivo novo — e a do teto, que lança —, e o segmento vazio no teto do espaço do usuário, recusado — e o mesmo dentro do espaço, que lança; e os do lote A6: o motivo de duas recusas da conferência da imagem — as notas acima do orçamento, recusadas antes de o achador ler o segmento, e o segmento que acaba no teto, que invade a pilha —, e a imagem cujos segmentos pedem, somados, mais páginas que o espaço do programa, recusada pela conta pura, sem carregar — e a do teto, que se confere; e o do lote A7: o desfecho de um lançamento com um código que permite, que não grava, nas duas compilações — e o NSF, que não acha o nascimento
 │   ├── orcamento.rs os casos do orçamento da vez da tarefa `programas`: a fila em ordem, cada pedido uma vez através das vezes, o fio que morre com o pedido na fila entre duas, e os suspensos de dois processos vivos executados na vez com a fila cheia; o laço da tarefa num executor de teste, ao lado de uma vizinha — a fila sempre cheia, o pedido que chega logo depois da vez, o suspenso pronto, e a fila vazia, em que a tarefa estaciona —; o tempo da vez; e o `incansavel` de verdade — um titular no laço, dois ao mesmo tempo, a taxa apertada —, cada resposta conferida pelo `id` e a conta dos filhos contra a do kernel
 │   ├── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
 │   ├── recolhimento.rs os casos da ordem do recolhimento — o achado A1-1: a busca do próximo morto começa no cursor e dá a volta pela tabela, e o laço de um titular que faz nascer e morrer processos sem parar não segura os mortos de outro —, com o coletor segurado: um recolhimento por vez — os mortos de outro titular acima do laço, a tabela cheia que dá a volta, o encerramento no meio do laço — e a passada de produção inteira, que recolhe a partir do cursor; e, tudo solto, dois coletores e o laço de um titular, com os processos de outro, que ocupam a cota dele, encerrados no meio
@@ -7054,12 +7054,16 @@ registro de cada uma no ponto em que nasceu.
   acusam; desde o lote A6, também o nome nos argumentos de uma macro ou no
   corpo de uma definição, o `type` montado numa macro, no dono, o `self`
   renomeado de uma lista do `use`, e o `use` do dono que passa por um nome
-  protegido e alcança outro arquivo; fica o embrulho — um item do dono que
-  leva o protegido, como uma função ou um fecho que o chama —); um
-  `#[macro_export]` com
+  protegido e alcança outro arquivo; desde o lote A7, todo `use` do dono
+  no nível de um módulo que passa por um nome protegido, com `pub` ou sem,
+  e a macro 2.0 e o `${…}`, com os recursos que os ligam; fica o embrulho
+  — um item do dono que leva o protegido, como uma função ou um fecho que
+  o chama —); um `#[macro_export]` com
   `crate::usuario::…`, ou um
   `pub use core::include as …`, num pacote do repositório de que o kernel
-  dependa — a varredura é a de `kernel/src`, e hoje não há nenhum —; uma
+  dependa — a varredura é a de `kernel/src`, e hoje não há nenhum; o
+  `${concat}` de um deles pediria o recurso do kernel, que a lista do
+  `xtask` fecha, desde o lote A7 —; uma
   referência pelo símbolo (`#[link_name = "_ZN…"]`); e as primitivas
   abaixo dos carregadores, `fios::adotar_imagem` e
   `arch::entrar_em_usuario`. E a nona, de antes do lote: a imagem que não
@@ -7244,9 +7248,12 @@ registro de cada uma no ponto em que nasceu.
   (`seguranca::evento`): um desfecho `ERROR` que dissesse `processo N
   lancado` era lido como o nascimento de N por quem pediu, e o de verdade,
   depois, não entrava (o I1). Todo nascimento do kernel é `ALLOW`, e a
-  guarda do `DesfechoDoLancamento`, que não aceita um código que permite,
-  fecha agora esse caminho; o `auditar_execucao`, sem guarda, continua
-  com a revisão de código. Os registros não mudam: muda a leitura;
+  guarda do `DesfechoDoLancamento` contra o código que permite fecha esse
+  caminho — no lote A6, só na compilação de depuração, um
+  `debug_assert!`; desde o lote A7, nas duas: com um código que permite,
+  o desfecho não grava, diz no log do kernel e devolve zero (a (c) do lote
+  A7) —; o `auditar_execucao`, sem guarda, continua com a revisão de
+  código. Os registros não mudam: muda a leitura;
   (e) a suíte confere o motivo de duas recusas que uma mutação mudava sem
   nada reprovar: o orçamento das notas vem antes de ler o segmento — com
   ele depois (a EL6), um `PT_NOTE` de um MiB de notas de 12 bytes custava
@@ -7266,7 +7273,9 @@ registro de cada uma no ponto em que nasceu.
   lá — mapear a imagem nova depois de voltar da chamada, ou num fio à
   parte, como o `user.run` — mexe no ponto sem volta da troca de imagem,
   na ordem das gravações e no quadro da chamada, e fica para um lote
-  seguinte, com a medida do tique do núcleo que troca; (2) as primitivas
+  seguinte, com a medida do tique do núcleo que troca — e, na mesma
+  chamada, a desmontagem do espaço anterior, que o teto não limita,
+  medida no lote A7 (a (1) do "O que fica" dele); (2) as primitivas
   `pub` abaixo dos carregadores — `fios::criar*`,
   `paginacao::Espaco::novo`, `fios::adotar_imagem`,
   `arch::trocar_espaco`, `paginacao::mapear_*` e
@@ -7302,6 +7311,116 @@ registro de cada uma no ponto em que nasceu.
   mesmo lote, a montagem do caso `vagas: termino, colheita, coleta e
   nascimento ao mesmo tempo`, que a CI 523 reprovou (ver também *As do
   lote A6*).
+  No lote A7, [B], os achados do adversário do lote A6 — os cinco baixos e
+  os três informativos — e o item 10 do revisor do lote A6, sem
+  autoridade, regra, registro ou semântica de auditoria novos:
+  (a) as guardas do `xtask` fecham os quatro desvios que compilavam e
+  passavam. No item de `lancar_por`, de `executar` e de
+  `trocar_a_imagem`, nenhum `impl`: o compilador não escopa o método de um
+  `impl` de dentro de uma função, que vale onde o tipo valer, e um `impl
+  NaoLancou { pub(crate) fn sem_gate(…) }` dentro de `lancar_por` dava a
+  todo o crate o fio novo do lançamento, com a `Carga` e o `hospedar` de
+  lá (o X1); e nenhum `#[macro_export]`, `#[no_mangle]` nem
+  `#[export_name]` nos arquivos da carga. No `programa.rs`, que define os
+  carregadores, a regra pela estrutura do `usuario/mod.rs`, pela mesma
+  máquina e com a tabela dele — o `carregar` só no `executar` e no
+  `carregar_de_teste`, os passos só no `carregar`, o `entrar` só no
+  `executar` e no `entrar_de_teste` —, e nenhum `extern` nele nem no
+  `codigo.rs`: um `pub(super) const ABRIR: … = carregar;` ali dava a carga
+  aos irmãos como valor (o A2; `LUGAR_DA_CARGA_NO_PROGRAMA` e
+  `carga_fora_do_lugar_em`). Num dono, todo `use` no nível de um módulo que
+  passa por um nome protegido se acusa, com `pub` ou sem: o lote A6
+  deixava o sem `pub` de um módulo sem filhos de fora escritos, e uma macro
+  do próprio dono — `mod $nome;` — os declarava sem escrevê-los (o A3). E o
+  kernel só liga os recursos instáveis da lista do `xtask` —
+  `abi_x86_interrupt` e `cfg_overflow_checks` (`RECURSOS_DO_KERNEL`) —,
+  sem `${…}` nem item `macro` no código dele, e sem `crate-attr` no
+  config do cargo, no `xtask` e na CI: a macro 2.0 (`decl_macro`) levava o
+  `DesfechoDoLancamento` para fora do dono sem a palavra, e o
+  `${concat(…)}` (`macro_metavar_expr_concat`) montava num irmão o
+  `carregar` e o `entrar` com pedaços — os dois compilam com o compilador
+  oficial, nas duas arquiteturas, cada um com uma linha no `main.rs` (os
+  A4 e A5), e o `-Zcrate-attr` liga o recurso sem ela. Um pacote do
+  repositório de que o kernel depende não reabre o `${concat}`: o recurso
+  de uma macro exportada se confere no pacote que a usa — o kernel —, e
+  não no que a define; e a macro 2.0 de um pacote de fora resolve o
+  `crate` no pacote dela, e só alcança o kernel pelos tokens que ele lhe
+  passa, que a regra dos argumentos de uma macro lê. A mensagem da carga
+  fora do lugar diz o falso positivo — o nome de outro módulo muda a
+  tabela, e a regra não afrouxa;
+  (b) no NSF, o nascimento pelo `fork` — o `filho N` do `process.fork` —
+  também só se lê num `ALLOW`, como o `processo N lancado` desde o lote
+  A6: um `ERROR` ou uma recusa com `filho N`, de um `auditar_do_kernel`,
+  que grava qualquer método, daria o N a quem gravou, e o nascimento de
+  verdade, depois, não entraria (o I1). O kernel grava toda bifurcação com
+  `ALLOW`; o registro não muda, muda a leitura;
+  (c) a guarda do `DesfechoDoLancamento` contra o código que permite vale
+  nas duas compilações: era um `debug_assert!`, e em release um chamador
+  de amanhã que passasse `ALLOW` com `processo N lancado` forjaria a
+  proveniência de N, que o NSF lê justamente por ser `ALLOW` (o I2). Com
+  um código que permite, o desfecho não grava, diz no log do kernel e
+  devolve zero — o `gravar` e o `gravar_no_comando`, por uma guarda só —,
+  e o código não se troca por outro;
+  (d) o caso `vagas: termino, colheita, coleta e nascimento ao mesmo
+  tempo` conta as passadas do outro coletor da partida até a parada —
+  pelo menos duas, e o número no log —: nascido primeiro, ele podia girar
+  com o lançador preso no núcleo dele, e as passadas de antes da partida
+  bastavam para "nada correu ao mesmo tempo" (o V1);
+  (e) as duas diferenças de `nao_carrega`, no `nascimento.rs`, têm cada
+  uma a mensagem dela: "o user.run de uma imagem que nao se carrega
+  lancou" e "… recusou com outro motivo", com o motivo no log (o item 10
+  do revisor do lote A6).
+  O que fica: (1) dentro da chamada do `exec`, mascarada, roda também a
+  desmontagem do espaço anterior — o `drop(anterior)` de `Trocada::mapear`,
+  que chama `destruir_espaco`, com as interrupções mascaradas e a trava da
+  paginação, que é global —, do tamanho do que o processo mapeou, que o teto
+  das páginas não limita; e o mesmo na morte de um processo, no coletor (o
+  I3). Medida no lote A7, no emulador, por uma instrumentação fora do commit
+  — o contador da arquitetura por dentro de uma máscara só, e os tiques
+  perdidos de uma borda de tique a outra —: com a imagem no teto (64 MiB) e
+  o `mapear` cheio (176 MiB) — 61 440 páginas, mais as tabelas —, a
+  desmontagem levou de 22 a 36 ms em release e de 270 a 420 ms em depuração,
+  nas duas arquiteturas — uns 0,4 a 0,6 µs por página em release —, e a do
+  exemplo, sem nada mapeado, menos de 1,2 ms. Com mais de um núcleo, os
+  outros andam o relógio durante ela, e ele não perde nada; com um núcleo
+  só, o tique que vence na janela anda o relógio uma vez, quando as
+  interrupções voltam, e os outros pontos da grade se perdem — o rearme os
+  pula —: um tique em release, e de 26 a 34 em depuração. Um núcleo que pede
+  a trava da paginação no meio espera com as interrupções mascaradas também.
+  Fica com a (1) do lote A6, a carga do `exec` dentro da chamada, para o
+  mesmo lote seguinte; (2) o `obter`, no `codigo.rs`, não tem tabela:
+  sozinho, ele não entra num programa, e o arquivo fica com a regra do
+  `extern` e a dos atributos; (3) o `xtask` confere o que o repositório diz
+  do build — o config do cargo, as fontes dele, a CI —, e não o ambiente de
+  quem compila: ele tira do build do kernel o `RUSTFLAGS` e o
+  `CARGO_ENCODED_RUSTFLAGS`, e não um `CARGO_TARGET_<alvo>_RUSTFLAGS` ou um
+  `CARGO_BUILD_RUSTFLAGS` do shell, que a CI não põe. Os casos do lote A7:
+  `contencao: o desfecho de um lancamento com um codigo que permite nao
+  grava`, novo, nas duas compilações — o `ALLOW` não deixa registro, o log
+  diz uma vez em cada caminho, o de fora de um comando e o de dentro, e o
+  NSF, que leu o controle, com `ERROR`, não acha o nascimento —; `vagas:
+  termino, colheita, coleta e nascimento ao mesmo tempo`, reforçado; e os
+  quatro que passam por `nao_carrega`, com as duas mensagens — `contencao: o
+  user.run de uma imagem que nao se carrega grava o desfecho`, os dois do
+  lote A5 (`contencao: a imagem de entradas ou de notas demais nao se
+  carrega, e a do teto lanca` e `contencao: o segmento vazio no teto nao
+  ganha a pagina de cima`) e `contencao: o orcamento das notas vem antes de
+  le-las, e o teto invade a pilha`, do lote A6; no hospedeiro,
+  `adversario_a6_o_filho_do_fork_so_num_allow` (`seguranca::evento`); no
+  `xtask`, os cinco do adversário —
+  `adversario_a6_o_impl_dentro_de_lancar_por`,
+  `adversario_a6_o_carregador_no_arquivo_que_o_define`,
+  `adversario_a6_o_filho_de_fora_por_uma_macro`,
+  `adversario_a6_a_macro_2_no_dono` e
+  `adversario_a6_o_nome_montado_por_concat` —,
+  `o_impl_de_dentro_e_os_atributos_que_exportam_nao_saem_do_lugar_da_carga`,
+  `a_carga_so_no_lugar_dela_no_programa`,
+  `a_carga_no_programa_reprova_pelo_caminho` e
+  `os_recursos_de_macro_nao_entram_no_kernel`, novos, e
+  `o_use_do_dono_nao_leva_o_nome_protegido_a_outro_arquivo`, reforçado; e as
+  dezenove mutações, com cinco de antes, de novo (ver *As do lote A7*, em
+  [As mutações do ponto sem volta e de quem
+  pede](#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
 - **A margem de memória da compressão concorrente** (de fora da 14.1 e da
   correção da vaga do morto; investigada em 8 de novembro de 2026, sem mudar
   o comportamento): no x86_64 em debug, o caso `compressao: varias ao mesmo
@@ -9097,8 +9216,15 @@ nenhuma (`carregadores_nos_irmaos`); que nenhum arquivo do módulo, nem o
 lista do `use` (`carregadores_renomeados`); que, no próprio
 `usuario/mod.rs`, cada carregador e cada passo da carga só aparece no item
 das funções do lançamento e da troca de imagem, e a palavra `extern` só
-dentro de `lancar_por` (`carga_fora_do_lugar`, desde o lote A6); e que os
-dois arquivos dos carregadores não têm macro nenhuma.
+dentro de `lancar_por` (`carga_fora_do_lugar`, desde o lote A6); que,
+desde o lote A7, a mesma regra vale no `programa.rs`, com a tabela dele —
+cada carregador só nas funções que o usam ali
+(`LUGAR_DA_CARGA_NO_PROGRAMA`) —, nenhum `impl` mora no item das funções
+da carga, e nenhum dos três arquivos — o `usuario/mod.rs`, o `programa.rs`
+e o `codigo.rs` — tem o `extern` fora de `lancar_por` nem um atributo que
+exporte — o `#[macro_export]`, o `#[no_mangle]`, o `#[export_name]`
+(`carga_fora_do_lugar_em`); e que os dois arquivos dos carregadores não
+têm macro nenhuma.
 
 ### Da rede ao processo
 
@@ -11860,7 +11986,7 @@ avaria do lote A5 chegava.
 | Mutação | Reprovada por |
 |---|---|
 | o orçamento das notas depois de ler o segmento (EL6) | `contencao: o orcamento das notas vem antes de le-las, e o teto invade a pilha`: "o orcamento das notas nao vem antes de ler o segmento" — "a nota acima do orcamento: Some(\"nota passa do fim do segmento\")" |
-| o limite de cima da faixa com `>=` (PG3) | o mesmo caso, no `user.run` do segmento que acaba no `TETO`: "o user.run de uma imagem que nao se carrega lancou" — recusado com "um segmento quer paginas fora do espaco do usuario", e não com o "esperava `um segmento invade a pilha do processo`" |
+| o limite de cima da faixa com `>=` (PG3) | o mesmo caso, no `user.run` do segmento que acaba no `TETO`: "o user.run de uma imagem que nao se carrega recusou com outro motivo" — no log, "recusou com Some(\"um segmento quer paginas fora do espaco do usuario\"), decidido ALLOW, e nao com `um segmento invade a pilha do processo`". No lote A6, `nao_carrega` dava às duas diferenças a mensagem do lançamento, "… lancou"; a de agora é do lote A7, rodada de novo (ver *As do lote A7*) |
 | a tabela de segmentos fora da imagem lida como vazia (EL7) | `elf: recusa imagens invalidas`: "o leitor de ELF recusou uma imagem invalida pelo motivo errado" — "e_phoff no fim da imagem: recusou com `o ELF nao tem nenhum segmento carregavel`, e nao com `tabela de segmentos fora da imagem`" |
 | a conferência sem o teto das páginas (PG4) | `contencao: a imagem de paginas demais nao se confere, e a do teto se confere`: "a conferencia da imagem nao tem o teto das paginas" — "o ola com uma pagina a mais: None, e nao Some(\"os segmentos pedem paginas demais\")" |
 | o teto com `>=` (PG5) | o mesmo caso — "o ola no teto das paginas: Some(\"os segmentos pedem paginas demais\"), e nao None" |
@@ -11912,6 +12038,72 @@ partida, a corrida passava a um lançador: "um lancador nao nasceu: nao ha
 vaga livre para outro fio". O caso novo, sozinho, passou cinco vezes em cada
 arquitetura (`DUKE_PARTE=385/1060` no x86_64 e `384/1045` no aarch64), uma
 vez em cada com a tabela cheia (84 sem vaga no x86_64 e 228 no aarch64).
+
+#### As do lote A7
+
+Dezenove mutações contra o lote A7 — os achados do adversário do lote A6 e
+o item 10 do revisor dele, no item *A soma das cotas de processos e a cota
+por sessão*, em [Decisões pendentes](#decisões-pendentes) —, e cinco de
+antes, de novo: a NS6 do lote A6, com o `--no-fail-fast`, para mostrar os
+dois testes que a reprovam; a PG3 do lote A6 e a PG1 do lote A5, que chegam
+cada uma a uma das duas mensagens de `nao_carrega`; e a DF1 e a DF2 do lote
+A5, o chamador de verdade com um código que permite, que paravam o kernel
+de depuração pela guarda e agora reprovam pelo desfecho que falta. Uma de
+cada vez, no repositório, e restauradas byte a byte, com o resumo SHA-256
+conferido e a hora do arquivo renovada para o cargo recompilar. As do
+hospedeiro, nos testes do `xtask` e do `seguranca`; as da suíte, no x86_64,
+cada uma contra a parte que tem o caso que a deve reprovar
+(`DUKE_PARTE=<i+1>/1061`: um caso por parte, e a cauda, de sete) — a DG2 em
+release, onde ela vale. As dezenove reprovaram; nenhuma é equivalente.
+
+| Mutação | Reprovada por |
+|---|---|
+| o `impl` de dentro das funções da carga sem acusação (XT24) | `o_impl_de_dentro_e_os_atributos_que_exportam_nao_saem_do_lugar_da_carga` e `adversario_a6_o_impl_dentro_de_lancar_por` |
+| sem os atributos que exportam (XT25) | `o_impl_de_dentro_e_os_atributos_que_exportam_nao_saem_do_lugar_da_carga` |
+| sem a tabela do `programa.rs` (XT26) | `a_carga_so_no_lugar_dela_no_programa`, `a_carga_no_programa_reprova_pelo_caminho`, `adversario_a6_o_carregador_no_arquivo_que_o_define` e o do `impl`, que perde o `carregar` como função da carga |
+| a regra do `programa.rs` e do `codigo.rs` desligada de `carregadores_alargados`, que o `invariantes` chama (XT27) | os mesmos quatro |
+| a declaração de um carregador conta, no arquivo que o define (XT28) | seis: os dois do `programa.rs`, o do `impl`, `os_carregadores_nao_se_alargam`, `nenhuma_macro_nos_arquivos_dos_carregadores` e `o_atributo_da_suite_num_comentario` — o `programa.rs` de verdade e o dos testes reprovam pela própria declaração |
+| o `extern` livre no arquivo sem função de entrada (XT29) | `a_carga_so_no_lugar_dela_no_programa`, no `programa.rs` e no `codigo.rs` |
+| só o `use` com o `pub` logo antes — a exceção do lote A6 de volta, e mais larga (XT30) | `o_use_do_dono_nao_leva_o_nome_protegido_a_outro_arquivo` e `adversario_a6_o_filho_de_fora_por_uma_macro` |
+| sem a lista dos recursos (XT31) | `os_recursos_de_macro_nao_entram_no_kernel` |
+| sem a lista velha — o recurso da lista que sumiu do `main.rs` (XT32) | o mesmo |
+| sem o `${…}` (XT33) | o mesmo e `adversario_a6_o_nome_montado_por_concat` |
+| sem o item `macro` (XT34) | o mesmo e `adversario_a6_a_macro_2_no_dono` |
+| sem o atributo de crate pela linha de comando (XT35) | `os_recursos_de_macro_nao_entram_no_kernel` |
+| sem a suíte na regra dos recursos de macro (XT36) | o mesmo, pela árvore à parte |
+| a mensagem da carga sem o falso positivo (XT38) | `a_carga_so_no_lugar_dela_no_programa` |
+| o filho do `fork` sem o `ALLOW` (NS7) | `adversario_a6_o_filho_do_fork_so_num_allow` (`seguranca::evento`) |
+| a NS6 do lote A6, de novo: o nascimento inteiro sem o `ALLOW` | `o_nascimento_inteiro_so_num_allow` (`seguranca::evento`) e `o_erro_que_diz_lancado_nao_e_nascimento` (o motor), os dois, com o `cargo test -p seguranca --no-fail-fast` — no lote A6 o cargo parou no primeiro |
+| a guarda do desfecho desligada (DG1) | `contencao: o desfecho de um lancamento com um codigo que permite nao grava`: "o desfecho de um lancamento gravou um codigo que permite" — "devolveu 5 fora do comando e 0 pelo caminho do comando, e o log disse 0 vez(es)" |
+| a guarda só na compilação de depuração, como o `debug_assert!` de antes (DG2) | o mesmo caso, em release, com a mesma mensagem; em depuração ele passa, e é o controle: a guarda de antes só faltava em release |
+| a guarda só no caminho de fora de um comando (DG3) | o mesmo caso: "o desfecho recusado nao disse no log, uma vez em cada caminho, o que recusou" — "o log disse 1 vez(es)" |
+| o outro coletor para na partida (VG1) | `vagas: termino, colheita, coleta e nascimento ao mesmo tempo`: "nada correu ao mesmo tempo: o caso nao conferiu nada" — "737 passadas do outro coletor, 0 depois da partida": as 737 de antes da partida bastavam para a conferência do lote A6 |
+| a PG3 do lote A6, de novo: o limite de cima da faixa com `>=` | `contencao: o orcamento das notas vem antes de le-las, e o teto invade a pilha`: "o user.run de uma imagem que nao se carrega recusou com outro motivo" — no log, "recusou com Some(\"um segmento quer paginas fora do espaco do usuario\"), decidido ALLOW, e nao com `um segmento invade a pilha do processo`" |
+| a PG1 do lote A5, de novo: a faixa sem o limite de cima | `contencao: o segmento vazio no teto nao ganha a pagina de cima`: "o user.run de uma imagem que nao se carrega lancou" — `launched: true` |
+| a DF1 do lote A5, de novo: a imagem que não se carrega com o desfecho `ALLOW` | `contencao: o user.run de uma imagem que nao se carrega grava o desfecho`: "o user.run de uma imagem que nao se carrega ficou sem o desfecho" — e o log do kernel, "o desfecho do lancamento de /armazem/compartilhado/codigo/nao-e-elf veio com ALLOW: o desfecho grava so o que nao acontece, e nada foi gravado"; no lote A5, era o pânico da guarda |
+| a DF2 do lote A5, de novo: a recusa do gate sobre quem pede com o desfecho `ALLOW` | `contencao: a recusa do user.run no gate diz o codigo`: "a recusa de quem pede no user.run ficou sem o desfecho" — pelo `gravar_no_comando`, dentro de um comando de verdade, com o mesmo log |
+
+Antes delas, as rodadas dirigidas do lote, todas verdes: o caso novo, nas
+duas arquiteturas, em depuração e em release, duas vezes cada — e as oito
+de novo, depois que ele passou a conferir também o caminho de dentro de um
+comando —; `vagas: termino, colheita, coleta e nascimento ao mesmo tempo` e
+`contencao: o orcamento das notas vem antes de le-las, e o teto invade a
+pilha`, nas duas, em depuração, duas vezes cada; e a regressão — os 37
+casos de `contencao:`, `elf:`, `manifesto:`, `usuario:`, `codigo:`,
+`fluxo:`, `zumbis:` e `nsf:` que passam pela conferência da imagem, pelo
+lançamento, pela troca de imagem ou pelo grafo, o das páginas do lote A6 e
+os outros sete de `vagas:` —, nas duas, em depuração. A suíte inteira ficou
+com a CI.
+
+E a demonstração do V1, fora do commit, com o caso esperando cinco tiques
+antes da partida, para o outro coletor girar com o lançador preso no núcleo
+dele: com a VG1, o caso do lote A6 passou nas duas arquiteturas ("465
+passadas do outro coletor" no x86_64 e 248 no aarch64, todas antes da
+partida), e o de agora reprovou nas duas com "nada correu ao mesmo tempo"
+("535 passadas do outro coletor, 1 depois da partida" e "355 …, 0 depois da
+partida") — no x86_64, com uma passada em voo na partida, é o mínimo de
+duas que reprova —; sem a VG1, o de agora passou (3569 e 2253 depois da
+partida).
 
 ### As mutações do chamado do coletor
 

@@ -51,11 +51,16 @@ const GUARD_DA_PILHA: u64 = BASE_DA_PILHA - TAMANHO_PAGINA;
 /// — no `exec`, dentro da chamada, com as interrupções mascaradas —, e um
 /// `.bss` de 255 MiB num arquivo de uma página passava, quase todo o espaço
 /// do usuário (o achado B4 do adversário do lote A5). Com o teto, o pior
-/// caso fica em 64 MiB, um quarto disso; tirar a carga do `exec` de dentro
-/// da chamada, como o `user.run` já faz no fio novo, é outra mudança, que
-/// fica para depois. O teto é o do mapa que o `protocolo` já documenta — o
-/// código e os dados do programa até 64 MiB —, e não o de um programa de
-/// verdade: os do Duke pedem umas poucas páginas.
+/// caso da carga fica em 64 MiB, um quarto disso; tirar a carga do `exec`
+/// de dentro da chamada, como o `user.run` já faz no fio novo, é outra
+/// mudança, que fica para depois. O teto não limita o resto da mesma
+/// chamada: a desmontagem do espaço anterior, no terceiro passo, vai até o
+/// que o processo mapeou — a imagem de antes e o que o `mapear` deu —, com
+/// a trava da paginação e as interrupções mascaradas (o I3 do adversário do
+/// lote A6, medido no lote A7: ver o "O que fica" dele, no README). O teto
+/// é o do mapa que o `protocolo` já documenta — o código e os dados do
+/// programa até 64 MiB —, e não o de um programa de verdade: os do Duke
+/// pedem umas poucas páginas.
 pub const MAX_PAGINAS_DA_IMAGEM: u64 = (protocolo::usuario::MAPEAVEL.0 - BASE) / TAMANHO_PAGINA;
 
 /// Qual entrada da tabela de topo pertence ao processo.
