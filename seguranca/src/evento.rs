@@ -706,8 +706,15 @@ fn classificar(r: &Registro, d: &Detalhe) -> Tipo {
     // O fio do filho é sempre maior que o do pai: os fios só crescem, e o
     // filho nasce depois. Um `filho N` com N até o fio do pai é um registro
     // cortado ou inconsistente — o pedaço do número é o de outro processo,
-    // talvez de outra identidade —, e não um nascimento.
-    if r.metodo == "process.fork"
+    // talvez de outra identidade —, e não um nascimento. E, como o do
+    // lançamento, só num `ALLOW`: o kernel grava toda bifurcação assim
+    // (`autorizacao::auditar_bifurcacao`), e um `ERROR` ou uma recusa com
+    // `filho N` — de um `auditar_do_kernel`, que grava qualquer método —
+    // daria o N a quem gravou, e o nascimento de verdade, depois, não
+    // entraria (o I1 do adversário do lote A6). O registro não muda: muda a
+    // leitura.
+    if r.codigo == Codigo::Allow
+        && r.metodo == "process.fork"
         && let Some(filho) = numero_apos(&d.resto, "filho ")
         && d.processo.as_ref().is_none_or(|(pai, _)| filho > *pai)
     {
@@ -1511,6 +1518,30 @@ pub(crate) mod testes {
                 Tipo::Decisao,
                 "{codigo:?}"
             );
+        }
+    }
+
+    /// O I1 do adversário do lote A6: o nascimento pelo `fork` também só num
+    /// `ALLOW`. A regra do `filho N` (`process.fork`) lia o texto sem olhar
+    /// o código, como a do `processo N lancado` lia antes do lote A6: um
+    /// `ERROR` ou uma recusa com `filho 41` — de um `auditar_do_kernel`, que
+    /// é `pub` e grava qualquer método — daria o 41 a quem gravou, e o
+    /// nascimento de verdade, depois, não entraria. O kernel grava toda
+    /// bifurcação com `ALLOW` (`autorizacao::auditar_bifurcacao`). Reprovava
+    /// antes do lote A7.
+    #[test]
+    fn adversario_a6_o_filho_do_fork_so_num_allow() {
+        let tipo = |codigo: Codigo| {
+            let r = registro(1, [0; 32], |r| {
+                r.metodo = "process.fork".to_string();
+                r.codigo = codigo;
+                r.detalhe = "pelo processo 3 (x 00000000): filho 41".to_string();
+            });
+            Evento::de(&r, 0).tipo
+        };
+        assert_eq!(tipo(Codigo::Allow), Tipo::Nascimento { filho: 41 });
+        for codigo in [Codigo::Error, Codigo::DenyPolicy, Codigo::DenyContained] {
+            assert_ne!(tipo(codigo), Tipo::Nascimento { filho: 41 }, "{codigo:?}");
         }
     }
 
