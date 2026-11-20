@@ -485,19 +485,8 @@ fn desvios_das_variaveis(ler: impl Fn(&str) -> Option<String>) -> Vec<String> {
 /// forma de escrever a chave. A consulta é a do cargo nightly
 /// (`-Zunstable-options config get`); o canário diz se ela mudar.
 fn desvios_do_config(dir: &Path, rotulo: &str) -> Vec<String> {
-    let saida = Command::new(env!("CARGO"))
-        .args([
-            "-Zunstable-options",
-            "config",
-            "get",
-            "--format",
-            "json-value",
-            "build",
-        ])
-        .current_dir(dir)
-        .output();
-    match saida {
-        Ok(s) if s.status.success() => chaves_que_trocam(&String::from_utf8_lossy(&s.stdout))
+    match valor_do_config(dir, "build") {
+        Ok(Some(build)) => chaves_que_trocam(&build)
             .into_iter()
             .map(|chave| {
                 format!(
@@ -506,17 +495,52 @@ fn desvios_do_config(dir: &Path, rotulo: &str) -> Vec<String> {
             })
             .collect(),
         // Sem a tabela `[build]` em lugar nenhum.
-        Ok(s) if String::from_utf8_lossy(&s.stderr).contains("is not set") => Vec::new(),
-        Ok(s) => vec![format!(
-            "em `{rotulo}`, o cargo não respondeu à consulta do config: {}",
-            String::from_utf8_lossy(&s.stderr)
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim()
-        )],
-        Err(e) => vec![format!("em `{rotulo}`, o cargo não rodou: {e}")],
+        Ok(None) => Vec::new(),
+        Err(e) => vec![format!("em `{rotulo}`, {e}")],
     }
+}
+
+/// O valor de `chave` no config do cargo de `dir`, em JSON, como o próprio
+/// cargo o lê ali — todos os arquivos que valem para o diretório, com a
+/// extensão e sem ela, os de cima e o do `CARGO_HOME`, com os escapes do
+/// TOML resolvidos —; ou `None`, sem a chave em lugar nenhum. As variáveis
+/// `CARGO_*` entram na consulta de uma chave de valor
+/// (`target.<alvo>.rustflags`, `build.rustflags`), e não na de uma tabela
+/// inteira, de que o cargo só as cita. A consulta é a do cargo nightly
+/// (`-Zunstable-options config get`); o canário diz se ela mudar. Falha
+/// fechada: uma resposta que não se entende é um erro.
+pub(crate) fn valor_do_config(dir: &Path, chave: &str) -> Result<Option<String>, String> {
+    let saida = Command::new(env!("CARGO"))
+        .args([
+            "-Zunstable-options",
+            "config",
+            "get",
+            "--format",
+            "json-value",
+            chave,
+        ])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("o cargo não rodou: {e}"))?;
+    if saida.status.success() {
+        return Ok(Some(
+            String::from_utf8_lossy(&saida.stdout).trim().to_string(),
+        ));
+    }
+    let erro = String::from_utf8_lossy(&saida.stderr);
+    if erro.contains("is not set") {
+        return Ok(None);
+    }
+    // A linha do erro, e não a de um aviso antes dela.
+    let linha = erro
+        .lines()
+        .find(|l| l.starts_with("error"))
+        .or_else(|| erro.lines().next())
+        .unwrap_or("")
+        .trim();
+    Err(format!(
+        "o cargo não respondeu à consulta do config (`{chave}`): {linha}"
+    ))
 }
 
 /// As chaves de [`CHAVES_QUE_TROCAM`] definidas na tabela `[build]` que o
