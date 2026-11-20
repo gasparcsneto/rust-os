@@ -1813,7 +1813,7 @@ como [C].
 | Id | O que se faz | O estado |
 |---|---|---|
 | [A1-4](#a1-4) | a recusa da cota diz quantos dos contados são mortos que esperam o coletor | feito, no `ee4ea45` |
-| [F4](#f4) | o `exec` decide de novo no ponto sem volta | feito, no `869dc08`, e o resto que o adversário do lote achou, no `97ea728`; o que o adversário da integração achou, no lote A3 do #448; o desfecho da imagem que não se carrega e o das recusas sobre quem pede, e o erro do `exec` da imagem que não se confere, no lote A4; o que o adversário do lote A4 achou, no lote A5; e o que o adversário e o revisor do lote A5 acharam, no lote A6 |
+| [F4](#f4) | o `exec` decide de novo no ponto sem volta | feito, no `869dc08`, e o resto que o adversário do lote achou, no `97ea728`; o que o adversário da integração achou, no lote A3 do #448; o desfecho da imagem que não se carrega e o das recusas sobre quem pede, e o erro do `exec` da imagem que não se confere, no lote A4; o que o adversário do lote A4 achou, no lote A5; o que o adversário e o revisor do lote A5 acharam, no lote A6; e o que o adversário e o revisor do lote A6 acharam, no lote A7 |
 | [I7](#i7) | o comando que existe, num console sem ninguém, gravado sem o resumo dos parâmetros | feito, no lote B do #448; a troca da própria senha com algo na linha, no lote B2 |
 | [A9-RESUMO](#a9-resumo) | o resumo de 16 dígitos na descrição de um programa | feito, no lote B do #448; o que o adversário do lote achou — o número da regra do firewall que se perde no corte, e o par misturado de duas descrições inteiras — no lote B2 |
 | [DN-4](#dn-4) | o handoff como o próximo marco da fase 15 | decidido pelo roteiro |
@@ -2051,6 +2051,39 @@ pendência #298.
   Dois casos novos, um reforçado, seis testes no hospedeiro e vinte e oito
   mutações, todas reprovadas ([README](../README.md#decisões-pendentes), "A
   soma das cotas de processos e a cota por sessão").
+
+  O lote A7, [B], fez os achados do adversário do lote A6 — os cinco
+  baixos e os três informativos — e o item 10 do revisor dele, sem
+  autoridade, regra, registro ou semântica de auditoria novos:
+  - as guardas do `xtask` fecham os desvios que compilavam e passavam:
+    nenhum `impl` no item das funções da carga — o compilador não escopa
+    o método de um `impl` de dentro de uma função, e um dentro de
+    `lancar_por` dava o fio novo a todo o crate —, e nenhum atributo que
+    exporte nos arquivos dela; no `programa.rs`, cada carregador só nas
+    funções que o usam, pela mesma regra do `usuario/mod.rs`, e nenhum
+    `extern` nele nem no `codigo.rs`; num dono, todo `use` no nível de um
+    módulo que passa por um nome protegido, com `pub` ou sem; e o kernel
+    só com os recursos instáveis da lista, sem macro 2.0, sem `${…}` e
+    sem `crate-attr` no build — a macro 2.0 e o `${concat}` levavam ou
+    montavam o nome protegido sem a palavra;
+  - no NSF, o nascimento pelo `fork` também só se lê num `ALLOW`. O
+    registro não muda: muda a leitura;
+  - a guarda do `DesfechoDoLancamento` contra o código que permite vale
+    nas duas compilações — era um `debug_assert!` —: com um que permite,
+    o desfecho não grava, diz no log e devolve zero;
+  - o caso das vagas conta as passadas do outro coletor da partida à
+    parada, e as duas diferenças de `nao_carrega` têm cada uma a mensagem
+    dela.
+
+  A desmontagem do espaço anterior dentro da chamada do `exec`, que o
+  teto das páginas não limita, foi medida — no emulador, com 240 MiB
+  mapeados, de 22 a 36 ms em release e de 270 a 420 ms em depuração, com
+  as interrupções mascaradas; com mais de um núcleo, o relógio não perde
+  nada, e com um só perde um tique em release — e fica com a carga do
+  `exec`, para um lote seguinte. Um caso novo, cinco reforçados, dez testes
+  no hospedeiro e dezenove mutações, todas reprovadas, com cinco de antes
+  rodadas de novo ([README](../README.md#decisões-pendentes), "A soma das
+  cotas de processos e a cota por sessão").
 
 ### I7
 

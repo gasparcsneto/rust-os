@@ -15703,6 +15703,18 @@ parte 3/3: o x86 a -259 ppm (2057 s em 2057) e o ARM a -49 ppm (2056 s em
 dispositivos (x86_64 e aarch64), que esperou 47 minutos na fila e rodou
 33,1; o maior, a persistência do x86, parte 1/3, com 68,7.
 
+A CI 525 (`c7aa3fd`, o #455-C e as correções de texto do revisor do lote
+A6) passou verde, 48 de 48, na primeira tentativa, em 81,5 minutos e 1311
+de máquina. No boot do x86, no runner, o aviso esperado no QEMU sem
+aceleração — "o CPUID nao anuncia o TSC invariante (0x80000007, EDX bit
+8)…" — e a conferência só com o PIT no relógio: "conferencia contra o PIT:
+19 tique(s) do APIC e 0 disparo(s) antes do prazo em 20 disparo(s) do PIT,
+e o relogio andou 20". O holdover da bancada de tempo, na parte 3/3: o x86
+a -317 ppm (2057 s em 2057) e o ARM a -2 ppm (2056 s em 2056), os dois
+dentro da guarda. O último job foi a cópia de segurança do x86, que
+esperou 28,8 minutos na fila e rodou 48,1; o maior, a persistência do x86,
+parte 2/3, com 64,4.
+
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na
 508 e 58 na 509 —, e o que sobra até o piso é a ordem da fila, que não se

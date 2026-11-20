@@ -147,12 +147,15 @@ pontos onde acontece — não num canal paralelo:
   de um comando se grava fora do fio dele — no fio novo, que não espera a
   resposta e em geral grava depois dela —, e só o lançamento o nomeia
   (`NOMES_PROTEGIDOS`, no `xtask`). Ele grava só o lançamento que não
-  acontece — a compilação de depuração confere que o código não permite:
-  um `ALLOW` dali, com um `processo N lancado`, seria um nascimento
-  forjado para o NSF —, e o fio novo que o leva — a `Carga`, o
-  `hospedar` e o `carregar_a_carga` — mora dentro de
-  `usuario::lancar_por`, em itens que nenhum outro item alcança (o lote
-  A5). E as recusas das perguntas sobre quem
+  acontece: com um código que permite, não grava nada, diz no log do
+  kernel e devolve zero, nas duas compilações — até o lote A6, só a
+  compilação de depuração o conferia, e em release um `ALLOW` dali, com um
+  `processo N lancado`, seria um nascimento forjado para o NSF (o lote
+  A7) —, e o fio novo que o leva — a `Carga`, o `hospedar` e o
+  `carregar_a_carga` — mora dentro de `usuario::lancar_por`, em itens que
+  nenhum outro item alcança (o lote A5), sem `impl` nenhum ali dentro, que
+  o compilador não escopa — o método valeria onde o tipo valer (o lote
+  A7). E as recusas das perguntas sobre quem
   pede — o journal recusado, quem pede encerrado ou contido, o editor, o
   papel, a cota,
   também a contada de novo no nascimento — continuam gravadas como o
@@ -312,7 +315,9 @@ autoridade —, e um `filho N` com N até o fio do pai não é nascimento: é o
 pedaço do número de outro processo, num registro cortado. E o `processo N
 lancado` só é nascimento num `ALLOW`, inteiro ou cortado: um `ERROR` ou uma
 recusa que o diga — o desfecho de um lançamento que não aconteceu — é uma
-execução, ou uma decisão, e não dá o filho a quem a gravou (o lote A6). E a
+execução, ou uma decisão, e não dá o filho a quem a gravou (o lote A6); e o
+`filho N` do `process.fork` também só num `ALLOW`, que é como o kernel grava
+toda bifurcação (o lote A7). E a
 execução que
 cita uma decisão mais velha que o registro que pôs o programa de agora no
 processo não o troca, nem liga aresta
