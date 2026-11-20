@@ -952,6 +952,15 @@ fn sem_zumbis(_: u64) -> bool {
 /// tempo" — o que ele conferiu antes disso tinha passado. A recusa de um
 /// fio do caso é agora erro dele: para tudo, espera os que nasceram e falha
 /// com o motivo.
+///
+/// # O que é "ao mesmo tempo"
+///
+/// As passadas do outro coletor contadas da partida até a parada, e pelo
+/// menos duas — uma pode estar em voo na partida —, e o número vai ao log.
+/// Nascido primeiro, ele gira com o lançador preso no núcleo dele antes da
+/// partida, e cada volta somava uma passada: um coletor que parasse na
+/// partida passava a conferência com as passadas de antes (o V1 do
+/// adversário do lote A6, desde o lote A7).
 pub(super) fn vagas_tudo_ao_mesmo_tempo() -> Resultado {
     let secundarios: Vec<usize> = nucleos_secundarios().collect();
     if secundarios.is_empty() {
@@ -999,8 +1008,15 @@ pub(super) fn vagas_tudo_ao_mesmo_tempo() -> Resultado {
             );
         }
     }
+    // As passadas do outro coletor da partida até a parada. As de antes da
+    // partida — ele nasce primeiro e gira com o lançador preso no núcleo
+    // dele — não correm ao mesmo tempo que vítima nenhuma, e bastavam para a
+    // conferência de "nada correu ao mesmo tempo" (o V1 do adversário do lote
+    // A6).
+    let mut na_partida = 0;
     if r.is_ok() {
         COMECAR.store(true, SeqCst);
+        na_partida = PASSADAS.load(SeqCst);
         for _ in 0..20 {
             for a in [
                 COLHEDOR_BIFURCA,
@@ -1014,6 +1030,7 @@ pub(super) fn vagas_tudo_ao_mesmo_tempo() -> Resultado {
             passar(3);
         }
     }
+    let durante = PASSADAS.load(SeqCst) - na_partida;
     PARAR.store(true, SeqCst);
     r = r.and(ate(
         todos_parados,
@@ -1035,12 +1052,13 @@ pub(super) fn vagas_tudo_ao_mesmo_tempo() -> Resultado {
     crate::enlace::esvaziar_de_teste();
     crate::log_info!(
         "teste",
-        "vagas: {} vitimas, {} vigiadas, {} sem vaga; {} passadas do outro coletor; mortes \
-         soltas 0/1/mais vezes: {:?}; {} com pedido",
+        "vagas: {} vitimas, {} vigiadas, {} sem vaga; {} passadas do outro coletor, {} depois \
+         da partida; mortes soltas 0/1/mais vezes: {:?}; {} com pedido",
         NASCIDAS.load(SeqCst),
         vigiadas,
         SEM_VAGA.load(SeqCst),
         PASSADAS.load(SeqCst),
+        durante,
         contas,
         com_pedido
     );
@@ -1057,7 +1075,9 @@ pub(super) fn vagas_tudo_ao_mesmo_tempo() -> Resultado {
         "um pedido de uma vitima ao enlace ficou depois da limpeza",
     )?;
     conferir(
-        vigiadas == 0 || PASSADAS.load(SeqCst) == 0,
+        // Uma passada pode estar em voo na partida: duas, pelo menos,
+        // depois dela.
+        vigiadas == 0 || durante < 2,
         "nada correu ao mesmo tempo: o caso nao conferiu nada",
     )?;
     conferir(

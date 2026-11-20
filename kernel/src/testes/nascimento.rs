@@ -3220,13 +3220,26 @@ fn nao_carrega(quem: crate::autorizacao::Chamador, caminho: &str, motivo: &str) 
         &alloc::format!(r#"{{"path":"{caminho}"}}"#),
     );
     crate::log_info!("teste", "contencao: o user.run de `{}`: {}", caminho, r);
+    // As duas diferencas, cada uma com a mensagem dela: lancou — o fio, ou o
+    // `launched: true` —, ou nao lancou e recusou com outro motivo — ou nao
+    // decidiu `ALLOW` —, e o log diz qual.
+    if fs_numero(&r, "thread_id").is_some() || r.contains(r#""launched":true"#) {
+        crate::log_error!("teste", "esperava `{}`: {}", motivo, r);
+        return Err("o user.run de uma imagem que nao se carrega lancou");
+    }
     if super::decisao_do_envelope(&r) != "ALLOW"
-        || fs_numero(&r, "thread_id").is_some()
         || !r.contains(r#""launched":false"#)
         || fs_texto(&r, "error").as_deref() != Some(motivo)
     {
-        crate::log_error!("teste", "esperava `{}`: {}", motivo, r);
-        return Err("o user.run de uma imagem que nao se carrega lancou");
+        crate::log_error!(
+            "teste",
+            "recusou com {:?}, decidido {}, e nao com `{}`: {}",
+            fs_texto(&r, "error"),
+            super::decisao_do_envelope(&r),
+            motivo,
+            r
+        );
+        return Err("o user.run de uma imagem que nao se carrega recusou com outro motivo");
     }
     o_desfecho_do_user_run(cabeca, caminho, politica::Codigo::Error, None, motivo)
         .map_err(|_| "o user.run de uma imagem que nao se carrega ficou sem o desfecho")?;
