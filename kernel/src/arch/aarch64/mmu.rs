@@ -678,6 +678,10 @@ const fn indices(virtual_: u64) -> (usize, usize, usize) {
 
 /// Desce um nível, criando a tabela se ainda não existir.
 ///
+/// A tabela nova entra no lugar de uma entrada **inválida** e, como a
+/// página de [`mapear_frame`], sem `tlbi`: quem a publica é o [`publicar`]
+/// do fim do mapeamento.
+///
 /// # Safety
 /// `entrada` precisa apontar para um descritor válido de L1 ou L2.
 unsafe fn descer(entrada: *mut u64) -> Result<*mut u64, &'static str> {
@@ -701,6 +705,22 @@ unsafe fn descer(entrada: *mut u64) -> Result<*mut u64, &'static str> {
     // SAFETY: o frame acabou de ser alocado e, com a identidade ativa, seu
     // endereço físico é também o virtual.
     unsafe { core::ptr::write_bytes(frame as *mut u8, 0, 4096) };
+
+    // Os zeros antes do descritor que aponta para eles, para todo observador
+    // — e o percorredor de tabelas de cada núcleo é um. Sem a barreira, a
+    // escrita do descritor pode ficar visível antes das dos zeros, e um
+    // percorredor que descesse pela tabela nova nesse intervalo — uma busca
+    // especulativa de outro núcleo, numa faixa do kernel, que todo espaço
+    // enxerga — leria o que o frame tinha antes: talvez uma tabela de outro
+    // espaço, com descritores válidos para frames de outro dono. Uma
+    // tradução assim não gera falha, e a TLB a guarda.
+    //
+    // Enquanto cada página mapeada tinha o `tlbi` dela, uma tradução dessas
+    // morria quando o endereço dela fosse mapeado — por acaso, e só ali. Sem
+    // ele (ver [`publicar`]), a ordem vem desta barreira.
+    //
+    // SAFETY: uma barreira de memória, sem pré-condição.
+    unsafe { asm!("dsb ishst", options(nostack)) };
 
     // SAFETY: instalamos o descritor de tabela apontando para o frame novo.
     unsafe { *entrada = (frame & MASCARA_ENDERECO) | VALIDO | TABELA };
@@ -795,8 +815,12 @@ pub unsafe fn mapear_frame(
             *alvo = (fisico & MASCARA_ENDERECO) | VALIDO | TABELA | bits_de(permissoes);
         }
 
+        // A entrada era inválida — a recusa logo acima garante —, e a tabela
+        // que `descer` tenha criado no caminho também: nenhuma TLB guarda uma
+        // entrada inválida, e não há o que invalidar. Resta publicar a
+        // escrita — ver [`publicar`].
         // SAFETY: a entrada foi escrita; resta publicá-la.
-        unsafe { invalidar(virtual_) };
+        unsafe { publicar() };
         Ok(())
     })
 }
@@ -862,6 +886,12 @@ pub fn desmapear(virtual_: u64) -> Result<u64, &'static str> {
             }
             *alvo = 0;
 
+            // Aqui a entrada era válida, e a TLB de qualquer núcleo pode
+            // guardá-la: só o `tlbi` a tira, antes de o frame voltar a quem
+            // chamou. É também o `tlbi` de uma página que muda de frame ou de
+            // permissão — a cópia na escrita, a carga de um segmento —, que
+            // passa por aqui e mapeia de novo: mapear só publica
+            // ([`publicar`]).
             invalidar(virtual_);
 
             // Recupera as tabelas que esta remoção esvaziou — mas **só** na
@@ -973,7 +1003,71 @@ unsafe fn invalidar_tudo() {
     }
 }
 
-/// Publica uma alteração de tabela invalidando a TLB do endereço.
+/// Publica a troca de uma entrada **inválida** por uma válida — a página
+/// nova de [`mapear_frame`], e as tabelas que [`descer`] cria no caminho —,
+/// sem invalidar a TLB.
+///
+/// # Por que sem `tlbi`
+///
+/// Porque não há o que invalidar. O manual da arquitetura — o *Arm
+/// Architecture Reference Manual for A-profile architecture* (DDI 0487), em
+/// *General TLB maintenance requirements*, no capítulo da VMSA do AArch64 —
+/// deixa a TLB guardar, a qualquer momento, toda entrada que não gera falha,
+/// e só garante fora dela as que geram: "The only translation table entries
+/// guaranteed not to be held in the TLB are those that generate a
+/// Translation fault, an Address size fault, or an Access flag fault." Uma
+/// entrada inválida gera a falha de tradução: nenhuma TLB, de núcleo
+/// nenhum, a guarda — nem a cache dos níveis intermediários do percorredor
+/// de tabelas, pela mesma regra —, e a próxima tradução do endereço lê a
+/// tabela.
+///
+/// O que falta é a escrita chegar ao percorredor, que não lê o que ainda
+/// está no buffer de escritas deste núcleo:
+///
+/// - o `dsb ishst` completa as escritas das tabelas — a do descritor e as
+///   de antes dela — para todo observador do domínio compartilhável
+///   interno: o percorredor deste núcleo e o dos outros;
+/// - o `isb` sincroniza o contexto: as instruções seguintes são buscadas
+///   de novo, e traduzidas depois da barreira. Sem ele, um acesso que o
+///   processador já tivesse adiantado poderia ter sido traduzido antes dela,
+///   com a entrada ainda inválida: uma falha de tradução espúria, que o
+///   kernel não reconhece — no EL1 ela é fatal, e no EL0 mata o processo
+///   (`vetores.rs`).
+///
+/// # O que continua com `tlbi`
+///
+/// Toda troca de uma entrada **válida**, por [`invalidar`]: a remoção
+/// ([`desmapear`]) e a troca de permissão ou de marca
+/// ([`com_descritor_da_folha`] — a cópia na escrita e a compartilhada). E,
+/// por [`invalidar_tudo`], as tabelas que a remoção esvazia, a desmontagem
+/// de um espaço e a troca de espaço. Uma página que muda de frame ou de
+/// permissão passa pela remoção: a resolução da cópia na escrita e
+/// [`crate::paginacao::mapear_faixa_preenchendo`] desmapeiam e mapeiam de
+/// novo, e o `tlbi` é o do primeiro passo.
+///
+/// # O que custava
+///
+/// No emulador com vários núcleos, um `tlbi …is` para os outros núcleos
+/// virtuais e espera por eles: medido, de 20 a 40 µs cada com quatro, e de 6
+/// a 14 com dois, contra meio com um. A carga de uma imagem fazia um a cada
+/// página mapeada, e a da imagem no teto das páginas (16 384) levava, em
+/// release, de 1,8 a 1,9 s com quatro núcleos, contra 0,2 com um.
+///
+/// # Safety
+/// Deve ser chamada logo depois de escrever, no lugar de uma entrada
+/// inválida, o descritor novo.
+unsafe fn publicar() {
+    // SAFETY: barreiras de memória e de instrução, sem pré-condição.
+    unsafe { asm!("dsb ishst", "isb", options(nostack)) };
+}
+
+/// Publica a troca de uma entrada **válida** — por uma inválida, ou por
+/// outra válida —, invalidando a TLB do endereço em todos os núcleos.
+///
+/// A entrada velha pode estar na TLB de qualquer núcleo, e só o `tlbi` a
+/// tira: é o caso da remoção ([`desmapear`]) e o da troca de permissão ou
+/// de marca ([`com_descritor_da_folha`]). Uma entrada que era inválida não
+/// passa por aqui — ver [`publicar`].
 ///
 /// # Safety
 /// Deve ser chamada logo após escrever um descritor.
