@@ -2129,7 +2129,9 @@ pub fn lancar_conferido(
 /// A `Carga`, a entrada do fio novo (`hospedar`) e o `carregar_a_carga`
 /// são itens de dentro desta função: nenhum outro item os alcança, nem os
 /// irmãos do módulo `usuario`, e quem o confere é o compilador (o achado A2
-/// do adversário do lote A4).
+/// do adversário do lote A4). Menos o método de um `impl` de dentro, que o
+/// compilador não escopa — vale onde o tipo valer —: nenhum `impl` aqui
+/// dentro, e o `xtask` o confere (`carga_fora_do_lugar`, desde o lote A7).
 ///
 /// Antes, o fio lia o arquivo sozinho, depois de nascer: o lançamento
 /// respondia "lançado" para um caminho que não existia, e — com o código
@@ -2159,8 +2161,10 @@ fn lancar_por(
     // nascimento na auditoria, sem nomear carregador nenhum (o achado A2
     // do adversário do lote A4, que tirou daqui o `hospedar` e pôs o
     // `carregar_a_carga` no módulo, ao lado da `Carga`). Quem confere o
-    // alcance é o compilador; o `xtask`, que eles continuam aqui
-    // (`fio_novo_fora_do_lancamento`).
+    // alcance deles é o compilador; o `xtask`, que eles continuam aqui
+    // (`fio_novo_fora_do_lancamento`) e que nenhum `impl` mora aqui dentro —
+    // o método dele valeria onde o tipo valer, e levaria o fio novo a todo o
+    // crate (`carga_fora_do_lugar`, o X1 do adversário do lote A6).
 
     /// O que o fio novo recebe: o código já lido e conferido — também como
     /// imagem —, quem o selou, e o desfecho do lançamento, para o que falhar

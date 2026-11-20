@@ -226,6 +226,16 @@ impl Programa {
 /// `editor` é quem selou a imagem, quando ela veio de fora da imagem do
 /// sistema — conferido antes, por [`super::codigo::obter`]. Vai para o
 /// programa do fio junto com o manifesto e o resumo.
+///
+/// # Quem a nomeia neste arquivo
+///
+/// Só o `executar` e o `carregar_de_teste`, os da suíte; os passos — o
+/// [`preparar`], o `trocar` e o `mapear` — só aqui; e o [`entrar`], só no
+/// `executar` e no `entrar_de_teste`. Nenhum `impl` dentro dessas funções,
+/// nenhum `extern` e nenhum atributo que exporte: um `const` com um
+/// carregador, ou um embrulho de função, daria a carga aos irmãos sem
+/// palavra nenhuma (o A2 do adversário do lote A6). O `xtask` confere
+/// (`LUGAR_DA_CARGA_NO_PROGRAMA`, desde o lote A7).
 pub(super) fn carregar(imagem: &[u8], editor: Option<[u8; 32]>) -> Result<Programa, Falha> {
     // Tudo até a troca de espaço é recuperável — o primeiro passo —, a troca
     // não falha, e o que vem depois dela não tem volta: os dois `map_err`
