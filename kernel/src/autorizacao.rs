@@ -2067,26 +2067,21 @@ pub fn desfecho_do_lancamento(recurso: &str) -> DesfechoDoLancamento {
 
 impl DesfechoDoLancamento {
     /// Grava o desfecho: a execução da decisão do comando, ou, fora de um,
-    /// em nome do kernel. Devolve o número do registro.
+    /// em nome do kernel. Devolve o número do registro, ou zero.
     ///
     /// Só o lançamento que **não** acontece tem desfecho: o `codigo` é o de
-    /// uma recusa ou `ERROR`, nunca um que permite — a compilação de
-    /// depuração o confere. Um `ALLOW` gravado daqui com um `processo N
-    /// lancado` no detalhe seria lido pelo NSF como um nascimento em nome de
-    /// quem o gate decidiu: uma proveniência forjada, gravada fora do fio do
-    /// comando (o I5 do adversário do lote A4). O nascimento é do `nasce`,
-    /// pela última palavra. E só o `ALLOW` é lido assim: desde o lote A6, o
-    /// NSF não lê nascimento num `ERROR` nem numa recusa, que antes bastava
-    /// dizer o texto (o I1 do adversário do lote A5).
+    /// uma recusa ou `ERROR`, nunca um que permite — com um que permite, nas
+    /// duas compilações, não grava nada, diz no log do kernel e devolve zero
+    /// (ver [`DesfechoDoLancamento::gravar_o_que_nao_acontece`]). Um `ALLOW`
+    /// gravado daqui com um `processo N lancado` no detalhe seria lido pelo
+    /// NSF como um nascimento em nome de quem o gate decidiu: uma
+    /// proveniência forjada, gravada fora do fio do comando (o I5 do
+    /// adversário do lote A4). O nascimento é do `nasce`, pela última
+    /// palavra. E só o `ALLOW` é lido assim: desde o lote A6, o NSF não lê
+    /// nascimento num `ERROR` nem numa recusa, que antes bastava dizer o
+    /// texto (o I1 do adversário do lote A5).
     pub fn gravar(&self, codigo: Codigo, detalhe: &str) -> u64 {
-        debug_assert!(
-            !codigo.permite(),
-            "o desfecho de um lancamento grava so o que nao acontece"
-        );
-        match &self.execucao {
-            Some(e) => e.clone().gravar(&self.recurso, codigo, detalhe),
-            None => auditar_do_kernel("process.run", &self.recurso, codigo, detalhe),
-        }
+        self.gravar_o_que_nao_acontece(codigo, detalhe, true)
     }
 
     /// Grava o desfecho só dentro de um comando: o `ALLOW` dele não fica sem
@@ -2095,15 +2090,71 @@ impl DesfechoDoLancamento {
     /// auditoria, como o gate a grava, e não há `ALLOW` a fechar; um registro
     /// em nome do kernel diria duas vezes a mesma recusa. Devolve o número
     /// do registro, ou zero. O `codigo` nunca permite, como em
-    /// [`DesfechoDoLancamento::gravar`].
+    /// [`DesfechoDoLancamento::gravar`], e pela mesma guarda.
     pub fn gravar_no_comando(&self, codigo: Codigo, detalhe: &str) -> u64 {
-        debug_assert!(
-            !codigo.permite(),
-            "o desfecho de um lancamento grava so o que nao acontece"
-        );
-        self.execucao
-            .as_ref()
-            .map_or(0, |e| e.clone().gravar(&self.recurso, codigo, detalhe))
+        self.gravar_o_que_nao_acontece(codigo, detalhe, false)
+    }
+
+    /// Os dois, com a guarda num lugar só: com um `codigo` que permite, não
+    /// grava, diz no log do kernel e devolve zero; senão, a execução da
+    /// decisão do comando, ou — `fora_do_comando` — em nome do kernel.
+    ///
+    /// # Nas duas compilações, desde o lote A7
+    ///
+    /// Até o lote A6, a guarda era um `debug_assert!`: a compilação de
+    /// release não a tinha, e um chamador de amanhã que passasse `ALLOW` com
+    /// `processo N lancado` forjaria a proveniência de N — que o NSF, desde o
+    /// lote A6, lê justamente por ser `ALLOW` (o I2 do adversário do lote
+    /// A6). Agora a recusa é de execução, nas duas: nada se grava, o log diz
+    /// o erro de quem chamou, e o zero é o que quem chama já trata como nada
+    /// gravado. O código não se troca por outro: gravar um `ERROR` no lugar
+    /// do `ALLOW` diria o que ninguém decidiu. A suíte confere os dois
+    /// caminhos pelo embrulho `gravar_um_desfecho_de_teste`, que só ela tem.
+    fn gravar_o_que_nao_acontece(
+        &self,
+        codigo: Codigo,
+        detalhe: &str,
+        fora_do_comando: bool,
+    ) -> u64 {
+        if codigo.permite() {
+            crate::log_error!(
+                "autorizacao",
+                "o desfecho do lancamento de {} veio com {}: o desfecho grava so o que nao \
+                 acontece, e nada foi gravado",
+                self.recurso,
+                codigo.nome()
+            );
+            return 0;
+        }
+        match &self.execucao {
+            Some(e) => e.clone().gravar(&self.recurso, codigo, detalhe),
+            None if fora_do_comando => {
+                auditar_do_kernel("process.run", &self.recurso, codigo, detalhe)
+            }
+            None => 0,
+        }
+    }
+}
+
+/// Só para a suíte: o [`DesfechoDoLancamento`] de `recurso` — pelo comando
+/// que este fio executa, ou pelo kernel —, gravado com `codigo` e
+/// `detalhe` — pelo [`DesfechoDoLancamento::gravar`], ou, `no_comando`, pelo
+/// [`DesfechoDoLancamento::gravar_no_comando`]. O número do registro, ou
+/// zero. O caso da guarda do desfecho o alcança por aqui, sem nomear o
+/// tipo protegido (`NOMES_PROTEGIDOS`, no `xtask`), como a conferência da
+/// imagem pela `usuario::programa::conferir_a_imagem_de_teste`.
+#[cfg(feature = "modo-teste")]
+pub fn gravar_um_desfecho_de_teste(
+    recurso: &str,
+    codigo: Codigo,
+    detalhe: &str,
+    no_comando: bool,
+) -> u64 {
+    let desfecho = desfecho_do_lancamento(recurso);
+    if no_comando {
+        desfecho.gravar_no_comando(codigo, detalhe)
+    } else {
+        desfecho.gravar(codigo, detalhe)
     }
 }
 

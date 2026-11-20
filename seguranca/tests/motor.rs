@@ -3188,17 +3188,18 @@ fn o_desfecho_tardio_nao_troca_o_programa_de_quem_pediu() {
 }
 
 /// Um `ERROR` que diz `processo N lancado` não é nascimento (o I1 do
-/// adversário do lote A5). A guarda do `DesfechoDoLancamento`, desde o lote
-/// A5, confere o código — nenhum que permita —, e o NSF lia o nascimento
-/// inteiro pelo texto do detalhe, sem olhar o código: um desfecho `ERROR`
-/// com `processo 41 lancado` — de um chamador de amanhã, ou de um handler
-/// pelo `auditar_execucao`, que não tem guarda — era lido como o nascimento
-/// do 41 por quem pediu, e, como o primeiro nascimento de um fio fica
-/// (`Grafo::nasceu`), o 41 de verdade, que nasce depois, de outro, não
-/// entrava. Agora o nascimento inteiro exige o `ALLOW`, como o cortado já
-/// exigia: o `ERROR` é uma execução da decisão que cita, e a proveniência
-/// do 41 é a de quem o lançou de verdade. O registro não muda: muda a
-/// leitura.
+/// adversário do lote A5). A guarda do `DesfechoDoLancamento` confere o
+/// código — nenhum que permita: desde o lote A5, na compilação de
+/// depuração; desde o lote A7, nas duas, sem gravar nada —, e o NSF lia o
+/// nascimento inteiro pelo texto do detalhe, sem olhar o código: um
+/// desfecho `ERROR` com `processo 41 lancado` — de um chamador de amanhã,
+/// ou de um handler pelo `auditar_execucao`, que não tem guarda — era lido
+/// como o nascimento do 41 por quem pediu, e, como o primeiro nascimento
+/// de um fio fica (`Grafo::nasceu`), o 41 de verdade, que nasce depois, de
+/// outro, não entrava. Agora o nascimento inteiro exige o `ALLOW`, como o
+/// cortado já exigia: o `ERROR` é uma execução da decisão que cita, e a
+/// proveniência do 41 é a de quem o lançou de verdade. O registro não
+/// muda: muda a leitura.
 #[test]
 fn o_erro_que_diz_lancado_nao_e_nascimento() {
     let mut a = Auditoria::nova();

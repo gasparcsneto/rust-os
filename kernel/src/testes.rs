@@ -43326,6 +43326,12 @@ static CASOS: &[Caso] = &[
         nome: "contencao: a imagem de paginas demais nao se confere, e a do teto se confere",
         f: nascimento::contencao_a_imagem_de_paginas_demais_nao_se_confere,
     },
+    // O lote A7, no fim pelo mesmo motivo: a guarda do desfecho de um
+    // lançamento nas duas compilações.
+    Caso {
+        nome: "contencao: o desfecho de um lancamento com um codigo que permite nao grava",
+        f: nascimento::contencao_o_desfecho_que_permite_nao_grava,
+    },
 ];
 
 /// A cauda da suíte: os casos que rodam em **toda** parte, depois da fatia

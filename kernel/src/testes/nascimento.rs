@@ -3967,3 +3967,95 @@ pub(super) fn contencao_a_imagem_de_paginas_demais_nao_se_confere() -> Resultado
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// O lote A7: a guarda do desfecho de um lancamento, nas duas compilacoes
+// ---------------------------------------------------------------------------
+
+/// O lote A7, na guarda do `DesfechoDoLancamento` (o I2 do adversario do
+/// lote A6): com um codigo que permite, nas duas compilacoes, o desfecho nao
+/// grava nada, diz no log do kernel e devolve zero. Ate o lote A6, a guarda
+/// era um `debug_assert!`: na depuracao, o kernel parava; em release, um
+/// `ALLOW` com `processo N lancado` ia a auditoria em nome do kernel
+/// (`process.run`), e o NSF lia o nascimento de N. Pelo embrulho da suite
+/// (`autorizacao::gravar_um_desfecho_de_teste`), fora de um comando — o
+/// caminho do kernel —: o `ALLOW` devolve zero, nao deixa registro, e o log
+/// diz. Pelo outro caminho, o de dentro de um comando (`gravar_no_comando`),
+/// que fora de um nao grava nada de qualquer jeito, o log diz tambem: a
+/// guarda e uma so, e uma que valesse so num dos dois reprovaria aqui. O
+/// controle — o mesmo desfecho com `ERROR`, gravado depois — grava, e o
+/// NSF, que o leu, nao acha o nascimento.
+pub(super) fn contencao_o_desfecho_que_permite_nao_grava() -> Resultado {
+    use politica::Codigo;
+    use seguranca::evento::Tipo;
+    const RECURSO: &str = "/a7/o-desfecho-que-permite";
+    // Um fio que nao existe: os da maquina ficam muito abaixo.
+    const FILHO: u64 = 4_000_000_007;
+    let lancado = alloc::format!("processo {FILHO} lancado");
+    super::com_o_nsf(|| {
+        let desde = crate::log::total_emitidos();
+        let permitido = crate::autorizacao::gravar_um_desfecho_de_teste(
+            RECURSO,
+            Codigo::Allow,
+            &lancado,
+            false,
+        );
+        let no_comando =
+            crate::autorizacao::gravar_um_desfecho_de_teste(RECURSO, Codigo::Allow, &lancado, true);
+        let mut disse = 0;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            disse += (r.seq >= desde
+                && r.subsistema == "autorizacao"
+                && r.mensagem().contains(RECURSO)
+                && r.mensagem().contains("veio com ALLOW")) as usize;
+        });
+        let controle = crate::autorizacao::gravar_um_desfecho_de_teste(
+            RECURSO,
+            Codigo::Error,
+            "o controle do desfecho que permite",
+            false,
+        );
+        crate::log_info!(
+            "teste",
+            "contencao: o desfecho com ALLOW devolveu {} fora do comando e {} pelo caminho do \
+             comando, e o log disse {} vez(es); o controle, com ERROR, foi o registro {}",
+            permitido,
+            no_comando,
+            disse,
+            controle
+        );
+        if permitido != 0 || no_comando != 0 {
+            return Err("o desfecho de um lancamento gravou um codigo que permite");
+        }
+        if super::registro_que(|e| e.detalhe.contains(&lancado)).is_some() {
+            return Err("o desfecho com ALLOW deixou registro na auditoria");
+        }
+        if disse != 2 {
+            return Err(
+                "o desfecho recusado nao disse no log, uma vez em cada caminho, o que recusou",
+            );
+        }
+        if controle == 0 {
+            return Err("o desfecho com ERROR nao gravou: o caso nao conferiu nada");
+        }
+        let e = super::registro_numero(controle).ok_or("o registro do controle saiu do anel")?;
+        if e.codigo != Codigo::Error || e.metodo != "process.run" || e.recurso != RECURSO {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("o controle nao foi gravado como o desfecho do kernel");
+        }
+        let _ = crate::seguranca::passo();
+        let _ = crate::seguranca::passo();
+        let visto = crate::seguranca::com_motor_de_teste(|m| {
+            (
+                m.evento(controle).is_some(),
+                m.eventos()
+                    .any(|ev| ev.tipo == Tipo::Nascimento { filho: FILHO }),
+            )
+        });
+        match visto {
+            Some((true, false)) => Ok(()),
+            Some((true, true)) => Err("o NSF achou o nascimento de um desfecho que permite"),
+            _ => Err("o NSF nao leu o controle: o caso nao conferiu nada"),
+        }
+    })
+}
