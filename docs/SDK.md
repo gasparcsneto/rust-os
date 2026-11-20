@@ -511,7 +511,7 @@ continua sendo entrada não confiável.
 | o maior executável | 1 MiB |
 | as entradas da tabela de segmentos de um executável | 64, de todos os tipos; carregáveis, 8 |
 | as notas de um executável, somadas | 4 KiB (a do manifesto, até 1044 bytes) |
-| as páginas dos segmentos carregáveis de um executável, somadas | 64 MiB — o espaço do programa no mapa do usuário, até o começo do que `mapear` dá; a pilha, de 64 KiB, é à parte. O kernel limita a soma, e não o lugar: um segmento dentro do que `mapear` dá só tira essas páginas do `mapear` do próprio processo, que as acha ocupadas (`JA_MAPEADO`); os programas da imagem, o `cargo xtask elf` os confere no espaço do programa |
+| as páginas dos segmentos carregáveis de um executável, somadas | 64 MiB — o espaço do programa no mapa do usuário, até o começo do que `mapear` dá; a pilha, de 64 KiB, é à parte. O kernel limita a soma e, do lugar, só o espaço do usuário fora da pilha, e não o do programa: um segmento dentro do que `mapear` dá só tira essas páginas do próprio processo, que o `mapear` e a `superficie` acham ocupadas (`JA_MAPEADO`); os programas da imagem, o `cargo xtask elf` os confere no espaço do programa |
 
 Cada operação paga o orçamento dela: as de dados, o do plano de dados; as
 de controle, a taxa do papel. O aviso não paga nada, porque não pede nada.

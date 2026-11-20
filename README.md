@@ -7167,8 +7167,10 @@ registro de cada uma no ponto em que nasceu.
   A4 o tirou; a `Carga` já era do módulo, e o `carregar_a_carga` nasceu
   nele, no lote A4 —: no módulo, ao alcance de todo filho do `usuario`,
   eram um segundo caminho de lançamento que nenhuma palavra de carregador
-  acusava. Quem confere o alcance é o compilador, e o `xtask`
-  confere que eles continuam lá (`fio_novo_fora_do_lancamento`);
+  acusava. Quem confere o alcance é o compilador — menos o do método de um
+  `impl` de dentro, que ele não escopa e o `xtask` recusa desde o lote A7 (a
+  (a) do lote A7) —, e o `xtask` confere que eles continuam lá
+  (`fio_novo_fora_do_lancamento`);
   (c) no NSF, a execução que cita uma decisão mais velha que o registro
   que pôs o programa de agora num processo não o troca, nem liga aresta
   (`seguranca::grafo::Grafo::executa_no_registro`): o desfecho tardio do
@@ -7191,7 +7193,8 @@ registro de cada uma no ponto em que nasceu.
   desfecho (o I1);
   (f) o `autorizacao::DesfechoDoLancamento` grava só o lançamento que não
   acontece: a compilação de depuração confere que o código não permite
-  (o I5);
+  (o I5) — desde o lote A7, nas duas compilações, sem gravar nada (a (c)
+  do lote A7);
   (g) um `PT_LOAD` vazio com o destino no `TETO` ganhava a página `[TETO,
   TETO + 4 KiB)`: na entrada de topo do processo, devolvida na morte dele,
   mas fora do que a cópia na escrita e a conferência das faixas das
@@ -7269,9 +7272,10 @@ registro de cada uma no ponto em que nasceu.
   crate::autorizacao::Lancador::Kernel;` dava a variante aos outros
   arquivos sem a palavra, e `autorizacao::conferir_o_lancamento` e
   `reconfirmar_o_lancamento`, que são `pub`, recebem um `Lancador` (a
-  observação 6 do especialista). Nenhum dono tem um `use` assim; o sem
-  `pub` de um dono sem filhos de fora, e o de dentro de uma função, ficam
-  com a revisão do dono;
+  observação 6 do especialista). Nenhum dono tem um `use` assim; o de
+  dentro de uma função fica com a revisão do dono, e o sem `pub` de um dono
+  sem filhos de fora escritos também ficava, até o lote A7, que o acusa —
+  uma macro do dono declara o filho sem escrevê-lo (a (a) do lote A7);
   (c) a conferência da imagem limita a soma das páginas dos segmentos ao
   espaço que o mapa do usuário dá ao programa, 64 MiB
   (`programa::MAX_PAGINAS_DA_IMAGEM`: "os segmentos pedem paginas
@@ -7416,7 +7420,7 @@ registro de cada uma no ponto em que nasceu.
   — o contador da arquitetura por dentro de uma máscara só, e os tiques
   perdidos de uma borda de tique a outra —: com a imagem no teto (64 MiB) e
   o `mapear` cheio (176 MiB) — 61 440 páginas, mais as tabelas —, a
-  desmontagem levou de 22 a 36 ms em release e de 270 a 420 ms em depuração,
+  desmontagem levou de 22 a 36 ms em release e de 273 a 417 ms em depuração,
   nas duas arquiteturas — uns 0,4 a 0,6 µs por página em release —, e a do
   exemplo, sem nada mapeado, menos de 1,2 ms. Com mais de um núcleo, os
   outros andam o relógio durante ela, e ele não perde nada; com um núcleo
@@ -7439,8 +7443,8 @@ registro de cada uma no ponto em que nasceu.
   `CARGO_BUILD_RUSTFLAGS` do shell, que a CI não põe. Os casos do lote A7:
   `contencao: o desfecho de um lancamento com um codigo que permite nao
   grava`, novo, nas duas compilações — o `ALLOW` não deixa registro, o log
-  diz uma vez em cada caminho, o de fora de um comando e o de dentro, e o
-  NSF, que leu o controle, com `ERROR`, não acha o nascimento —; `vagas:
+  diz uma vez em cada caminho — o `gravar` e o `gravar_no_comando`, os dois
+  chamados fora de um comando —, e o NSF, que leu o controle, com `ERROR`, não acha o nascimento —; `vagas:
   termino, colheita, coleta e nascimento ao mesmo tempo`, reforçado; e os
   quatro que passam por `nao_carrega`, com as duas mensagens — `contencao: o
   user.run de uma imagem que nao se carrega grava o desfecho`, os dois do
@@ -11979,9 +11983,9 @@ diz por quê — a PG3 muda só o motivo de uma recusa.
 | a faixa de páginas sem o limite de cima (PG1) | `contencao: o segmento vazio no teto nao ganha a pagina de cima`: "o user.run de uma imagem que nao se carrega lancou" — `launched: true` |
 | só o limite de cima (PG2) | sobreviveu, equivalente: o começo da faixa nunca fica abaixo do `BASE` — o destino passou pelo `elf::validar`, que recusa o de baixo dele, e o `BASE` é de página |
 | o limite de cima com `>=` (PG3) | sobreviveu, equivalente na decisão: a faixa que acaba no `TETO` invade a pilha, que a conferência seguinte recusa; muda só o motivo — "um segmento quer paginas fora do espaco do usuario", e não "um segmento invade a pilha do processo" —, que nenhum caso confere — desde o lote A6, `contencao: o orcamento das notas vem antes de le-las, e o teto invade a pilha` confere, e a reprova (ver *As do lote A6*) |
-| a imagem que não se carrega com o desfecho `ALLOW` (DF1) | `contencao: o user.run de uma imagem que nao se carrega grava o desfecho`: o pânico da guarda, "o desfecho de um lancamento grava so o que nao acontece" (`autorizacao.rs`, no `gravar`) |
-| a recusa do gate sobre quem pede com o desfecho `ALLOW` (DF2) | `contencao: a recusa do user.run no gate diz o codigo`: o mesmo pânico, no `gravar_no_comando` |
-| o `gravar` sem a guarda (DF3) | sobreviveu, equivalente: nenhum chamador de hoje passa um código que permite — a guarda é para o de amanhã, e a DF1 e a DF2 mostram que ela o pega |
+| a imagem que não se carrega com o desfecho `ALLOW` (DF1) | `contencao: o user.run de uma imagem que nao se carrega grava o desfecho`: o pânico da guarda, "o desfecho de um lancamento grava so o que nao acontece" (`autorizacao.rs`, no `gravar`). Desde o lote A7, sem o pânico: "o user.run de uma imagem que nao se carrega ficou sem o desfecho", rodada de novo (ver *As do lote A7*) |
+| a recusa do gate sobre quem pede com o desfecho `ALLOW` (DF2) | `contencao: a recusa do user.run no gate diz o codigo`: o mesmo pânico, no `gravar_no_comando`. Desde o lote A7, sem o pânico: "a recusa de quem pede no user.run ficou sem o desfecho", rodada de novo (ver *As do lote A7*) |
+| o `gravar` sem a guarda (DF3) | sobreviveu, equivalente: nenhum chamador de hoje passa um código que permite — a guarda é para o de amanhã, e a DF1 e a DF2 mostram que ela o pega —; desde o lote A7, `contencao: o desfecho de um lancamento com um codigo que permite nao grava` confere a guarda, e a DG1, a mesma guarda desligada, reprova (ver *As do lote A7*) |
 | a `Carga`, o `hospedar` e o `carregar_a_carga` de volta ao módulo, como antes do lote (FN1) | o kernel compila; o `cargo xtask invariantes` reprova, com os três fora de `lancar_por`, e `o_fio_novo_do_lancamento_mora_dentro_dele`, pelo `usuario/mod.rs` de verdade |
 | a execução de uma decisão de antes que troca o programa (NS1) | `a_execucao_de_uma_decisao_de_antes_nao_troca_o_programa` (`seguranca::grafo`) e `o_desfecho_tardio_nao_troca_o_programa_de_quem_pediu` (o motor) |
 | a decisão de antes com `<=` (NS2) | o do grafo: a execução que cita o registro que pôs o programa deixou de trocar |
@@ -12033,7 +12037,7 @@ avaria do lote A5 chegava.
 | a conferência sem o teto das páginas (PG4) | `contencao: a imagem de paginas demais nao se confere, e a do teto se confere`: "a conferencia da imagem nao tem o teto das paginas" — "o ola com uma pagina a mais: None, e nao Some(\"os segmentos pedem paginas demais\")" |
 | o teto com `>=` (PG5) | o mesmo caso — "o ola no teto das paginas: Some(\"os segmentos pedem paginas demais\"), e nao None" |
 | o teto por segmento, e não somado (PG6) | o mesmo caso — "o ola com uma pagina a mais: None, e nao Some(…)" |
-| o nascimento inteiro sem o `ALLOW` (NS6) | `o_nascimento_inteiro_so_num_allow` (`seguranca::evento`) |
+| o nascimento inteiro sem o `ALLOW` (NS6) | `o_nascimento_inteiro_so_num_allow` (`seguranca::evento`) — o cargo parou nele; rodada de novo no lote A7, com o `--no-fail-fast`, também `o_erro_que_diz_lancado_nao_e_nascimento` (o motor) (ver *As do lote A7*) |
 | sem a regra dos argumentos de uma macro (XT7) | `o_nome_protegido_nao_passa_por_uma_macro_nem_pelo_self` |
 | sem a regra do corpo de uma macro (XT8) | o mesmo |
 | sem o `type` montado numa macro (XT9) | o mesmo |
@@ -12046,11 +12050,11 @@ avaria do lote A5 chegava.
 | sem o identificador cru no método (XT16) | o mesmo |
 | a regra da carga desligada do `invariantes` (XT17) | `a_carga_fora_do_lugar_reprova_pelo_caminho` |
 | a regra do `use` do dono desligada (XT18) | `o_use_do_dono_nao_leva_o_nome_protegido_a_outro_arquivo` |
-| só o `use` com `pub` (XT19) | o mesmo: o `use` sem `pub` no `usuario/mod.rs`, que tem filhos de fora |
-| o arquivo como o módulo de todo `use` (XT20) | o mesmo: o `use` de um módulo de dentro sem filho de fora |
+| só o `use` com `pub` (XT19) | o mesmo: o `use` sem `pub` no `usuario/mod.rs`, que tem filhos de fora — o código dela saiu no lote A7, que acusa o `use` do dono com `pub` ou sem (ver a XT30, em *As do lote A7*) |
+| o arquivo como o módulo de todo `use` (XT20) | o mesmo: o `use` de um módulo de dentro sem filho de fora — o código dela saiu no lote A7, que acusa o `use` do dono com `pub` ou sem (ver a XT30, em *As do lote A7*) |
 | também o `use` de dentro de uma função (XT21) | o mesmo: o `pub use` num bloco |
 | sem a exceção do `{self}` (XT22) | o mesmo |
-| o filho de fora no começo do arquivo não conta (XT23) | o mesmo |
+| o filho de fora no começo do arquivo não conta (XT23) | o mesmo — o código dela saiu no lote A7, que acusa o `use` do dono com `pub` ou sem (ver a XT30, em *As do lote A7*) |
 | o B1 no `usuario/mod.rs` de verdade (CG1) | o kernel compila nas duas, com a suíte; o `cargo xtask invariantes` reprova — o `carregar` e o `entrar` fora de `lancar_por` |
 | o B2 (CG2) | o mesmo — o `extern`, o `carregar` e o `entrar` |
 | o D1 (MC1) | o mesmo — o tipo no corpo da macro e o nome nos argumentos dela |
@@ -12105,7 +12109,7 @@ release, onde ela vale. As dezenove reprovaram; nenhuma é equivalente.
 | sem a tabela do `programa.rs` (XT26) | `a_carga_so_no_lugar_dela_no_programa`, `a_carga_no_programa_reprova_pelo_caminho`, `adversario_a6_o_carregador_no_arquivo_que_o_define` e o do `impl`, que perde o `carregar` como função da carga |
 | a regra do `programa.rs` e do `codigo.rs` desligada de `carregadores_alargados`, que o `invariantes` chama (XT27) | os mesmos quatro |
 | a declaração de um carregador conta, no arquivo que o define (XT28) | seis: os dois do `programa.rs`, o do `impl`, `os_carregadores_nao_se_alargam`, `nenhuma_macro_nos_arquivos_dos_carregadores` e `o_atributo_da_suite_num_comentario` — o `programa.rs` de verdade e o dos testes reprovam pela própria declaração |
-| o `extern` livre no arquivo sem função de entrada (XT29) | `a_carga_so_no_lugar_dela_no_programa`, no `programa.rs` e no `codigo.rs` |
+| o `extern` livre no arquivo sem função de entrada (XT29) | `a_carga_so_no_lugar_dela_no_programa`, no `programa.rs` — `left: []`, `right: [732]`; o laço para nele, antes do `codigo.rs` |
 | só o `use` com o `pub` logo antes — a exceção do lote A6 de volta, e mais larga (XT30) | `o_use_do_dono_nao_leva_o_nome_protegido_a_outro_arquivo` e `adversario_a6_o_filho_de_fora_por_uma_macro` |
 | sem a lista dos recursos (XT31) | `os_recursos_de_macro_nao_entram_no_kernel` |
 | sem a lista velha — o recurso da lista que sumiu do `main.rs` (XT32) | o mesmo |
@@ -12127,8 +12131,8 @@ release, onde ela vale. As dezenove reprovaram; nenhuma é equivalente.
 
 Antes delas, as rodadas dirigidas do lote, todas verdes: o caso novo, nas
 duas arquiteturas, em depuração e em release, duas vezes cada — e as oito
-de novo, depois que ele passou a conferir também o caminho de dentro de um
-comando —; `vagas: termino, colheita, coleta e nascimento ao mesmo tempo` e
+de novo, depois que ele passou a chamar também o `gravar_no_comando`, fora
+de um comando —; `vagas: termino, colheita, coleta e nascimento ao mesmo tempo` e
 `contencao: o orcamento das notas vem antes de le-las, e o teto invade a
 pilha`, nas duas, em depuração, duas vezes cada; e a regressão — os 37
 casos de `contencao:`, `elf:`, `manifesto:`, `usuario:`, `codigo:`,
@@ -15746,7 +15750,7 @@ dispositivos (x86_64 e aarch64), que esperou 47 minutos na fila e rodou
 33,1; o maior, a persistência do x86, parte 1/3, com 68,7.
 
 A CI 525 (`c7aa3fd`, o #455-C e as correções de texto do revisor do lote
-A6) passou verde, 48 de 48, na primeira tentativa, em 81,5 minutos e 1311
+A6) passou verde, 48 de 48, na primeira tentativa, em 81,5 minutos e 1310
 de máquina. No boot do x86, no runner, o aviso esperado no QEMU sem
 aceleração — "o CPUID nao anuncia o TSC invariante (0x80000007, EDX bit
 8)…" — e a conferência só com o PIT no relógio: "conferencia contra o PIT:
@@ -15754,8 +15758,18 @@ aceleração — "o CPUID nao anuncia o TSC invariante (0x80000007, EDX bit
 e o relogio andou 20". O holdover da bancada de tempo, na parte 3/3: o x86
 a -317 ppm (2057 s em 2057) e o ARM a -2 ppm (2056 s em 2056), os dois
 dentro da guarda. O último job foi a cópia de segurança do x86, que
-esperou 28,8 minutos na fila e rodou 48,1; o maior, a persistência do x86,
+esperou 48,1 minutos na fila e rodou 28,8; o maior, a persistência do x86,
 parte 2/3, com 64,4.
+
+A CI 526 (`9fab2cb`, o lote A7) passou verde, 48 de 48, na primeira
+tentativa, em 84,8 minutos e 1311 de máquina. O caso novo da guarda do
+desfecho passou no release do x86, com as duas recusas no log ("veio com
+ALLOW: … nada foi gravado", uma em cada caminho), e o release inteiro com
+1068 de 1068. O holdover da bancada de tempo, na parte 3/3: o x86 a -220
+ppm (2056 s em 2056) e o ARM a -20 ppm (2056 s em 2056), os dois dentro da
+guarda. O último job foi o dos fluxos entre dispositivos (mesma
+arquitetura), que esperou 40,8 minutos na fila e rodou 39,0; o maior, a
+persistência do x86, parte 2/3, com 58,4.
 
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na

@@ -8325,8 +8325,9 @@ fn conferir_os_recursos_do_kernel() -> Result<ExitCode, String> {
     if fora.is_empty() {
         println!(
             "[xtask] os recursos instáveis do kernel: só os da lista ({}), no `main.rs`; nenhuma \
-             macro 2.0 nem `${{…}}` no código do kernel; e nenhum atributo de crate pela linha de \
-             comando no config do cargo, no `xtask` nem na CI",
+             macro 2.0 nem `${{…}}` na suíte — no resto do kernel, é a conferência dos nomes \
+             protegidos —; e nenhum atributo de crate pela linha de comando no config do cargo, \
+             no `xtask` nem na CI",
             RECURSOS_DO_KERNEL.join(", ")
         );
         Ok(ExitCode::SUCCESS)
@@ -10684,8 +10685,9 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
              código só vira processo pela conferência única, que o kernel faz e não sela, e \
              pelos carregadores, que só o módulo `usuario` alcança, e nele só o \
              `usuario/mod.rs` — ali, só nas funções do lançamento e da troca de imagem, com a \
-             entrada de um fio novo só em `lancar_por` — e o arquivo de cada um — ali, só nas \
-             funções que os usam —, sem outro nome, sem `impl` dentro dessas funções nem \
+             entrada de um fio novo só em `lancar_por` — e o arquivo de cada um — no \
+             `programa.rs`, só nas funções que os usam —, sem outro nome, sem `impl` dentro \
+             dessas funções nem \
              atributo que exporte, com o fio novo de um lançamento só de dentro dele; nenhum \
              nome protegido ganha outro nome — pelo `as`, também o do `self` de uma lista do \
              `use`, por um `type`, como valor, por um `use` montado numa macro e, nos donos, \

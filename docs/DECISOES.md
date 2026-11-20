@@ -2064,8 +2064,8 @@ pendência #298.
     `extern` nele nem no `codigo.rs`; num dono, todo `use` no nível de um
     módulo que passa por um nome protegido, com `pub` ou sem; e o kernel
     só com os recursos instáveis da lista, sem macro 2.0, sem `${…}` e
-    sem `crate-attr` no build — a macro 2.0 e o `${concat}` levavam ou
-    montavam o nome protegido sem a palavra;
+    sem `crate-attr` no config do cargo, no `xtask` e na CI — a macro 2.0
+    e o `${concat}` levavam ou montavam o nome protegido sem a palavra;
   - no NSF, o nascimento pelo `fork` também só se lê num `ALLOW`. O
     registro não muda: muda a leitura;
   - a guarda do `DesfechoDoLancamento` contra o código que permite vale
@@ -2077,13 +2077,20 @@ pendência #298.
 
   A desmontagem do espaço anterior dentro da chamada do `exec`, que o
   teto das páginas não limita, foi medida — no emulador, com 240 MiB
-  mapeados, de 22 a 36 ms em release e de 270 a 420 ms em depuração, com
+  mapeados, de 22 a 36 ms em release e de 273 a 417 ms em depuração, com
   as interrupções mascaradas; com mais de um núcleo, o relógio não perde
   nada, e com um só perde um tique em release — e fica com a carga do
-  `exec`, para um lote seguinte. Um caso novo, cinco reforçados, dez testes
-  no hospedeiro e dezenove mutações, todas reprovadas, com cinco de antes
-  rodadas de novo ([README](../README.md#decisões-pendentes), "A soma das
-  cotas de processos e a cota por sessão").
+  `exec`, para um lote seguinte. A carga da imagem no teto, medida junto,
+  custava no aarch64 com quatro núcleos 1,85 s contra 0,21 com um, no
+  emulador: era o `tlbi` difundido que o `mapear_frame` fazia a cada
+  página nova, e que a arquitetura não pede — uma entrada inválida não
+  está em TLB nenhuma. Sem ele (o trabalho arm-tlbi, [B]), a mesma carga
+  leva de 0,51 a 0,78 s, e o `mapear` cheio, de 1,9 a 2,0 s, passa a
+  0,17–0,21 s ([README](../README.md#vários-núcleos), "A entrada nova não
+  pede `tlbi`"). Um caso novo, cinco reforçados, dez testes no hospedeiro
+  e dezenove mutações, todas reprovadas, com cinco de antes rodadas de
+  novo ([README](../README.md#decisões-pendentes), "A soma das cotas de
+  processos e a cota por sessão").
 
 ### I7
 
