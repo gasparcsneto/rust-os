@@ -1393,8 +1393,8 @@ núcleo mascarado fica de fora, e o relatório o lista em
 **A entrada nova não pede `tlbi`.** No ARM, o `mapear_frame` invalidava a
 TLB a cada página que mapeava — um `tlbi vaae1is`, difundido —, e no
 emulador cada `tlbi …is` para os outros núcleos virtuais e espera por eles:
-medido, de 20 a 40 µs com quatro núcleos e de 6 a 14 com dois, contra meio
-com um (o `invlpg` do x86 é local, e custa uns 0,2 µs com quantos núcleos
+medido, de 19 a 42 µs com quatro núcleos e de 6 a 13 com dois, contra meio
+com um (o `invlpg` do x86 é local, e custa de 0,2 a 0,7 µs com quantos núcleos
 houver). A carga da imagem no teto das páginas — 16 384, o segmento grande
 somente leitura, e por isso três `tlbi` por página: o de mapeá-la gravável,
 o de desmapeá-la e o de mapeá-la com a permissão final — fazia 49 166, e
@@ -7442,9 +7442,10 @@ registro de cada uma no ponto em que nasceu.
   34 em depuração.
   A carga da imagem no teto, medida junto — num fio do kernel, de fora da
   máscara —, levava no aarch64 com quatro núcleos 1,85 s em release, contra
-  0,21 com um: era o `tlbi` difundido de cada entrada nova, que saiu depois
-  do lote (ver "A entrada nova não pede `tlbi`", em
-  [Vários núcleos](#vários-núcleos)), e a carga caiu para 0,51 a 0,78 s.
+  0,21 com um: eram os `tlbi` difundidos, três por página — os dois das
+  entradas novas, que saíram depois do lote (ver "A entrada nova não pede
+  `tlbi`", em [Vários núcleos](#vários-núcleos)), e o da remoção, que
+  fica —, e a carga caiu para 0,51 a 0,78 s.
   Fica com a (1) do lote A6, a carga do `exec` dentro da chamada, para o
   mesmo lote seguinte; (2) o `obter`, no `codigo.rs`, não tem tabela:
   sozinho, ele não entra num programa, e o arquivo fica com a regra do

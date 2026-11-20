@@ -1813,7 +1813,7 @@ como [C].
 | Id | O que se faz | O estado |
 |---|---|---|
 | [A1-4](#a1-4) | a recusa da cota diz quantos dos contados são mortos que esperam o coletor | feito, no `ee4ea45` |
-| [F4](#f4) | o `exec` decide de novo no ponto sem volta | feito, no `869dc08`, e o resto que o adversário do lote achou, no `97ea728`; o que o adversário da integração achou, no lote A3 do #448; o desfecho da imagem que não se carrega e o das recusas sobre quem pede, e o erro do `exec` da imagem que não se confere, no lote A4; o que o adversário do lote A4 achou, no lote A5; o que o adversário e o revisor do lote A5 acharam, no lote A6; e o que o adversário e o revisor do lote A6 acharam, no lote A7 |
+| [F4](#f4) | o `exec` decide de novo no ponto sem volta | feito, no `869dc08`, e o resto que o adversário do lote achou, no `97ea728`; o que o adversário da integração achou, no lote A3 do #448; o desfecho da imagem que não se carrega e o das recusas sobre quem pede, e o erro do `exec` da imagem que não se confere, no lote A4; o que o adversário do lote A4 achou, no lote A5; o que o adversário e o revisor do lote A5 acharam, no lote A6; o que o adversário e o revisor do lote A6 acharam, no lote A7; e o que o adversário do lote A7 achou, com o fecho das guardas de texto por inventário, no lote A8 |
 | [I7](#i7) | o comando que existe, num console sem ninguém, gravado sem o resumo dos parâmetros | feito, no lote B do #448; a troca da própria senha com algo na linha, no lote B2 |
 | [A9-RESUMO](#a9-resumo) | o resumo de 16 dígitos na descrição de um programa | feito, no lote B do #448; o que o adversário do lote achou — o número da regra do firewall que se perde no corte, e o par misturado de duas descrições inteiras — no lote B2 |
 | [DN-4](#dn-4) | o handoff como o próximo marco da fase 15 | decidido pelo roteiro |
@@ -2078,19 +2078,64 @@ pendência #298.
   A desmontagem do espaço anterior dentro da chamada do `exec`, que o
   teto das páginas não limita, foi medida — no emulador, com 240 MiB
   mapeados, de 22 a 36 ms em release e de 273 a 417 ms em depuração, com
-  as interrupções mascaradas; com mais de um núcleo, o relógio não perde
-  nada, e com um só perde um tique em release — e fica com a carga do
-  `exec`, para um lote seguinte. A carga da imagem no teto, medida junto,
-  custava no aarch64 com quatro núcleos 1,85 s contra 0,21 com um, no
-  emulador: era o `tlbi` difundido que o `mapear_frame` fazia a cada
-  página nova, e que a arquitetura não pede — uma entrada inválida não
-  está em TLB nenhuma. Sem ele (o trabalho arm-tlbi, [B]), a mesma carga
-  leva de 0,51 a 0,78 s, e o `mapear` cheio, de 1,9 a 2,0 s, passa a
-  0,17–0,21 s ([README](../README.md#vários-núcleos), "A entrada nova não
-  pede `tlbi`"). Um caso novo, cinco reforçados, dez testes no hospedeiro
-  e dezenove mutações, todas reprovadas, com cinco de antes rodadas de
-  novo ([README](../README.md#decisões-pendentes), "A soma das cotas de
+  as interrupções mascaradas; com mais de um núcleo, um que não espere a
+  trava da paginação anda o relógio, e ele não perde nada — na medida, os
+  outros estavam livres; se todos a esperam, mascarados, perdem como um só
+  (o I-1 do adversário do lote A7) —, e com um só perde um tique em release
+  — e fica com a carga do `exec`, para um lote seguinte. Um caso novo,
+  cinco reforçados, dez testes no hospedeiro e dezenove mutações, todas
+  reprovadas, com cinco de antes rodadas de novo
+  ([README](../README.md#decisões-pendentes), "A soma das cotas de
   processos e a cota por sessão").
+
+  A carga da imagem no teto, medida junto, custava no aarch64 com quatro
+  núcleos, em release, 1,85 s contra 0,21 com um, no emulador: eram os
+  `tlbi` difundidos de cada troca de entrada, e dois em cada três eram os
+  que o `mapear_frame` fazia a cada página nova, e que a arquitetura não
+  pede — uma entrada inválida não está em TLB nenhuma. Sem eles (o
+  trabalho arm-tlbi, [B]), a mesma carga leva de 0,51 a 0,78 s, com os da
+  remoção, que ficam, e o `mapear` cheio, de 1,9 a 2,0 s, passa a
+  0,17–0,21 s ([README](../README.md#vários-núcleos), "A entrada nova não
+  pede `tlbi`").
+
+  O lote A8, [B], fez os achados do adversário do lote A7 — os sete baixos
+  e os três informativos — e fechou as guardas de texto do `xtask` por
+  inventário, sem autoridade, regra, registro ou semântica de auditoria
+  novos. Três adversários seguidos acharam formas novas de levar um nome
+  protegido, ou a carga de um programa, para fora do lugar, sem que o texto
+  as visse — uma macro de fora, um `impl` de dentro, um recurso instável,
+  um `path` montado, um pacote de macros procedurais, um escape no config
+  do cargo —, e todas de quem escreve código no kernel, e não de um
+  processo. Uma guarda de texto nunca fecha tudo o que o compilador aceita:
+  ela acusa o desvio acidental e o ingênuo, e as formas que o inventário
+  cobre; o resto fica com a revisão e com a política de desenvolvimento
+  ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem), com o
+  modelo de ameaça e o inventário). As guardas novas:
+  - no item das funções da carga, só as macros de uma lista fechada, pelo
+    caminho, cujo nome nenhum arquivo do kernel redefine nem traz de fora;
+    e nos arquivos da carga, nem montador nem ligador — uma macro de fora
+    escrevia ali o `impl` ou o `#[no_mangle]`, e o `.globl` de um `asm!`
+    dava um símbolo a uma entrada de dentro;
+  - fora do módulo `usuario`, nenhum carregador nos tokens de uma macro;
+    e o atributo com `$` fora do `doc` se acusa, porque o `cfg_attr` monta
+    o `path` também;
+  - as dependências do kernel pelo grafo do cargo: as diretas e os pacotes
+    de macros procedurais do grafo em listas fechadas, só o crates.io e o
+    repositório, o kernel sem `build.rs`, e os pacotes do repositório sem
+    `build.rs`, macro exportada, recurso instável nem `include`;
+  - o config do cargo como o cargo o lê: os rustflags de cada alvo, os da
+    lista, e nenhuma tabela que mude o que o cargo passa ao `rustc` do
+    kernel; o `Cargo.toml` do kernel sem `cargo-features`, `rustflags` nem
+    escape; e nenhum `RUSTFLAGS` na CI;
+  - o embrulho da suíte do desfecho é nome protegido, e a guarda do
+    desfecho tem um caso também dentro de um comando.
+
+  A carga da imagem no teto dentro do `exec`, mascarada — de 0,12 a 3,0 s
+  no emulador, conforme a arquitetura, o perfil e os núcleos (os números no
+  [README](../README.md#decisões-pendentes), "A soma das cotas de processos
+  e a cota por sessão") —, continua com a desmontagem, para um lote
+  seguinte. Um caso novo na suíte, dezesseis testes novos no hospedeiro e um
+  ajustado, e as mutações do lote, todas reprovadas.
 
 ### I7
 

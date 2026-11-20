@@ -889,9 +889,9 @@ pub fn desmapear(virtual_: u64) -> Result<u64, &'static str> {
             // Aqui a entrada era válida, e a TLB de qualquer núcleo pode
             // guardá-la: só o `tlbi` a tira, antes de o frame voltar a quem
             // chamou. É também o `tlbi` de uma página que muda de frame ou de
-            // permissão — a cópia na escrita, a carga de um segmento —, que
-            // passa por aqui e mapeia de novo: mapear só publica
-            // ([`publicar`]).
+            // permissão — a resolução da cópia na escrita, a carga de um
+            // segmento —, que passa por aqui e mapeia de novo: mapear só
+            // publica ([`publicar`]).
             invalidar(virtual_);
 
             // Recupera as tabelas que esta remoção esvaziou — mas **só** na
@@ -1012,14 +1012,15 @@ unsafe fn invalidar_tudo() {
 /// Porque não há o que invalidar. O manual da arquitetura — o *Arm
 /// Architecture Reference Manual for A-profile architecture* (DDI 0487), em
 /// *General TLB maintenance requirements*, no capítulo da VMSA do AArch64 —
-/// deixa a TLB guardar, a qualquer momento, toda entrada que não gera falha,
-/// e só garante fora dela as que geram: "The only translation table entries
-/// guaranteed not to be held in the TLB are those that generate a
-/// Translation fault, an Address size fault, or an Access flag fault." Uma
-/// entrada inválida gera a falha de tradução: nenhuma TLB, de núcleo
-/// nenhum, a guarda — nem a cache dos níveis intermediários do percorredor
-/// de tabelas, pela mesma regra —, e a próxima tradução do endereço lê a
-/// tabela.
+/// deixa a TLB guardar, a qualquer momento, toda entrada que não gera uma
+/// falha de tradução, de tamanho de endereço ou do bit de acesso — também a
+/// que só gera uma falha de permissão —, e só garante fora dela as que geram
+/// uma dessas três: "The only translation table entries guaranteed not to be
+/// held in the TLB are those that generate a Translation fault, an Address
+/// size fault, or an Access flag fault." Uma entrada inválida gera a falha
+/// de tradução: nenhuma TLB, de núcleo nenhum, a guarda — nem a cache dos
+/// níveis intermediários do percorredor de tabelas, pela mesma regra —, e a
+/// próxima tradução do endereço lê a tabela.
 ///
 /// O que falta é a escrita chegar ao percorredor, que não lê o que ainda
 /// está no buffer de escritas deste núcleo:
@@ -1040,16 +1041,17 @@ unsafe fn invalidar_tudo() {
 /// ([`desmapear`]) e a troca de permissão ou de marca
 /// ([`com_descritor_da_folha`] — a cópia na escrita e a compartilhada). E,
 /// por [`invalidar_tudo`], as tabelas que a remoção esvazia, a desmontagem
-/// de um espaço e a troca de espaço. Uma página que muda de frame ou de
-/// permissão passa pela remoção: a resolução da cópia na escrita e
+/// de um espaço e a troca de espaço. Fora a marca da cópia na escrita, que
+/// tira a escrita no lugar, uma página que muda de frame ou de permissão
+/// passa pela remoção: a resolução da cópia na escrita e
 /// [`crate::paginacao::mapear_faixa_preenchendo`] desmapeiam e mapeiam de
 /// novo, e o `tlbi` é o do primeiro passo.
 ///
 /// # O que custava
 ///
 /// No emulador com vários núcleos, um `tlbi …is` para os outros núcleos
-/// virtuais e espera por eles: medido, de 20 a 40 µs cada com quatro, e de 6
-/// a 14 com dois, contra meio com um. A carga de uma imagem fazia um a cada
+/// virtuais e espera por eles: medido, de 19 a 42 µs cada com quatro, e de 6
+/// a 13 com dois, contra meio com um. A carga de uma imagem fazia um a cada
 /// página mapeada, e a da imagem no teto das páginas (16 384) levava, em
 /// release, de 1,8 a 1,9 s com quatro núcleos, contra 0,2 com um.
 ///
@@ -1423,13 +1425,15 @@ fn com_descritor_da_folha<R>(
                 // ([`publicar`]).
                 //
                 // Por muito tempo nenhum caso a derrubava: apagada, a suíte
-                // inteira passava (medido com 161 casos). Quem marca — o `fork` e
-                // o caso que confere a marcação — vem de uma troca de espaço, que
-                // descarta a TLB inteira, e não escreve na página depois de
-                // marcá-la. O caso `memoria: marcar a copia na escrita derruba a
-                // traducao gravavel da TLB, neste nucleo e noutro` escreve antes
-                // e depois de marcar, sem troca de espaço no meio, neste núcleo e
-                // noutro com o mesmo espaço instalado, e reprova sem ela.
+                // inteira passava (medido com 161 casos). Quem marcava a cópia
+                // na escrita — o `fork` e o caso que confere a marcação — vinha
+                // de uma troca de espaço, que descarta a TLB inteira, e não
+                // escrevia na página depois de marcá-la; e a marca de
+                // compartilhada (`espelhar_no_usuario`) não muda a permissão. O
+                // caso `memoria: marcar a copia na escrita derruba a traducao
+                // gravavel da TLB, neste nucleo e noutro` escreve antes e depois
+                // de marcar, sem troca de espaço no meio, neste núcleo e noutro
+                // com o mesmo espaço instalado, e reprova sem ela.
                 invalidar(virtual_);
             }
             Ok(resultado)

@@ -13570,9 +13570,10 @@ fn paginacao_desmapear_remove_traducao() -> Resultado {
         return Err("desmapear falhou");
     }
     if !sumiu {
-        // Se a tradução sobrevive ao desmapeamento, a TLB não foi invalidada —
-        // e memória liberada continuaria acessível, que é uma falha de
-        // isolamento, não só um bug de contabilidade.
+        // Se a tradução sobrevive ao desmapeamento — `arch::traduzir`
+        // percorre a tabela por software, e não lê a TLB —, a entrada não saiu
+        // da tabela, e memória liberada continuaria acessível, que é uma falha
+        // de isolamento, não só um bug de contabilidade.
         return Err("traducao sobreviveu ao desmapeamento");
     }
     Ok(())
@@ -32375,9 +32376,9 @@ fn memoria_copia_na_escrita_nao_copia_sem_socio() -> Resultado {
 ///
 /// `com_descritor_da_folha` invalida a TLB depois de mudar uma entrada que
 /// continua válida, e apagar essa invalidação deixava a suíte inteira
-/// passar: quem marca — o `fork` e o caso que confere a marcação — vem de
-/// uma troca de espaço, que descarta a TLB inteira, e não escreve na página
-/// depois de marcá-la. Aqui a página é escrita **antes** de marcar, e a
+/// passar: quem marcava — o `fork` e o caso que confere a marcação — vinha
+/// de uma troca de espaço, que descarta a TLB inteira, e não escrevia na
+/// página depois de marcá-la. Aqui a página é escrita **antes** de marcar, e a
 /// tradução gravável fica na TLB; escrita de novo depois, ela tem de falhar
 /// e passar pela cópia. Sem a invalidação, a escrita iria pela tradução
 /// velha, sem falha, direto no frame que o outro dono enxerga.

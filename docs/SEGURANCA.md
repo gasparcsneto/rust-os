@@ -155,7 +155,13 @@ pontos onde acontece — não num canal paralelo:
   `carregar_a_carga` — mora dentro de `usuario::lancar_por`, em itens que
   nenhum outro item alcança (o lote A5), sem `impl` nenhum ali dentro, que
   o compilador não escopa — o método valeria onde o tipo valer (o lote
-  A7). E as recusas das perguntas sobre quem
+  A7) —, sem macro de fora da lista do `xtask`, que escreveria ali o `impl`
+  ou o `#[no_mangle]` sem a palavra, e sem montador nem ligador nos
+  arquivos da carga, que dariam a uma entrada de dentro um símbolo que
+  qualquer arquivo declara (o lote A8). O que as guardas de texto do
+  `xtask` não fecham — quem escreve no kernel para contorná-las de
+  propósito — fica com a revisão ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)).
+  E as recusas das perguntas sobre quem
   pede — o journal recusado, quem pede encerrado ou contido, o editor, o
   papel, a cota,
   também a contada de novo no nascimento — continuam gravadas como o
