@@ -422,7 +422,7 @@ kernel/src/
 │   │   ├── par/
 │   │   │   └── aviso.rs os casos do aviso com o fluxo entre dois Dukes: a suspensão e o esquecimento do dispositivo avisam o fim, e o fluxo saindo e chegando avisa pelo crédito e pelos dados do par
 │   │   └── troca.rs os casos da decisão de novo no ponto sem volta do `exec` — o F4 e os achados do adversário do lote A do #448: a troca de imagem parada no meio pela pausa da suíte, decidida e com a imagem preparada, e a chave revogada, a política nova, o processo isolado ou a confiança no editor da imagem nova — o `ola` selado no armazém — tirada de fora, que a recusam — nada trocado, `NEGADO`, a execução da decisão na auditoria e a imagem de antes rodando —, e o fim pedido sem o isolamento, que a recusa e morre na volta, sem o fim dos fluxos pela troca; com quem é ponta de fluxo e com quem não é, e a rodada da ponta repetida quando a volta pausada é adiada, até passar pela decisão de novo; sem mudança no meio, a troca de sempre; e a decisão de novo presa ao fio e ao `ALLOW` da decisão
-│   ├── nascimento.rs os casos do que muda no meio do nascimento de um processo, pelo gancho da suíte — o pai isolado, com a credencial suspensa, que sai, com o fim pedido sem o isolamento, com o journal recusado ou com a confiança no editor tirada no meio do `fork`, que não ganha filho; o processo isolado, encerrado — também sem o isolamento, o fim pedido com o teto cheio e o morto podado — no meio do `user.run` que ele pede pela interface nativa, e a pessoa que sai, a chave revogada e a política nova no meio do dela, que não lançam, e ouvem o código da recusa; e o processo encerrado enquanto nasce, que morre no primeiro ponto seguro, também quando a vaga volta sem ele nascer —; o `user.run` recusado nas perguntas do gate sobre quem pede, com o código e o motivo de cada recusa, sem a explicação do comando; o desconhecido — o pedido nativo sem o programa decidido, o lançamento fora de um comando — que recusa, e o kernel que lança por conta própria; a confiança no editor do código selado tirada no meio do nascimento — pelo `user.run` e pelo kernel fora de um comando —, que não lança; o lançamento dentro de um comando que não é o `user.run` — um `fs.verify`, pelo gancho da verificação —, recusado; e o `system.reboot` com a tabela de fios cheia, pelo fio `energia` do boot, e o despertar dele sem pedido, que não age; e os do lote A3 do #448: o lançamento de dentro do `user.run`, que só nasce com a autoridade e o caminho do comando — o do sistema, o de outro caminho, o de outra autoridade, o de outra pessoa e o exemplo embutido, pelo gancho de antes das perguntas do gate, e os dois de um caminho que não existe, recusados no começo do lançamento —, o nascimento que grava o editor pelo nome que a última palavra perguntou — pelo gancho do meio, que troca o nome da chave —, o `user.run` permitido que não lança e grava o desfecho — o caminho que não existe, e o fio que não nasce, com a tabela cheia —, e o kernel que não lança por conta própria depois do boot, com o trinco fechado; e os do lote A4: a recusa de quem pede com o desfecho do `user.run` — também a cota contada de novo no nascimento, pelo gancho de antes dele, e, fora de um comando, só a recusa do gate —, a imagem que não se carrega — o que não é ELF e o manifesto que não se lê —, que não lança e grava o desfecho, e a que não se mapeia, com o desfecho depois do `processo N lancado`, em nome de quem o gate decidiu, e nenhum desfecho guardado vivo depois; e os do lote A5: a imagem de entradas ou de notas demais, recusada pelo motivo novo — e a do teto, que lança —, e o segmento vazio no teto do espaço do usuário, recusado — e o mesmo dentro do espaço, que lança; e os do lote A6: o motivo de duas recusas da conferência da imagem — as notas acima do orçamento, recusadas antes de o achador ler o segmento, e o segmento que acaba no teto, que invade a pilha —, e a imagem cujos segmentos pedem, somados, mais páginas que o espaço do programa, recusada pela conta pura, sem carregar — e a do teto, que se confere; e o do lote A7: o desfecho de um lançamento com um código que permite, que não grava, nas duas compilações — e o NSF, que não acha o nascimento
+│   ├── nascimento.rs os casos do que muda no meio do nascimento de um processo, pelo gancho da suíte — o pai isolado, com a credencial suspensa, que sai, com o fim pedido sem o isolamento, com o journal recusado ou com a confiança no editor tirada no meio do `fork`, que não ganha filho; o processo isolado, encerrado — também sem o isolamento, o fim pedido com o teto cheio e o morto podado — no meio do `user.run` que ele pede pela interface nativa, e a pessoa que sai, a chave revogada e a política nova no meio do dela, que não lançam, e ouvem o código da recusa; e o processo encerrado enquanto nasce, que morre no primeiro ponto seguro, também quando a vaga volta sem ele nascer —; o `user.run` recusado nas perguntas do gate sobre quem pede, com o código e o motivo de cada recusa, sem a explicação do comando; o desconhecido — o pedido nativo sem o programa decidido, o lançamento fora de um comando — que recusa, e o kernel que lança por conta própria; a confiança no editor do código selado tirada no meio do nascimento — pelo `user.run` e pelo kernel fora de um comando —, que não lança; o lançamento dentro de um comando que não é o `user.run` — um `fs.verify`, pelo gancho da verificação —, recusado; e o `system.reboot` com a tabela de fios cheia, pelo fio `energia` do boot, e o despertar dele sem pedido, que não age; e os do lote A3 do #448: o lançamento de dentro do `user.run`, que só nasce com a autoridade e o caminho do comando — o do sistema, o de outro caminho, o de outra autoridade, o de outra pessoa e o exemplo embutido, pelo gancho de antes das perguntas do gate, e os dois de um caminho que não existe, recusados no começo do lançamento —, o nascimento que grava o editor pelo nome que a última palavra perguntou — pelo gancho do meio, que troca o nome da chave —, o `user.run` permitido que não lança e grava o desfecho — o caminho que não existe, e o fio que não nasce, com a tabela cheia —, e o kernel que não lança por conta própria depois do boot, com o trinco fechado; e os do lote A4: a recusa de quem pede com o desfecho do `user.run` — também a cota contada de novo no nascimento, pelo gancho de antes dele, e, fora de um comando, só a recusa do gate —, a imagem que não se carrega — o que não é ELF e o manifesto que não se lê —, que não lança e grava o desfecho, e a que não se mapeia, com o desfecho depois do `processo N lancado`, em nome de quem o gate decidiu, e nenhum desfecho guardado vivo depois; e os do lote A5: a imagem de entradas ou de notas demais, recusada pelo motivo novo — e a do teto, que lança —, e o segmento vazio no teto do espaço do usuário, recusado — e o mesmo dentro do espaço, que lança; e os do lote A6: o motivo de duas recusas da conferência da imagem — as notas acima do orçamento, recusadas antes de o achador ler o segmento, e o segmento que acaba no teto, que invade a pilha —, e a imagem cujos segmentos pedem, somados, mais páginas que o espaço do programa, recusada pela conta pura, sem carregar — e a do teto, que se confere; e o do lote A7: o desfecho de um lançamento com um código que permite, que não grava, nas duas compilações — e o NSF, que não acha o nascimento —; e o do lote A8: o mesmo desfecho dentro de um comando, pelo gancho de antes das perguntas do gate no `user.run`
 │   ├── orcamento.rs os casos do orçamento da vez da tarefa `programas`: a fila em ordem, cada pedido uma vez através das vezes, o fio que morre com o pedido na fila entre duas, e os suspensos de dois processos vivos executados na vez com a fila cheia; o laço da tarefa num executor de teste, ao lado de uma vizinha — a fila sempre cheia, o pedido que chega logo depois da vez, o suspenso pronto, e a fila vazia, em que a tarefa estaciona —; o tempo da vez; e o `incansavel` de verdade — um titular no laço, dois ao mesmo tempo, a taxa apertada —, cada resposta conferida pelo `id` e a conta dos filhos contra a do kernel
 │   ├── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
 │   ├── recolhimento.rs os casos da ordem do recolhimento — o achado A1-1: a busca do próximo morto começa no cursor e dá a volta pela tabela, e o laço de um titular que faz nascer e morrer processos sem parar não segura os mortos de outro —, com o coletor segurado: um recolhimento por vez — os mortos de outro titular acima do laço, a tabela cheia que dá a volta, o encerramento no meio do laço — e a passada de produção inteira, que recolhe a partir do cursor; e, tudo solto, dois coletores e o laço de um titular, com os processos de outro, que ocupam a cota dele, encerrados no meio
@@ -7253,7 +7253,11 @@ registro de cada uma no ponto em que nasceu.
   segundo caminho de lançamento do achado 1 do adversário do lote A3 do
   #448. Pela estrutura, e não pelo nome; o que fica é o que se faz dentro
   dessas funções — um `lancar_por` que guardasse o endereço do `hospedar`
-  num `static`, como número —, que a revisão do arquivo vê;
+  num `static`, como número —, que a revisão do arquivo vê; e não era só
+  isso: o `impl` de dentro (a (a) do lote A7), a macro de fora e o montador
+  (a (a) do lote A8) também tiravam a carga do lugar — o que as guardas de
+  texto não fecham está em [As guardas de
+  texto](#as-guardas-de-texto-o-que-elas-cobrem);
   (b) a guarda dos nomes protegidos acusa também o nome nos argumentos de
   uma invocação de macro e no corpo de um `macro_rules!` — no dono também,
   venha a macro de onde vier —, o `type` montado numa macro, nos donos, e
@@ -7316,7 +7320,10 @@ registro de cada uma no ponto em que nasceu.
   na ordem das gravações e no quadro da chamada, e fica para um lote
   seguinte, com a medida do tique do núcleo que troca — e, na mesma
   chamada, a desmontagem do espaço anterior, que o teto não limita,
-  medida no lote A7 (a (1) do "O que fica" dele); (2) as primitivas
+  medida no lote A7 (a (1) do "O que fica" dele); a carga mesma, medida
+  junto, leva no emulador de 0,12 a 3,0 s, conforme a arquitetura, o
+  perfil e os núcleos (os números no "O que fica" do lote A8); (2) as
+  primitivas
   `pub` abaixo dos carregadores — `fios::criar*`,
   `paginacao::Espaco::novo`, `fios::adotar_imagem`,
   `arch::trocar_espaco`, `paginacao::mapear_*` e
@@ -7361,8 +7368,9 @@ registro de cada uma no ponto em que nasceu.
   `impl` de dentro de uma função, que vale onde o tipo valer, e um `impl
   NaoLancou { pub(crate) fn sem_gate(…) }` dentro de `lancar_por` dava a
   todo o crate o fio novo do lançamento, com a `Carga` e o `hospedar` de
-  lá (o X1); e nenhum `#[macro_export]`, `#[no_mangle]` nem
-  `#[export_name]` nos arquivos da carga. No `programa.rs`, que define os
+  lá (o X1) — e uma macro de fora da lista o escrevia ali sem a palavra,
+  até o lote A8 (a (a) dele) —; e nenhum `#[macro_export]`, `#[no_mangle]`
+  nem `#[export_name]` nos arquivos da carga. No `programa.rs`, que define os
   carregadores, a regra pela estrutura do `usuario/mod.rs`, pela mesma
   máquina e com a tabela dele — o `carregar` só no `executar` e no
   `carregar_de_teste`, os passos só no `carregar`, o `entrar` só no
@@ -7422,12 +7430,16 @@ registro de cada uma no ponto em que nasceu.
   o `mapear` cheio (176 MiB) — 61 440 páginas, mais as tabelas —, a
   desmontagem levou de 22 a 36 ms em release e de 273 a 417 ms em depuração,
   nas duas arquiteturas — uns 0,4 a 0,6 µs por página em release —, e a do
-  exemplo, sem nada mapeado, menos de 1,2 ms. Com mais de um núcleo, os
-  outros andam o relógio durante ela, e ele não perde nada; com um núcleo
-  só, o tique que vence na janela anda o relógio uma vez, quando as
-  interrupções voltam, e os outros pontos da grade se perdem — o rearme os
-  pula —: um tique em release, e de 26 a 34 em depuração. Um núcleo que pede
-  a trava da paginação no meio espera com as interrupções mascaradas também.
+  exemplo, sem nada mapeado, menos de 1,2 ms. Com mais de um núcleo, um que
+  não espere a trava da paginação anda o relógio durante ela, e ele não
+  perde nada — na medida, os outros estavam livres —; mas um núcleo que
+  pede a trava no meio — um `mapear`, um `exec`, uma morte, um fio que
+  nasce — espera com as interrupções mascaradas também, e, se todos
+  esperam, ninguém anda o relógio, e ele perde como com um núcleo só (o I-1
+  do adversário do lote A7). Com um núcleo só, o tique que vence na janela
+  anda o relógio uma vez, quando as interrupções voltam, e os outros pontos
+  da grade se perdem — o rearme os pula —: um tique em release, e de 26 a
+  34 em depuração.
   A carga da imagem no teto, medida junto — num fio do kernel, de fora da
   máscara —, levava no aarch64 com quatro núcleos 1,85 s em release, contra
   0,21 com um: era o `tlbi` difundido de cada entrada nova, que saiu depois
@@ -7467,6 +7479,115 @@ registro de cada uma no ponto em que nasceu.
   dezenove mutações, com cinco de antes, de novo (ver *As do lote A7*, em
   [As mutações do ponto sem volta e de quem
   pede](#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
+  No lote A8, [B], os achados do adversário do lote A7 — os sete baixos e
+  os três informativos — e o fecho das guardas de texto por inventário (ver
+  [As guardas de texto](#as-guardas-de-texto-o-que-elas-cobrem)), sem
+  autoridade, regra, registro ou semântica de auditoria novos:
+  (a) no item de `lancar_por`, de `executar`, de `trocar_a_imagem` e do
+  `carregar` do `programa.rs`, só as macros da lista do `xtask`
+  (`MACROS_DA_CARGA`: o `alloc::format!`, o `assert!` e os três registros
+  do log), pelo caminho como está escrito, e o nome delas não se redefine
+  nem se traz de fora em arquivo nenhum do kernel — nem por um
+  `macro_rules!`, um `as` ou um `mod alloc`, nem por um `use` de um `alloc`
+  ou de um `assert` de outro pacote, um `use` montado por uma macro ou um
+  `#[macro_use]`, que, com o `rustc` do canal, trocam a macro sem aviso —:
+  uma macro definida fora do item escrevia nele o `impl` (o M1), ou o
+  `#[no_mangle]` de uma entrada de dentro (o M3), sem a palavra ali, e o
+  fio novo do lançamento chegava ao crate inteiro — os dois compilam nas
+  duas arquiteturas e passavam. E nos três arquivos da carga,
+  nem montador nem ligador (`MONTADOR_E_LIGADOR`: o `asm!`, o
+  `global_asm!`, o `naked_asm!` e o `#[link_section]`): o `.globl` de um
+  `asm!` dentro de `lancar_por` dava a uma entrada de lá um símbolo que o
+  ligador entrega a quem o declarar (o M2 — o adversário o escreveu com o
+  `global_asm!`, que dentro de uma função não compila, "non-statement macro
+  in statement position"; o `asm!` de linha compila, e passava). O resíduo
+  da (a) do lote A6 não era só o `static` com o endereço do `hospedar`: o
+  `impl` de dentro (o lote A7), a macro de fora e o montador também tiravam
+  a carga do lugar;
+  (b) fora do módulo `usuario` e da suíte, nenhum carregador, embrulho da
+  suíte ou passo da carga nos tokens de uma macro
+  (`carregadores_nas_macros_de_fora`): o caminho de uma macro se resolve
+  onde ela é invocada, e uma do `log.rs` dava ao `elf.rs` a carga e a
+  entrada num programa sem nomear carregador nenhum (o L1, que compila);
+  (c) um atributo com `$` fora do `doc` se acusa: o `#[cfg_attr(all(),
+  $a)]`, com `$a` = `path = "neto.inc"`, trazia para o crate um arquivo que
+  nenhuma conferência lê (o P1 — raciocinado pelo adversário; compila);
+  (d) as dependências do kernel pelo grafo que o `cargo metadata` resolve —
+  sem a rede; com ela só se um pacote do grafo de todas as plataformas não
+  está baixado (o `fiat-crypto`, o `libc`, que nenhum build do kernel
+  baixa) —: as diretas numa lista
+  fechada (`DEPENDENCIAS_DO_KERNEL`), cada uma da origem dela, nenhuma de
+  macros procedurais; os pacotes de macros procedurais do grafo numa lista
+  fechada, com quem usa cada um (`MACROS_PROCEDURAIS_DO_GRAFO`: o
+  `const_fn` e o `rustversion`, que o `x86_64` usa por dentro, os únicos que
+  um alvo do kernel compila; o `curve25519-dalek-derive`, o `defmt-macros`
+  e o `thiserror-impl`, fora pela `cfg` ou pelo recurso); só pacotes do
+  crates.io e do repositório; o kernel sem `build.rs`; e os pacotes do
+  repositório de que ele depende sem `build.rs`, macro exportada, recurso
+  instável nem `include` (`pacotes_do_repositorio_fora`). O `paste`
+  montava `carregar` com pedaços, no estável (o D1 — compila, com o pacote
+  baixado), e um `#[macro_export]` com `crate::usuario::…` no `diario`,
+  invocado no `elf.rs`, dava o mesmo — o resíduo que o README tinha, de
+  "um pacote do repositório de que o kernel dependa"; compila, e passava. O
+  grafo de hoje já tinha pacotes de macros procedurais — os da lista —, e
+  por isso a regra é a lista com quem os usa, e não "nenhum no grafo";
+  (e) o config do cargo como o cargo o lê de dentro de `kernel/`
+  (`-Zunstable-options config get`, a consulta do `compilador.rs`): os
+  rustflags de cada alvo exatamente os da lista (`RUSTFLAGS_DO_KERNEL`), sem
+  ligador, `build.rustflags`, `[unstable]`, `[env]` nem rustflags de
+  perfil, e sem o config sem a extensão; o `Cargo.toml` do kernel sem
+  `cargo-features`, `rustflags` nem barra invertida; e nenhum `RUSTFLAGS`
+  nem `CARGO_UNSTABLE_` na CI: o escape do TOML (o K1) e o config sem a
+  extensão, que o cargo prefere (o K2), passavam o `-Z` do atributo de
+  crate — os dois compilam, com o recurso de fora da lista;
+  (f) o embrulho da suíte do desfecho,
+  `autorizacao::gravar_um_desfecho_de_teste`, é nome protegido, como os
+  outros embrulhos da suíte (o E1);
+  (g) a guarda do desfecho também dentro de um comando: o caso do lote A7
+  só a alcançava fora de um, e uma guarda só ali (a DG4) passava na suíte
+  inteira (o T1). O caso novo usa o gancho de antes das perguntas do gate
+  no `user.run`, que roda dentro do comando;
+  (h) o texto: a seção [As guardas de
+  texto](#as-guardas-de-texto-o-que-elas-cobrem), com o modelo de ameaça e
+  o inventário; e, na (1) do "O que fica" do lote A7, a frase dos núcleos,
+  que valia só com os outros livres, e a carga do `exec`, com os números (o
+  I-1 do adversário).
+  O que fica: o que o inventário diz em cada linha, e o que nenhuma guarda
+  de texto fecha — quem escreve no kernel para contornar uma, de propósito,
+  com o que o compilador aceita —, com a revisão e com a política de
+  desenvolvimento. E, da (1) do lote A6, a carga da imagem no teto dentro do
+  `exec`, mascarada, que o lote A7 mediu num fio do kernel, de fora da
+  máscara: no x86_64, de 124 a 168 ms em release com quatro núcleos e de
+  203 a 220 ms com um, e 1,6 s em depuração com quatro e de 2,9 a 3,0 s com
+  um; no aarch64, depois de "A entrada nova não pede `tlbi`", de 0,51 a
+  0,78 s em release com quatro núcleos — 0,21 a 0,23 s com um — e de 1,2 a
+  1,4 s em depuração com quatro — 0,90 a 0,91 s com um. Ela toma a trava da
+  paginação página a página, e não a segura inteira como a desmontagem: os
+  outros núcleos andam o relógio. Com um núcleo só, a janela inteira se
+  perde menos um tique — pela conta da desmontagem, que a medida conferiu,
+  de 19 a 21 tiques em release e de 289 a 300 em depuração, no x86_64, e
+  nada disso dentro do `exec` foi medido —; fica com a (1) do lote A6, para
+  o lote seguinte. Os casos do lote A8: `contencao: o desfecho que permite
+  nao grava dentro de um comando`, novo; no `xtask`, os oito do adversário
+  — `adversario_a7_o_impl_pela_macro_de_fora`,
+  `adversario_a7_o_simbolo_pelo_ligador`,
+  `adversario_a7_o_no_mangle_pela_macro_de_fora`,
+  `adversario_a7_o_path_montado_num_cfg_attr`,
+  `adversario_a7_o_atributo_de_crate_que_o_texto_nao_ve` e
+  `adversario_a7_a_dependencia_de_macros`, estes dois adaptados à
+  conferência pelo cargo, `adversario_a7_o_embrulho_do_desfecho_so_na_suite`
+  e `adversario_a7_o_carregador_por_uma_macro_de_fora_do_modulo` —, e oito
+  novos — `as_macros_das_funcoes_da_carga_so_as_da_lista`,
+  `nem_montador_nem_ligador_nos_arquivos_da_carga`,
+  `os_carregadores_nas_macros_de_fora_do_usuario`,
+  `o_atributo_montado_por_uma_macro_fora_do_doc`,
+  `as_dependencias_do_kernel_pelo_grafo`,
+  `os_pacotes_do_repositorio_nao_exportam_macro`,
+  `o_config_efetivo_do_kernel` e
+  `o_manifesto_do_kernel_e_os_rustflags_da_ci` —; e
+  `os_recursos_de_macro_nao_entram_no_kernel`, com a árvore à parte de
+  verdade; e as mutações (ver *As do lote A8*, em [As mutações do ponto sem
+  volta e de quem pede](#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
 - **A margem de memória da compressão concorrente** (de fora da 14.1 e da
   correção da vaga do morto; investigada em 8 de novembro de 2026, sem mudar
   o comportamento): no x86_64 em debug, o caso `compressao: varias ao mesmo
@@ -9269,8 +9390,62 @@ cada carregador só nas funções que o usam ali
 da carga, e nenhum dos três arquivos — o `usuario/mod.rs`, o `programa.rs`
 e o `codigo.rs` — tem o `extern` fora de `lancar_por` nem um atributo que
 exporte — o `#[macro_export]`, o `#[no_mangle]`, o `#[export_name]`
-(`carga_fora_do_lugar_em`); e que os dois arquivos dos carregadores não
-têm macro nenhuma.
+(`carga_fora_do_lugar_em`); que, desde o lote A8, o item das funções da
+carga só invoca as macros da lista do `xtask` (`MACROS_DA_CARGA`), cujo
+nome nenhum arquivo do kernel redefine nem traz de fora — por um
+`macro_rules!`, um `as`, um `mod alloc`, um `use` de um `alloc` ou de um
+`assert` de outro pacote, um `use` montado por uma macro ou um
+`#[macro_use]` (`macros_da_carga_redefinidas`) —: uma macro de fora
+escreveria ali o `impl` ou o `#[no_mangle]` sem a palavra; e nenhum dos
+três arquivos tem o montador nem o ligador — o `asm!`, o `global_asm!`, o
+`naked_asm!`, o `#[link_section]` (`MONTADOR_E_LIGADOR`) —; que, fora do
+módulo, nenhuma macro nomeia um carregador
+(`carregadores_nas_macros_de_fora`); e que os dois arquivos dos
+carregadores não têm macro nenhuma. O que fica de fora não é só um
+`static` com o endereço do `hospedar`: é o que as guardas de texto deixam
+com a revisão, abaixo.
+
+### As guardas de texto: o que elas cobrem
+
+As conferências do `xtask` sobre o código do kernel — os nomes e as
+chamadas protegidas, os carregadores, o lugar da carga, os recursos — leem
+o texto, e não o que o compilador faz dele. O modelo de ameaça delas é este:
+
+- **elas acusam o desvio de quem escreve no kernel** — o acidental e o
+  ingênuo: um nome protegido fora do dono, um carregador num irmão, um
+  `impl` dentro de `lancar_por`, uma dependência nova — **e as formas que o
+  inventário abaixo cobre**, uma a uma;
+- **o resto fica com a revisão de código e com a política de
+  desenvolvimento** — o agente adversário e a revisão independente (1.4 e
+  1.5 do `CLAUDE.md`): quem escreve de propósito para contornar uma guarda
+  de texto acha, com o que o compilador aceita, uma forma que o texto não
+  vê. Três adversários seguidos — os dos lotes A5, A6 e A7 — acharam uma
+  macro de fora, um `impl` de dentro, um recurso instável, um `path`
+  montado, um pacote de macros procedurais e um escape no config do cargo;
+  o lote A8 terminou essa corrida pelo inventário, e não por mais uma
+  exceção: cada fonte de texto, de tokens e de configuração que entra na
+  compilação do kernel tem uma guarda, ou uma linha que diz por que fica de
+  fora.
+
+Elas não são autoridade nem segurança do Duke em execução — quem decide é
+o gate, pela política —: só impedem que o código do kernel o contorne sem
+ninguém ver.
+
+| A fonte | A guarda | O que fica, e por quê |
+|---|---|---|
+| os `.rs` que os `mod` alcançam | todo `.rs` de `kernel/src` é lido — fora da suíte, pelas guardas dos nomes, das chamadas e dos carregadores; na suíte, pelas dos recursos de macro e do nome das macros da carga —, e a árvore do README confere cada um; sem `#[path]`, um `mod` só alcança um `.rs` de `kernel/src` | a suíte fica fora das guardas dos nomes: só a compilação de teste a tem, e nenhum arquivo de produção a traz |
+| o `#[path]`, também montado por macro ou num `cfg_attr` | a palavra `path` em qualquer atributo; o `#[$…]`; e, desde o lote A8, o `$` em qualquer atributo que não seja o `doc` (`onde_traz_outro_arquivo`) | o atributo montado por uma macro de um pacote do crates.io, que o kernel invocaria só com os pedaços — nenhuma dependência tem uma |
+| o `include!` e afins | a palavra `include`, em qualquer forma; desde o lote A8, também nos pacotes do repositório de que o kernel depende | o `include_str!`, o `include_bytes!` e o `.incbin` do montador trazem texto e bytes, e não código |
+| as macros de outros pacotes: o `#[macro_export]` | o nome protegido e o carregador nos tokens de qualquer macro (`carregadores_nas_macros_de_fora`, desde o lote A8); nas funções da carga, só as macros da lista (`MACROS_DA_CARGA`), e o nome delas não se redefine nem se traz de fora — nem `macro_rules!`, `as`, `mod alloc`, `use` de um `alloc` ou de um `assert` de outro pacote, `use` montado nem `#[macro_use]` (`macros_da_carga_redefinidas`); e, desde o lote A8, nenhum `#[macro_export]`, recurso instável ou `include` nos pacotes do repositório de que o kernel depende (`pacotes_do_repositorio_fora`) | as dos pacotes do crates.io — as do `tock-registers`, por exemplo —, travadas pelo `Cargo.lock`, com o resumo de cada pacote, e revistas a cada atualização; e um glob (`use dep::*;`) de uma que exporte um `assert` ou um módulo `alloc` — nenhuma dependência direta exporta: no grafo, o `defmt` e o `heapless`, que o kernel não nomeia |
+| as macros procedurais | desde o lote A8, as dependências diretas do kernel numa lista fechada, de onde cada uma vem, e nenhuma de macros procedurais; e os pacotes de macros procedurais do grafo numa lista fechada, com quem usa cada um — pelo grafo que o `cargo metadata` resolve (`dependencias_fora`) | os da lista, que o kernel não alcança pelo nome: o `const_fn` e o `rustversion`, que o `x86_64` usa por dentro; o resto não compila para o kernel |
+| o `build.rs` | desde o lote A8, o pacote do kernel só com o binário, e os pacotes do repositório sem `build.rs`, pelo grafo | os `build.rs` dos pacotes do crates.io, que valem para o pacote deles — menos uma biblioteca nativa ou um caminho do ligador, que chegariam ao do kernel: só o do `defmt` pede um, e ele não compila para o kernel —, travados pelo `Cargo.lock` |
+| o config do cargo, efetivo | desde o lote A8, o valor que o cargo lê de dentro de `kernel/` (`config get`), em todo arquivo e forma: os rustflags de cada alvo, exatamente os da lista (`RUSTFLAGS_DO_KERNEL`); nenhum ligador, `build.rustflags`, `[unstable]`, `[env]` nem rustflags de perfil; e nenhum config sem a extensão (`config_do_kernel_fora`) | o `[patch]` e o `[source]`, que o grafo mostra pela origem de cada pacote; e o config da máquina de quem compila, que a consulta lê na máquina em que o `invariantes` roda |
+| o `Cargo.toml` do kernel, com os perfis | desde o lote A8, sem `cargo-features`, `rustflags` nem barra invertida (`manifesto_do_kernel_fora`); as dependências e o `build.rs`, pelo grafo | o resto dos perfis — o `opt-level`, o `overflow-checks` —, que muda o binário e não o que o código pode dizer |
+| o ambiente | o `xtask` tira do build do kernel o `RUSTFLAGS` e o `CARGO_ENCODED_RUSTFLAGS`; o `compilador.rs` recusa o `RUSTC` e os embrulhos; a parte da suíte só vem do `xtask`; desde o lote A8, nenhum `RUSTFLAGS` nem `CARGO_UNSTABLE_` na CI, e os `CARGO_TARGET_<alvo>_RUSTFLAGS` do ambiente do `invariantes` entram na consulta do config | um `CARGO_*` do shell de quem compila, só na hora do build: o repositório não o diz, e a CI não o põe |
+| o montador: o `global_asm!`, o `asm!` e o `naked_asm!` | desde o lote A8, nenhum nos arquivos da carga, e nas funções dela, macro nenhuma fora da lista (`MONTADOR_E_LIGADOR`) | os do resto do kernel — os vetores, a entrada, os programas de exemplo —, que só alcançam o que se nomeia lá: o `sym` pede um caminho, e um item de dentro de `lancar_por` não se nomeia fora |
+| o ligador: o `#[link_section]`, os símbolos exportados e o script | nos arquivos da carga, nenhum atributo que exporte (desde o lote A7) nem `#[link_section]` (desde o lote A8); o `-C link-arg` e o ligador, pelos rustflags da lista | o `linker.ld` do ARM e os `#[no_mangle]` do `arch`, com a revisão; e a referência a um símbolo pelo nome decorado (`_ZN…`), num texto do montador ou num `#[link_name]` |
+| os atributos montados por macro | o `#[$…]` e, desde o lote A8, o `$` fora do `doc`; a macro procedural de atributo, pela lista das dependências | — |
+| os recursos instáveis | a lista do `main.rs` (`RECURSOS_DO_KERNEL`, desde o lote A7); desde o lote A8, também o `-Z` do atributo de crate e o `@arquivo`, pelos rustflags da lista, e nenhum recurso nos pacotes do repositório | — |
 
 ### Da rede ao processo
 
@@ -12150,6 +12325,52 @@ partida), e o de agora reprovou nas duas com "nada correu ao mesmo tempo"
 partida") — no x86_64, com uma passada em voo na partida, é o mínimo de
 duas que reprova —; sem a VG1, o de agora passou (3569 e 2253 depois da
 partida).
+
+#### As do lote A8
+
+Trinta e cinco mutações contra o lote A8 — as guardas de texto do `xtask`
+fechadas por inventário e os achados do adversário do lote A7, no item *A
+soma das cotas de processos e a cota por sessão*, em [Decisões
+pendentes](#decisões-pendentes) —: trinta e quatro no hospedeiro, nos
+testes do `xtask` — rodadas de novo, todas, no `xtask` final —, e a DG4 do
+adversário na suíte, em depuração: nas duas arquiteturas contra a parte do
+caso novo (`DUKE_PARTE=1062/1062` no x86_64, `1048/1048` no aarch64), e
+no x86_64 contra a do caso do lote A7 (`1061/1062`). Uma de cada vez, no
+repositório, e restauradas byte a byte, com o resumo SHA-256 conferido e a
+hora do arquivo renovada para o cargo recompilar. As trinta e cinco
+reprovaram; nenhuma é equivalente. A XT68 sobreviveu na primeira rodada —
+nenhum teste alcançava a ligação da leitura dos pacotes do repositório,
+que só o `cargo metadata` de verdade fazia —; a ligação virou uma função
+que o teste chama (`grafo_do_kernel_fora`), e ela reprovou.
+
+| Mutação | Reprovada por |
+|---|---|
+| a lista das macros das funções da carga desligada (XT40) | `as_macros_das_funcoes_da_carga_so_as_da_lista`, `nem_montador_nem_ligador_nos_arquivos_da_carga`, `adversario_a7_o_impl_pela_macro_de_fora` e `adversario_a7_o_no_mangle_pela_macro_de_fora` |
+| o nome das macros da lista redefinido sem acusação (XT41) | `as_macros_das_funcoes_da_carga_so_as_da_lista` |
+| sem o montador e o ligador nos arquivos da carga (XT42) | `nem_montador_nem_ligador_nos_arquivos_da_carga` |
+| os carregadores nas macros de fora do `usuario` sem acusação (XT43) | `os_carregadores_nas_macros_de_fora_do_usuario` e `adversario_a7_o_carregador_por_uma_macro_de_fora_do_modulo` |
+| o `$` num atributo fora do `doc` sem acusação (XT44) | `o_atributo_montado_por_uma_macro_fora_do_doc` e `adversario_a7_o_path_montado_num_cfg_attr` |
+| o embrulho do desfecho fora dos nomes protegidos (XT45) | `adversario_a7_o_embrulho_do_desfecho_so_na_suite` |
+| a dependência direta de fora da lista não conta (XT46); a de macros procedurais sem acusação (XT47) | `adversario_a7_a_dependencia_de_macros` |
+| o pacote de macros procedurais de fora da lista do grafo sem acusação (XT48) | o mesmo e `as_dependencias_do_kernel_pelo_grafo` |
+| quem usa um pacote de macros procedurais não se confere (XT49); toda origem aceita no grafo (XT50); o kernel com `build.rs` (XT51); o pacote do repositório com `build.rs` (XT52) | `as_dependencias_do_kernel_pelo_grafo`, cada uma pelo desvio dela |
+| o `#[macro_export]` dos pacotes do repositório sem acusação (XT53); a leitura deles desligada da conferência das dependências (XT68) | `os_pacotes_do_repositorio_nao_exportam_macro` |
+| os rustflags de cada alvo sem a lista (XT54) | `adversario_a7_o_atributo_de_crate_que_o_texto_nao_ve` |
+| o ligador de um alvo pela consulta da chave (XT55); a tabela de um alvo com outra chave (XT56); os rustflags de um `cfg(…)` (XT57); o `[unstable]` (XT59); o `[env]` (XT60); os rustflags de um perfil (XT61) — sem acusação | `o_config_efetivo_do_kernel`, cada uma pelo caso dela |
+| o `build.rustflags` sem acusação (XT58) | `os_recursos_de_macro_nao_entram_no_kernel` |
+| o config sem a extensão sem acusação (XT62) | `o_config_efetivo_do_kernel` e `adversario_a7_o_atributo_de_crate_que_o_texto_nao_ve` |
+| o config efetivo desligado do passo dos recursos (XT63) | `adversario_a7_o_atributo_de_crate_que_o_texto_nao_ve` e `os_recursos_de_macro_nao_entram_no_kernel` |
+| a barra invertida (XT64) e o `cargo-features` (XT65) do `Cargo.toml` do kernel sem acusação, e o manifesto desligado do passo (XT66) | `o_manifesto_do_kernel_e_os_rustflags_da_ci` |
+| o `RUSTFLAGS` na CI sem acusação (XT67) | o mesmo e `os_recursos_de_macro_nao_entram_no_kernel` |
+| o `use` que traz de fora um `alloc` ou um `assert` (XT69), o `use` montado por uma macro (XT70), o `#[macro_use]` (XT71) e o `self` de um grupo (XT72) sem acusação; e o nome novo de um `as` acusado de novo pela regra do `use` (XT73) | `as_macros_das_funcoes_da_carga_so_as_da_lista`, cada uma pelo caso dela |
+| a guarda do desfecho só fora de um comando, a DG4 do adversário do lote A7 | `contencao: o desfecho que permite nao grava dentro de um comando`, nas duas arquiteturas: "dentro de um comando, o desfecho de um lancamento gravou um codigo que permite" — "devolveu 8 pelo gravar e 9 pelo gravar_no_comando, e o log disse 0 vez(es)" no x86_64, 7 e 8 no aarch64. Com ela, o caso do lote A7 passa no x86_64 — "devolveu 0 fora do comando e 0 pelo caminho do comando, e o log disse 2 vez(es)" —: era o T1 |
+
+O caso novo passou nas duas arquiteturas, em depuração e em release, duas
+vezes cada, e a regressão — os doze casos do nascimento e do desfecho: o do
+lote A7, as recusas do `user.run` no nascimento e no gate, o lançamento de
+dentro dele, os quatro que gravam o desfecho (o caminho, o fio, a imagem e
+o mapeamento), a cota, o trinco e os dois do NSF —, nas duas, em
+depuração. A suíte inteira ficou com a CI.
 
 ### As mutações do chamado do coletor
 
