@@ -4072,3 +4072,142 @@ pub(super) fn contencao_o_desfecho_que_permite_nao_grava() -> Resultado {
         }
     })
 }
+
+// ---------------------------------------------------------------------------
+// O lote A8 (o T1 do adversario do lote A7): o desfecho dentro de um comando
+// ---------------------------------------------------------------------------
+
+/// O detalhe que o gancho tenta gravar com o `ALLOW`, dentro do comando.
+const LANCADO_NO_COMANDO: &str = "processo 4000000009 lancado";
+/// O caminho do `user.run` do caso: o operador alcanca `/bin`, e ele nao
+/// existe.
+const CAMINHO_DO_DESFECHO_NO_COMANDO: &str = "/bin/nao-existe";
+/// O que o gancho devolveu, pelo `gravar` e pelo `gravar_no_comando`
+/// (`u64::MAX`: o gancho nao rodou).
+static NO_COMANDO_GRAVAR: AtomicU64 = AtomicU64::new(u64::MAX);
+static NO_COMANDO_GRAVAR_NO_COMANDO: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// O gancho de antes das perguntas do gate sobre quem pede: roda no
+/// lancamento do `user.run`, dentro do comando, e tenta gravar o desfecho
+/// com `ALLOW` e `processo N lancado` pelos dois caminhos.
+fn o_desfecho_que_permite_no_comando() {
+    NO_COMANDO_GRAVAR.store(
+        crate::autorizacao::gravar_um_desfecho_de_teste(
+            CAMINHO_DO_DESFECHO_NO_COMANDO,
+            politica::Codigo::Allow,
+            LANCADO_NO_COMANDO,
+            false,
+        ),
+        SeqCst,
+    );
+    NO_COMANDO_GRAVAR_NO_COMANDO.store(
+        crate::autorizacao::gravar_um_desfecho_de_teste(
+            CAMINHO_DO_DESFECHO_NO_COMANDO,
+            politica::Codigo::Allow,
+            LANCADO_NO_COMANDO,
+            true,
+        ),
+        SeqCst,
+    );
+}
+
+/// O lote A8, pelo T1 do adversario do lote A7, sobre o caso do I2: a guarda
+/// do desfecho tambem dentro de um comando -- o caminho da execucao da
+/// decisao, em que o `ALLOW` iria em nome de quem o gate decidiu, e o NSF
+/// leria o nascimento. O caso do lote A7 so alcanca o desfecho fora de um
+/// comando: uma guarda so ali (`&& self.execucao.is_none()`, a DG4) passava
+/// nele, e em toda a suite, porque nenhum chamador de verdade passa um codigo
+/// que permite. Pelo gancho de antes das perguntas do gate sobre quem pede,
+/// no `user.run` de um caminho que nao existe: os dois caminhos devolvem
+/// zero, o log diz uma vez em cada, nada com `processo 4000000009 lancado`
+/// vai a auditoria, o `user.run` grava o desfecho dele -- `ERROR`, a leitura
+/// -- e o NSF, que o leu, nao acha o nascimento.
+pub(super) fn contencao_o_desfecho_que_permite_nao_grava_no_comando() -> Resultado {
+    use politica::Codigo;
+    use seguranca::evento::Tipo;
+    NO_COMANDO_GRAVAR.store(u64::MAX, SeqCst);
+    NO_COMANDO_GRAVAR_NO_COMANDO.store(u64::MAX, SeqCst);
+    crate::pessoas::esquecer_registradas();
+    let resultado = super::com_o_nsf(|| {
+        let quem = operador_que_lanca(181, "desfecho-no-comando");
+        let desde = crate::log::total_emitidos();
+        let cabeca = crate::autorizacao::ultimo_registro();
+        crate::autorizacao::antes_do_gate_do_lancamento_de_teste(Some(
+            o_desfecho_que_permite_no_comando,
+        ));
+        let r = fs_pedir(
+            quem,
+            "user.run",
+            &alloc::format!(r#"{{"path":"{CAMINHO_DO_DESFECHO_NO_COMANDO}"}}"#),
+        );
+        crate::autorizacao::antes_do_gate_do_lancamento_de_teste(None);
+        let mut disse = 0;
+        crate::log::ultimos(256, crate::log::Level::Trace, |l| {
+            disse += (l.seq >= desde
+                && l.subsistema == "autorizacao"
+                && l.mensagem().contains(CAMINHO_DO_DESFECHO_NO_COMANDO)
+                && l.mensagem().contains("veio com ALLOW")) as usize;
+        });
+        let gravar = NO_COMANDO_GRAVAR.load(SeqCst);
+        let no_comando = NO_COMANDO_GRAVAR_NO_COMANDO.load(SeqCst);
+        crate::log_info!(
+            "teste",
+            "contencao: dentro do comando, o desfecho com ALLOW devolveu {} pelo gravar e {} pelo \
+             gravar_no_comando, e o log disse {} vez(es): {}",
+            gravar,
+            no_comando,
+            disse,
+            r
+        );
+        if gravar == u64::MAX || no_comando == u64::MAX {
+            return Err("o gancho nao rodou dentro do user.run: o caso nao conferiu nada");
+        }
+        if gravar != 0 || no_comando != 0 {
+            return Err(
+                "dentro de um comando, o desfecho de um lancamento gravou um codigo que permite",
+            );
+        }
+        if super::registro_que(|e| e.detalhe.contains(LANCADO_NO_COMANDO)).is_some() {
+            return Err("dentro de um comando, o desfecho com ALLOW deixou registro na auditoria");
+        }
+        if disse != 2 {
+            return Err(
+                "dentro de um comando, o desfecho recusado nao disse no log, uma vez em cada \
+                 caminho, o que recusou",
+            );
+        }
+        // O controle: o desfecho de verdade do `user.run` -- `ERROR`, a
+        // leitura --, gravado depois do gancho.
+        let execucoes = registros_depois(cabeca, |ev| {
+            ev.metodo == "user.run"
+                && ev.recurso == CAMINHO_DO_DESFECHO_NO_COMANDO
+                && ev.codigo == Codigo::Error
+        });
+        let Some(&(controle, _)) = execucoes.last() else {
+            return Err("o user.run do caso ficou sem o desfecho: o caso nao conferiu nada");
+        };
+        let _ = crate::seguranca::passo();
+        let _ = crate::seguranca::passo();
+        let visto = crate::seguranca::com_motor_de_teste(|m| {
+            (
+                m.evento(controle).is_some(),
+                m.eventos().any(|ev| {
+                    ev.tipo
+                        == Tipo::Nascimento {
+                            filho: 4_000_000_009,
+                        }
+                }),
+            )
+        });
+        match visto {
+            Some((true, false)) => Ok(()),
+            Some((true, true)) => {
+                Err("o NSF achou o nascimento de um desfecho que permite, dentro de um comando")
+            }
+            _ => Err("o NSF nao leu o controle: o caso nao conferiu nada"),
+        }
+    });
+    crate::autorizacao::antes_do_gate_do_lancamento_de_teste(None);
+    crate::pessoas::esquecer_registradas();
+    resultado
+}

@@ -43603,6 +43603,13 @@ static CASOS: &[Caso] = &[
         nome: "contencao: o desfecho de um lancamento com um codigo que permite nao grava",
         f: nascimento::contencao_o_desfecho_que_permite_nao_grava,
     },
+    // O lote A8 (o T1 do adversário do lote A7): a mesma guarda dentro de
+    // um comando, o caminho em que o `ALLOW` iria em nome de quem o gate
+    // decidiu.
+    Caso {
+        nome: "contencao: o desfecho que permite nao grava dentro de um comando",
+        f: nascimento::contencao_o_desfecho_que_permite_nao_grava_no_comando,
+    },
 ];
 
 /// A cauda da suíte: os casos que rodam em **toda** parte, depois da fatia
