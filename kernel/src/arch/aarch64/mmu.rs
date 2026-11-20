@@ -1410,25 +1410,26 @@ fn com_descritor_da_folha<R>(
 
             let (resultado, mudou) = f(&mut *folha)?;
             if mudou {
-                // # A invalidação que nenhum caso derruba, e por quê
+                // # A invalidação de uma entrada que continua válida
                 //
-                // Medido, apagando-a: a suíte inteira passa — remedido com 161
-                // casos, e continua passando. Não é falha dos casos.
+                // A entrada era válida e continua — muda a permissão, ou uma
+                // marca do software —, e a TLB de qualquer núcleo pode guardar a
+                // de antes. Sem o `tlbi`, quem marcasse uma página sem trocar de
+                // espaço antes — um `mprotect`, uma proteção de guarda — receberia
+                // do hardware a permissão anterior até a TLB expirar sozinha: uma
+                // proteção que existe na tabela e não na máquina, intermitente e
+                // dependente de quanto tempo passou. Diferente de
+                // [`mapear_frame`], que troca uma entrada inválida e só publica
+                // ([`publicar`]).
                 //
-                // Quem modifica são dois: o `fork` e o caso que confere a marcação.
-                // Nos dois, o passo imediatamente anterior é uma troca de espaço —
-                // que recarrega o registrador de raiz e descarta a TLB por inteiro
-                // —, e nenhum dos dois **escreve** na página depois de marcá-la.
-                // Quando chegamos aqui não há entrada velha para descartar, e se
-                // houvesse ninguém a usaria.
-                //
-                // Ela fica porque essa é uma propriedade **do chamador de hoje**, e
-                // não desta função. Quem marcar uma página sem trocar de espaço
-                // antes — um `mprotect`, uma proteção de guarda, qualquer coisa que
-                // ainda não existe — receberia do hardware a permissão anterior até
-                // a TLB expirar sozinha, e teria uma proteção que existe na tabela e
-                // não na máquina. É o modo de falhar mais caro que há: intermitente
-                // e dependente de quanto tempo passou.
+                // Por muito tempo nenhum caso a derrubava: apagada, a suíte
+                // inteira passava (medido com 161 casos). Quem marca — o `fork` e
+                // o caso que confere a marcação — vem de uma troca de espaço, que
+                // descarta a TLB inteira, e não escreve na página depois de
+                // marcá-la. O caso `memoria: marcar a copia na escrita derruba a
+                // traducao gravavel da TLB, neste nucleo e noutro` escreve antes
+                // e depois de marcar, sem troca de espaço no meio, neste núcleo e
+                // noutro com o mesmo espaço instalado, e reprova sem ela.
                 invalidar(virtual_);
             }
             Ok(resultado)

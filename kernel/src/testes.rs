@@ -32368,6 +32368,270 @@ fn memoria_copia_na_escrita_nao_copia_sem_socio() -> Resultado {
     })
 }
 
+/// Marcar a cópia na escrita derruba a tradução gravável que já estava na
+/// TLB — a deste núcleo e a de outro com o mesmo espaço.
+///
+/// # O que estava sem caso
+///
+/// `com_descritor_da_folha` invalida a TLB depois de mudar uma entrada que
+/// continua válida, e apagar essa invalidação deixava a suíte inteira
+/// passar: quem marca — o `fork` e o caso que confere a marcação — vem de
+/// uma troca de espaço, que descarta a TLB inteira, e não escreve na página
+/// depois de marcá-la. Aqui a página é escrita **antes** de marcar, e a
+/// tradução gravável fica na TLB; escrita de novo depois, ela tem de falhar
+/// e passar pela cópia. Sem a invalidação, a escrita iria pela tradução
+/// velha, sem falha, direto no frame que o outro dono enxerga.
+///
+/// O outro dono é um segundo endereço do mesmo espaço sobre o mesmo frame,
+/// somente leitura: o que o `fork` faz entre dois espaços, aqui num só, para
+/// que nenhuma troca de espaço caia entre a escrita de antes e a de depois.
+///
+/// # A segunda metade, noutro núcleo
+///
+/// Um fio fixo num núcleo secundário instala o mesmo espaço, com as
+/// interrupções mascaradas, escreve e espera; este núcleo, com o espaço
+/// também instalado, marca; o outro escreve de novo. A troca de espaço de
+/// cada núcleo descarta a TLB de todos — `invalidar_tudo` é difundida —, e
+/// por isso as duas vêm antes da primeira escrita do outro e depois da
+/// segunda. Um espaço de processo só roda num núcleo de cada vez; o que esta
+/// metade confere é que a invalidação de uma entrada que continua válida
+/// chega aos outros núcleos — aqui, as da família `...is`, que o hardware
+/// difunde —, que é o que a marca de uma página do kernel, traduzida por
+/// todos, exige.
+///
+/// Só no aarch64: no x86 a página privada é invalidada só no núcleo que a
+/// marca (`invlpg`), porque lá o espaço do processo é de um núcleo só, e a
+/// segunda metade não vale; e o comentário de `com_descritor_da_folha` de
+/// lá, que diz que nenhum caso derruba a invalidação, fica com a decisão de
+/// ligar a primeira metade lá também.
+#[cfg(target_arch = "aarch64")]
+fn memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel() -> Resultado {
+    use crate::arch::{self, Permissoes, TAMANHO_PAGINA};
+
+    const ALVO: u64 = crate::usuario::BASE;
+    const SOCIO: u64 = crate::usuario::BASE + TAMANHO_PAGINA;
+    const SO_LEITURA: Permissoes = Permissoes {
+        escrita: false,
+        executavel: false,
+        dispositivo: false,
+        usuario: true,
+    };
+    const ANTES: u64 = 0xAAAA_0000_AAAA_0001;
+    const DEPOIS: u64 = 0xBBBB_0000_BBBB_0002;
+    const ANTES_NO_OUTRO: u64 = 0xCCCC_0000_CCCC_0003;
+    const DEPOIS_NO_OUTRO: u64 = 0xDDDD_0000_DDDD_0004;
+    const VOLTAS: u64 = 2_000_000_000;
+
+    // As fases da segunda metade; de 90 em diante, o caso desistiu.
+    static FASE: AtomicU64 = AtomicU64::new(0);
+    static RAIZ: AtomicU64 = AtomicU64::new(0);
+    static NO_ALVO: AtomicU64 = AtomicU64::new(0);
+    static NO_SOCIO: AtomicU64 = AtomicU64::new(0);
+    static SAIU: AtomicBool = AtomicBool::new(false);
+
+    /// Mapeia `ALVO` gravável e `SOCIO` somente leitura sobre o mesmo
+    /// frame, com dois donos, no espaço ativo, e escreve `valor` em `ALVO`.
+    ///
+    /// # Safety
+    /// O espaço ativo precisa ser um do caso, com a entrada privada vazia.
+    unsafe fn montar(valor: u64) -> Resultado {
+        let frame = crate::paginacao::mapear_novo(ALVO, Permissoes::DADOS_USUARIO)?;
+        if !crate::frames::compartilhar(frame) {
+            return Err("o frame do alvo nao ganhou o segundo dono");
+        }
+        // SAFETY: o frame acabou de ganhar o dono que este mapeamento
+        // representa — o contrato de `mapear_frame`, como no `fork`.
+        if let Err(motivo) = unsafe { arch::mapear_frame(SOCIO, frame, SO_LEITURA) } {
+            crate::frames::soltar(frame);
+            return Err(motivo);
+        }
+        // SAFETY: `ALVO` acabou de ser mapeado gravável no espaço ativo.
+        unsafe { core::ptr::write_volatile(ALVO as *mut u64, valor) };
+        Ok(())
+    }
+
+    extern "C" fn outro(_argumento: u64) -> ! {
+        arch::sem_interrupcoes(|| {
+            // Só da fase 0: se o caso já desistiu, não volta atrás.
+            let _ = FASE.compare_exchange(0, 1, SeqCst, SeqCst);
+            let fase_ou_desistiu = |f: u64| {
+                move || {
+                    let agora = FASE.load(SeqCst);
+                    agora == f || agora >= 90
+                }
+            };
+            if girar_ate(fase_ou_desistiu(2), VOLTAS) && FASE.load(SeqCst) == 2 {
+                // SAFETY: a raiz é a do caso, que carrega as entradas de topo
+                // do kernel; voltamos ao espaço do kernel antes de o caso a
+                // largar, que ele só faz depois de ver `SAIU`.
+                unsafe {
+                    arch::trocar_espaco(RAIZ.load(SeqCst));
+                    // A escrita de antes: a tradução gravável vai para a TLB
+                    // deste núcleo.
+                    core::ptr::write_volatile(ALVO as *mut u64, ANTES_NO_OUTRO);
+                    FASE.store(3, SeqCst);
+                    if girar_ate(fase_ou_desistiu(4), VOLTAS) && FASE.load(SeqCst) == 4 {
+                        // A de depois, com a página marcada por outro núcleo.
+                        core::ptr::write_volatile(ALVO as *mut u64, DEPOIS_NO_OUTRO);
+                        NO_ALVO.store(core::ptr::read_volatile(ALVO as *const u64), SeqCst);
+                        NO_SOCIO.store(core::ptr::read_volatile(SOCIO as *const u64), SeqCst);
+                        FASE.store(5, SeqCst);
+                    }
+                    arch::trocar_espaco(arch::espaco_do_kernel());
+                }
+            }
+        });
+        SAIU.store(true, SeqCst);
+        crate::fios::terminar()
+    }
+
+    let privada = arch::ENTRADA_PRIVADA as usize;
+    let kernel = arch::espaco_do_kernel();
+
+    // A primeira metade: neste núcleo.
+    let neste = arch::sem_interrupcoes(|| -> Result<_, &'static str> {
+        let espaco = crate::paginacao::Espaco::novo(privada)?;
+        // SAFETY: a raiz veio de `Espaco::novo` e carrega as entradas de topo
+        // do kernel; voltamos ao espaço do kernel antes de largá-la.
+        let r = unsafe {
+            arch::trocar_espaco(espaco.raiz());
+            let r = (|| -> Result<(u64, u64, u64, u64), &'static str> {
+                // A escrita de antes, em `montar`: a tradução gravável de
+                // `ALVO` fica na TLB deste núcleo.
+                montar(ANTES)?;
+                let (_, resolvidas_antes, copiadas_antes) =
+                    crate::paginacao::estatisticas_de_copia_na_escrita();
+                arch::marcar_copia_na_escrita(ALVO)?;
+                // A de depois: tem de falhar e passar pela cópia.
+                core::ptr::write_volatile(ALVO as *mut u64, DEPOIS);
+                let (_, resolvidas, copiadas) =
+                    crate::paginacao::estatisticas_de_copia_na_escrita();
+                Ok((
+                    resolvidas - resolvidas_antes,
+                    copiadas - copiadas_antes,
+                    core::ptr::read_volatile(ALVO as *const u64),
+                    core::ptr::read_volatile(SOCIO as *const u64),
+                ))
+            })();
+            arch::trocar_espaco(kernel);
+            r
+        };
+        drop(espaco);
+        r
+    })?;
+    let (resolvidas, copiadas, no_alvo, no_socio) = neste;
+    crate::log_info!(
+        "teste",
+        "neste nucleo: {} resolucao(oes) e {} copia(s) depois da marca; no alvo {:#x}, no socio {:#x}",
+        resolvidas,
+        copiadas,
+        no_alvo,
+        no_socio
+    );
+    // O veredito desta metade espera o da outra: as duas no log, mesmo
+    // quando a primeira reprova.
+    let neste = if no_socio != ANTES {
+        Err(
+            "o outro dono viu a escrita feita depois da marca: ela foi pela traducao gravavel que estava na TLB",
+        )
+    } else if resolvidas != 1 || copiadas != 1 {
+        Err("a escrita depois da marca nao passou pela copia na escrita")
+    } else if no_alvo != DEPOIS {
+        Err("a escrita depois da marca nao ficou no alvo")
+    } else {
+        Ok(())
+    };
+    if let Err(motivo) = neste {
+        crate::log_error!("teste", "neste nucleo: {}", motivo);
+    }
+
+    // A segunda metade: noutro núcleo.
+    let Some(alvo) = nucleos_secundarios().next() else {
+        crate::log_info!("teste", "um nucleo so: nao ha outra TLB para conferir");
+        return neste;
+    };
+    FASE.store(0, SeqCst);
+    NO_ALVO.store(0, SeqCst);
+    NO_SOCIO.store(0, SeqCst);
+    SAIU.store(false, SeqCst);
+    let espaco = crate::paginacao::Espaco::novo(privada)?;
+    RAIZ.store(espaco.raiz(), SeqCst);
+    if let Err(motivo) = crate::fios::criar_no_nucleo("teste-tlb-marca", outro, 0, alvo) {
+        drop(espaco);
+        return Err(motivo);
+    }
+    let pronto = esperar_ate(|| FASE.load(SeqCst) == 1, 300);
+    let contas = arch::sem_interrupcoes(|| -> Result<_, &'static str> {
+        pronto?;
+        // SAFETY: a raiz veio de `Espaco::novo` e carrega as entradas de topo
+        // do kernel; voltamos ao espaço do kernel antes de largá-la.
+        unsafe {
+            arch::trocar_espaco(espaco.raiz());
+            let r = (|| -> Result<(u64, u64), &'static str> {
+                montar(ANTES)?;
+                FASE.store(2, SeqCst);
+                if !girar_ate(|| FASE.load(SeqCst) == 3, VOLTAS) {
+                    return Err("o outro nucleo nao escreveu antes da marca");
+                }
+                let (_, resolvidas_antes, copiadas_antes) =
+                    crate::paginacao::estatisticas_de_copia_na_escrita();
+                arch::marcar_copia_na_escrita(ALVO)?;
+                FASE.store(4, SeqCst);
+                if !girar_ate(|| FASE.load(SeqCst) == 5, VOLTAS) {
+                    return Err("o outro nucleo nao escreveu depois da marca");
+                }
+                let (_, resolvidas, copiadas) =
+                    crate::paginacao::estatisticas_de_copia_na_escrita();
+                Ok((resolvidas - resolvidas_antes, copiadas - copiadas_antes))
+            })();
+            if r.is_err() {
+                FASE.store(99, SeqCst);
+            }
+            arch::trocar_espaco(kernel);
+            r
+        }
+    });
+    if contas.is_err() {
+        FASE.store(99, SeqCst);
+    }
+    // O espaço só sai depois que o outro núcleo saiu dele: largá-lo antes
+    // devolveria ao alocador tabelas que ele ainda traduz.
+    if esperar_ate(|| SAIU.load(SeqCst), 300).is_err() {
+        core::mem::forget(espaco);
+        return Err("o outro nucleo nao saiu do espaco do caso");
+    }
+    drop(espaco);
+    let (resolvidas, copiadas) = match contas {
+        Ok(contas) => contas,
+        Err(motivo) => return neste.and(Err(motivo)),
+    };
+    let (no_alvo, no_socio) = (NO_ALVO.load(SeqCst), NO_SOCIO.load(SeqCst));
+    crate::log_info!(
+        "teste",
+        "no nucleo {}: {} resolucao(oes) e {} copia(s) depois da marca; no alvo {:#x}, no socio {:#x}",
+        alvo,
+        resolvidas,
+        copiadas,
+        no_alvo,
+        no_socio
+    );
+    let noutro = if no_socio != ANTES_NO_OUTRO {
+        Err(
+            "o outro dono viu a escrita feita noutro nucleo depois da marca: ela foi pela traducao gravavel que estava na TLB dele",
+        )
+    } else if resolvidas != 1 || copiadas != 1 {
+        Err("a escrita noutro nucleo depois da marca nao passou pela copia na escrita")
+    } else if no_alvo != DEPOIS_NO_OUTRO {
+        Err("a escrita noutro nucleo depois da marca nao ficou no alvo")
+    } else {
+        Ok(())
+    };
+    if let Err(motivo) = noutro {
+        crate::log_error!("teste", "no nucleo {}: {}", alvo, motivo);
+    }
+    neste.and(noutro)
+}
+
 /// O neto de um `fork` nasce com a memória de dados gravável.
 ///
 /// # O caso que só aparece na segunda geração
@@ -40366,6 +40630,13 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "memoria: copia na escrita nao copia sem socio",
         f: memoria_copia_na_escrita_nao_copia_sem_socio,
+    },
+    // Só no aarch64: no x86 a página privada é invalidada só no núcleo que a
+    // marca, e a segunda metade não vale lá — ver o caso.
+    #[cfg(target_arch = "aarch64")]
+    Caso {
+        nome: "memoria: marcar a copia na escrita derruba a traducao gravavel da TLB, neste nucleo e noutro",
+        f: memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel,
     },
     Caso {
         nome: "memoria: fork do fork mantem a escrita",
