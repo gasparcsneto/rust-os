@@ -722,6 +722,8 @@ pub fn resolver_copia_na_escrita(endereco: u64) -> bool {
         }
 
         RESOLVIDAS.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "modo-teste")]
+        copia_de_teste::anotar(!sozinho);
         true
     })
 }
@@ -744,6 +746,59 @@ pub fn estatisticas_de_copia_na_escrita() -> (u64, u64, u64) {
         RESOLVIDAS.load(Ordering::Relaxed),
         COPIADAS.load(Ordering::Relaxed),
     )
+}
+
+/// Só para a suíte: as resoluções e as cópias da cópia na escrita **num
+/// espaço** — o do caso que vigia —, e não as da máquina inteira
+/// ([`estatisticas_de_copia_na_escrita`]): a cópia de outro processo, noutro
+/// núcleo, ao mesmo tempo, não entra na conta do caso.
+///
+/// Pelo espaço ativo de quem resolve, e não pelo fio: a resolução pode ser
+/// de outro fio do caso, noutro núcleo, no mesmo espaço.
+///
+/// O caso que vigia é só do aarch64 — ver `memoria: marcar a copia na
+/// escrita derruba a traducao gravavel da TLB, neste nucleo e noutro` —, e
+/// no x86 a vigia fica sem quem a chame.
+#[cfg(feature = "modo-teste")]
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+pub mod copia_de_teste {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    /// A raiz do espaço vigiado; `u64::MAX`, nenhum.
+    static VIGIADO: AtomicU64 = AtomicU64::new(u64::MAX);
+    static RESOLVIDAS: AtomicU64 = AtomicU64::new(0);
+    static COPIADAS: AtomicU64 = AtomicU64::new(0);
+
+    /// Vigia as resoluções no espaço de raiz `raiz`, a partir de zero.
+    pub fn vigiar(raiz: u64) {
+        RESOLVIDAS.store(0, Ordering::Release);
+        COPIADAS.store(0, Ordering::Release);
+        VIGIADO.store(raiz, Ordering::Release);
+    }
+
+    /// Para de vigiar.
+    pub fn esquecer() {
+        VIGIADO.store(u64::MAX, Ordering::Release);
+    }
+
+    /// `(falhas resolvidas, cópias tiradas)` no espaço vigiado.
+    pub fn contas() -> (u64, u64) {
+        (
+            RESOLVIDAS.load(Ordering::Acquire),
+            COPIADAS.load(Ordering::Acquire),
+        )
+    }
+
+    /// Chamada por [`super::resolver_copia_na_escrita`] a cada resolução,
+    /// com as interrupções mascaradas.
+    pub(super) fn anotar(copiou: bool) {
+        if VIGIADO.load(Ordering::Acquire) == crate::arch::espaco_atual() {
+            RESOLVIDAS.fetch_add(1, Ordering::AcqRel);
+            if copiou {
+                COPIADAS.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+    }
 }
 
 impl Drop for Espaco {

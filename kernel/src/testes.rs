@@ -32405,9 +32405,21 @@ fn memoria_copia_na_escrita_nao_copia_sem_socio() -> Resultado {
 /// segunda metade não vale; e o comentário de `com_descritor_da_folha` de
 /// lá, que diz que nenhum caso derruba a invalidação, fica com a decisão de
 /// ligar a primeira metade lá também.
+///
+/// # As contas são do caso
+///
+/// As resoluções e as cópias de cada metade são as do espaço dela
+/// (`paginacao::copia_de_teste`), e não as da máquina inteira: com as
+/// globais, a cópia na escrita de outro processo, noutro núcleo, entre as
+/// duas leituras, reprovava o caso à toa (o item D do adversário do
+/// trabalho arm-tlbi). E o outro núcleo só avança a fase da que ele espera
+/// — de 2 para 3, de 4 para 5 —: com um `store`, um avanço que caísse
+/// depois da desistência do caso a apagava, e ele ficava girando,
+/// mascarado, até o fim das voltas.
 #[cfg(target_arch = "aarch64")]
 fn memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel() -> Resultado {
     use crate::arch::{self, Permissoes, TAMANHO_PAGINA};
+    use crate::paginacao::copia_de_teste;
 
     const ALVO: u64 = crate::usuario::BASE;
     const SOCIO: u64 = crate::usuario::BASE + TAMANHO_PAGINA;
@@ -32470,13 +32482,15 @@ fn memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel() -> Resultado 
                     // A escrita de antes: a tradução gravável vai para a TLB
                     // deste núcleo.
                     core::ptr::write_volatile(ALVO as *mut u64, ANTES_NO_OUTRO);
-                    FASE.store(3, SeqCst);
+                    // Só da fase 2: um `store` que caísse depois da
+                    // desistência do caso a apagaria.
+                    let _ = FASE.compare_exchange(2, 3, SeqCst, SeqCst);
                     if girar_ate(fase_ou_desistiu(4), VOLTAS) && FASE.load(SeqCst) == 4 {
                         // A de depois, com a página marcada por outro núcleo.
                         core::ptr::write_volatile(ALVO as *mut u64, DEPOIS_NO_OUTRO);
                         NO_ALVO.store(core::ptr::read_volatile(ALVO as *const u64), SeqCst);
                         NO_SOCIO.store(core::ptr::read_volatile(SOCIO as *const u64), SeqCst);
-                        FASE.store(5, SeqCst);
+                        let _ = FASE.compare_exchange(4, 5, SeqCst, SeqCst);
                     }
                     arch::trocar_espaco(arch::espaco_do_kernel());
                 }
@@ -32492,28 +32506,29 @@ fn memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel() -> Resultado 
     // A primeira metade: neste núcleo.
     let neste = arch::sem_interrupcoes(|| -> Result<_, &'static str> {
         let espaco = crate::paginacao::Espaco::novo(privada)?;
+        let raiz = espaco.raiz();
         // SAFETY: a raiz veio de `Espaco::novo` e carrega as entradas de topo
         // do kernel; voltamos ao espaço do kernel antes de largá-la.
         let r = unsafe {
-            arch::trocar_espaco(espaco.raiz());
+            arch::trocar_espaco(raiz);
             let r = (|| -> Result<(u64, u64, u64, u64), &'static str> {
                 // A escrita de antes, em `montar`: a tradução gravável de
                 // `ALVO` fica na TLB deste núcleo.
                 montar(ANTES)?;
-                let (_, resolvidas_antes, copiadas_antes) =
-                    crate::paginacao::estatisticas_de_copia_na_escrita();
+                // As contas deste espaço, e só dele, de agora em diante.
+                copia_de_teste::vigiar(raiz);
                 arch::marcar_copia_na_escrita(ALVO)?;
                 // A de depois: tem de falhar e passar pela cópia.
                 core::ptr::write_volatile(ALVO as *mut u64, DEPOIS);
-                let (_, resolvidas, copiadas) =
-                    crate::paginacao::estatisticas_de_copia_na_escrita();
+                let (resolvidas, copiadas) = copia_de_teste::contas();
                 Ok((
-                    resolvidas - resolvidas_antes,
-                    copiadas - copiadas_antes,
+                    resolvidas,
+                    copiadas,
                     core::ptr::read_volatile(ALVO as *const u64),
                     core::ptr::read_volatile(SOCIO as *const u64),
                 ))
             })();
+            copia_de_teste::esquecer();
             arch::trocar_espaco(kernel);
             r
         };
@@ -32556,7 +32571,8 @@ fn memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel() -> Resultado 
     NO_SOCIO.store(0, SeqCst);
     SAIU.store(false, SeqCst);
     let espaco = crate::paginacao::Espaco::novo(privada)?;
-    RAIZ.store(espaco.raiz(), SeqCst);
+    let raiz = espaco.raiz();
+    RAIZ.store(raiz, SeqCst);
     if let Err(motivo) = crate::fios::criar_no_nucleo("teste-tlb-marca", outro, 0, alvo) {
         drop(espaco);
         return Err(motivo);
@@ -32567,24 +32583,24 @@ fn memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel() -> Resultado 
         // SAFETY: a raiz veio de `Espaco::novo` e carrega as entradas de topo
         // do kernel; voltamos ao espaço do kernel antes de largá-la.
         unsafe {
-            arch::trocar_espaco(espaco.raiz());
+            arch::trocar_espaco(raiz);
             let r = (|| -> Result<(u64, u64), &'static str> {
                 montar(ANTES)?;
+                // As contas deste espaço — a resolução do outro núcleo cai
+                // nele —, e só dele.
+                copia_de_teste::vigiar(raiz);
                 FASE.store(2, SeqCst);
                 if !girar_ate(|| FASE.load(SeqCst) == 3, VOLTAS) {
                     return Err("o outro nucleo nao escreveu antes da marca");
                 }
-                let (_, resolvidas_antes, copiadas_antes) =
-                    crate::paginacao::estatisticas_de_copia_na_escrita();
                 arch::marcar_copia_na_escrita(ALVO)?;
                 FASE.store(4, SeqCst);
                 if !girar_ate(|| FASE.load(SeqCst) == 5, VOLTAS) {
                     return Err("o outro nucleo nao escreveu depois da marca");
                 }
-                let (_, resolvidas, copiadas) =
-                    crate::paginacao::estatisticas_de_copia_na_escrita();
-                Ok((resolvidas - resolvidas_antes, copiadas - copiadas_antes))
+                Ok(copia_de_teste::contas())
             })();
+            copia_de_teste::esquecer();
             if r.is_err() {
                 FASE.store(99, SeqCst);
             }
@@ -32854,6 +32870,83 @@ fn paginacao_a_entrada_nova_privada_publica_e_a_compartilhada_invalida() -> Resu
         return Err(
             "a entrada nova nao seguiu a regra: so a privada de um processo dispensa o tlbi",
         );
+    }
+    Ok(())
+}
+
+/// Remapear uma página privada neste núcleo não lê o frame antigo (o caso
+/// A1 do adversário do trabalho arm-tlbi).
+///
+/// Num espaço de processo, a página é escrita e lida — a tradução fica na
+/// TLB deste núcleo —, sai das tabelas com o frame guardado e o conteúdo
+/// velho nele, e volta sobre um frame novo, zerado: a leitura de depois tem
+/// de ver o zero. Ver o conteúdo velho é ler por uma tradução que a remoção
+/// devia ter derrubado.
+///
+/// A remoção numa página privada, no mesmo núcleo, não tinha caso: tirar o
+/// `tlbi` dela só era pego por `smp: desmapear do kernel vale em todo
+/// nucleo`, numa página do kernel lida noutro núcleo — e, desde que a
+/// entrada nova compartilhada voltou ao `tlbi`, nem por ele: o `tlbi` do
+/// mapeamento seguinte cobre a falta na página do kernel. Aqui a entrada
+/// nova é privada, e só publica: nada depois da remoção derruba a tradução
+/// velha por acaso. E a página vizinha fica mapeada, para a tabela dela não
+/// esvaziar: a invalidação inteira que a remoção faz ao devolver uma tabela
+/// vazia também cobriria a falta. Medido no aarch64: sem o `tlbi` da
+/// remoção, a leitura vê o conteúdo velho, e só este caso reprova.
+///
+/// No x86 o caso roda também, e não discrimina a remoção: lá o mapeamento
+/// novo faz o `invlpg` do endereço (o do `map_to`), que derruba a tradução
+/// velha mesmo sem o da remoção — medido, a mutação que o tira passa.
+fn memoria_remapear_uma_pagina_privada_neste_nucleo_nao_le_o_frame_antigo() -> Resultado {
+    use crate::arch::{self, Permissoes, TAMANHO_PAGINA};
+
+    const PAGINA: u64 = crate::usuario::BASE;
+    const VIZINHA: u64 = crate::usuario::BASE + TAMANHO_PAGINA;
+    const ANTIGO: u64 = 0xA5A5_0000_A5A5_0001;
+
+    let privada = arch::ENTRADA_PRIVADA as usize;
+    let kernel = arch::espaco_do_kernel();
+
+    let depois = arch::sem_interrupcoes(|| -> Result<u64, &'static str> {
+        let espaco = crate::paginacao::Espaco::novo(privada)?;
+        // SAFETY: a raiz veio de `Espaco::novo` e carrega as entradas de topo
+        // do kernel; voltamos ao espaço do kernel antes de largá-la, e o
+        // `Drop` dele devolve o que ficar mapeado num erro.
+        let r = unsafe {
+            arch::trocar_espaco(espaco.raiz());
+            let r = (|| -> Result<u64, &'static str> {
+                crate::paginacao::mapear_novo(VIZINHA, Permissoes::DADOS_USUARIO)?;
+                crate::paginacao::mapear_novo(PAGINA, Permissoes::DADOS_USUARIO)?;
+                core::ptr::write_volatile(PAGINA as *mut u64, ANTIGO);
+                if core::ptr::read_volatile(PAGINA as *const u64) != ANTIGO {
+                    return Err("a pagina nao guardou o que se escreveu nela");
+                }
+                // O frame sai sem voltar ao alocador: fica com o conteúdo
+                // velho, que é o que uma tradução velha mostraria.
+                let antigo = arch::desmapear(PAGINA)?;
+                let lido = crate::paginacao::mapear_novo(PAGINA, Permissoes::DADOS_USUARIO)
+                    .map(|_| core::ptr::read_volatile(PAGINA as *const u64));
+                crate::frames::liberar(antigo);
+                lido
+            })();
+            arch::trocar_espaco(kernel);
+            r
+        };
+        drop(espaco);
+        r
+    })?;
+    crate::log_info!(
+        "teste",
+        "remapear uma pagina privada neste nucleo: a leitura depois viu {:#x}",
+        depois
+    );
+    if depois == ANTIGO {
+        return Err(
+            "a leitura depois de remapear viu o frame antigo: a remocao nao derrubou a traducao",
+        );
+    }
+    if depois != 0 {
+        return Err("a leitura depois de remapear nao viu o frame novo, zerado");
     }
     Ok(())
 }
@@ -43851,6 +43944,12 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "paginacao: a entrada nova so do processo publica, e a compartilhada leva o tlbi",
         f: paginacao_a_entrada_nova_privada_publica_e_a_compartilhada_invalida,
+    },
+    // A remoção numa página privada, neste núcleo (o A1 do adversário do
+    // trabalho arm-tlbi).
+    Caso {
+        nome: "memoria: remapear uma pagina privada neste nucleo nao le o frame antigo",
+        f: memoria_remapear_uma_pagina_privada_neste_nucleo_nao_le_o_frame_antigo,
     },
 ];
 
