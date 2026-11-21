@@ -1088,7 +1088,7 @@ unsafe fn tabela_vazia(tabela: *const u64) -> bool {
 /// Deve ser chamada logo após descartar uma tabela de tradução.
 unsafe fn invalidar_tudo() {
     #[cfg(feature = "modo-teste")]
-    TLBI_INTEIRAS[super::nucleo_atual()].fetch_add(1, Ordering::Relaxed);
+    let nucleo = tlbi_comecando(&TLBI_INTEIRAS);
     // SAFETY: manutenção de TLB, sempre válida a partir de EL1.
     unsafe {
         asm!(
@@ -1099,6 +1099,8 @@ unsafe fn invalidar_tudo() {
             options(nostack),
         );
     }
+    #[cfg(feature = "modo-teste")]
+    tlbi_terminado(nucleo);
 }
 
 /// Só para a suíte: quantos `tlbi` difundidos cada núcleo fez — por
@@ -1127,6 +1129,66 @@ pub fn tlbi_deste_nucleo_de_teste() -> (u64, u64) {
         TLBI_POR_ENDERECO[nucleo].load(Ordering::Relaxed),
         TLBI_INTEIRAS[nucleo].load(Ordering::Relaxed),
     )
+}
+
+/// Só para a suíte: dois por `tlbi` difundido de cada núcleo, dos dois
+/// tipos — um antes de ele sair, outro depois do `dsb ish` que o completa
+/// —: ímpar enquanto um está em curso. Ver [`tlbi_de_fora_de_teste`].
+#[cfg(feature = "modo-teste")]
+static TLBI_EM_CURSO: [AtomicU64; crate::nucleos::MAX_NUCLEOS] =
+    [const { AtomicU64::new(0) }; crate::nucleos::MAX_NUCLEOS];
+
+/// Só para a suíte: anota em `contador` e em [`TLBI_EM_CURSO`] o `tlbi`
+/// difundido que este núcleo vai fazer, e devolve o núcleo, para
+/// [`tlbi_terminado`].
+///
+/// Antes do `asm!`, que começa com `dsb ishst`: a anotação está completa
+/// para todo núcleo antes de o `tlbi` sair.
+#[cfg(feature = "modo-teste")]
+fn tlbi_comecando(contador: &[AtomicU64; crate::nucleos::MAX_NUCLEOS]) -> usize {
+    let nucleo = super::nucleo_atual();
+    contador[nucleo].fetch_add(1, Ordering::Relaxed);
+    TLBI_EM_CURSO[nucleo].fetch_add(1, Ordering::Relaxed);
+    nucleo
+}
+
+/// Só para a suíte: o `tlbi` de [`tlbi_comecando`] terminou — depois do
+/// `dsb ish` que o completa em todo núcleo.
+#[cfg(feature = "modo-teste")]
+fn tlbi_terminado(nucleo: usize) {
+    TLBI_EM_CURSO[nucleo].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Só para a suíte: a soma de [`TLBI_EM_CURSO`] dos núcleos fora de `par`,
+/// ou `None` se algum deles está no meio de um `tlbi` difundido agora.
+///
+/// # Para quê
+///
+/// Um caso que confere uma invalidação pelo efeito — a escrita ou a leitura
+/// que já não vai pela tradução velha — não vê a falta dela se outro núcleo
+/// difundir um `tlbi` na janela: o `vmalle1is` de uma troca de espaço ou de
+/// uma desmontagem pelo coletor, ou um `tlbi vaae1is` do mesmo endereço
+/// noutro espaço, derruba a tradução velha por acaso, e o caso passa com a
+/// invalidação tirada (o achado 3 do adversário do lote ICACHE). Lida antes
+/// e depois da janela, a mesma soma, sem nenhum em curso no começo, quer
+/// dizer que nenhum `tlbi` de fora a alcançou: um que a alcançasse começou
+/// antes do fim dela — e entrou na soma de depois — ou estava em curso no
+/// começo. Todo `tlbi` difundido do kernel passa por [`invalidar`] ou por
+/// [`invalidar_tudo`]; os outros dois são locais, do boot.
+#[cfg(feature = "modo-teste")]
+pub fn tlbi_de_fora_de_teste(par: &[usize]) -> Option<u64> {
+    let mut soma = 0u64;
+    for (nucleo, contador) in TLBI_EM_CURSO.iter().enumerate() {
+        if par.contains(&nucleo) {
+            continue;
+        }
+        let visto = contador.load(Ordering::Acquire);
+        if !visto.is_multiple_of(2) {
+            return None;
+        }
+        soma += visto;
+    }
+    Some(soma)
 }
 
 /// Publica a troca de uma entrada **inválida** por uma válida, na entrada
@@ -1207,7 +1269,7 @@ unsafe fn publicar() {
 /// Deve ser chamada logo após escrever um descritor.
 unsafe fn invalidar(virtual_: u64) {
     #[cfg(feature = "modo-teste")]
-    TLBI_POR_ENDERECO[super::nucleo_atual()].fetch_add(1, Ordering::Relaxed);
+    let nucleo = tlbi_comecando(&TLBI_POR_ENDERECO);
     // SAFETY: sequência de manutenção de TLB exigida pelo manual.
     unsafe {
         asm!(
@@ -1223,6 +1285,8 @@ unsafe fn invalidar(virtual_: u64) {
             options(nostack),
         );
     }
+    #[cfg(feature = "modo-teste")]
+    tlbi_terminado(nucleo);
 }
 
 /// Endereço virtual por onde o kernel enxerga uma página física.
