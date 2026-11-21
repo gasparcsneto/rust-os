@@ -1430,6 +1430,78 @@ equivalentes no emulador, cujo percorredor lê a memória do convidado na
 ordem do programa — as barreiras fecham janelas que só um processador de
 verdade abre.
 
+**A entrada nova compartilhada leva o `tlbi`.** Dispensar o `tlbi` vale onde
+um núcleo só traduz a entrada: a **privada** de um processo — a faixa do
+usuário numa raiz de processo. A raiz de um processo fica ativa num núcleo
+de cada vez, quem mapeia nela é esse núcleo, e um núcleo que passe a rodar o
+processo depois instala a raiz com um `isb`, que ordena os percursos dele.
+Na entrada **compartilhada** — as regiões do kernel, que toda raiz copia e
+todo núcleo traduz, e a raiz do kernel inteira, ativa nos fios do kernel de
+todos os núcleos — o `mapear_frame` voltou ao `tlbi vaae1is` (o item B do
+adversário do trabalho arm-tlbi): sem o FEAT_ETS, um núcleo que espera um
+aviso e então lê uma página do kernel recém-mapeada, num endereço que já
+conhecia, pode tê-la traduzido antes de ver o aviso, com a entrada ainda
+inválida, e tomar uma falha de tradução espúria, fatal no EL1. É a janela do
+commit do Linux "arm64: mm: Ignore spurious translation faults taken from
+the kernel", que lista três saídas — o `tlbi` difundido no mapeamento, um
+`dsb; isb` em quem lê depois do aviso, ou tratar a falta —; o Linux trata a
+falta, e aqui é o `tlbi`, só onde a janela existe. A regra e o motivo moram
+em `mmu::privada_de_um_processo`. O ganho fica, porque a carga e o `mapear`
+são da entrada privada. Medidos de novo, antes e depois, pelo mesmo
+instrumento — fora do commit: um caso da compilação da suíte, sozinho numa
+máquina de 512 MiB, em release, que num fio do kernel, de fora da máscara,
+carrega a imagem no teto das páginas e mapeia em seguida a região mapeável
+inteira no mesmo espaço, de 16 em 16 MiB como a chamada, cronometrando pelo
+contador da arquitetura, três rodadas por máquina e duas máquinas por número
+de núcleos —, a carga levou com quatro núcleos de 335 a 876 ms antes e de
+616 a 818 depois; com dois, de 315 a 348 e de 298 a 344; com um, de 92 a 104
+e de 91 a 111. O `mapear` cheio, de 141 a 210 ms antes e de 138 a 194
+depois com quatro; de 149 a 224 e de 136 a 177 com dois; de 123 a 151 e de
+119 a 186 com um. O `tlbi … is` volta às pilhas dos fios, à memória das
+superfícies e do Argon2 e ao MMIO, de 19 a 42 µs por página com quatro
+núcleos no emulador. O emulador não abre a janela, e o caso `paginacao: a
+entrada nova so do processo publica, e a compartilhada leva o tlbi` confere
+a regra pelos `tlbi` que o núcleo fez a cada mapeamento, com as interrupções
+mascaradas, nos dois sentidos.
+
+**As tabelas voltam ao alocador depois da invalidação.** No ARM, a remoção
+que esvaziava uma tabela da entrada privada a devolvia ao alocador antes do
+`vmalle1is`, e a desmontagem de um espaço, a subárvore inteira (o item F do
+adversário do trabalho arm-tlbi): o frame já era de quem o pedisse enquanto
+a cache dos níveis intermediários deste núcleo ainda podia lê-lo como
+tabela. Agora a tabela sai das entradas, a TLB a esquece em todo núcleo, e
+só então o frame fica livre — com a trava e a máscara de antes. No x86, o
+`invlpg` da remoção vinha antes da limpeza que solta as tabelas esvaziadas
+(o item C), e os caches de estrutura deste núcleo podiam guardá-las até o
+próximo `invlpg` ou `CR3`: a limpeza agora entrega as tabelas soltas a uma
+lista, um `invlpg` do endereço depois dela as tira dos caches de estrutura,
+e só então elas voltam ao alocador. Nenhum dos dois se vê no emulador, que
+não guarda os níveis intermediários do percurso.
+
+As mutações do lote ICACHE, em depuração com quatro núcleos, contra a parte
+da paginação — os casos da memória, da paginação e dos frames, e os do
+`smp:`, do `usuario:` e do coletor que mexem com espaços: a carga sem a
+sincronia, nas duas arquiteturas, ou o backend do ARM sem a manutenção —
+como se o processador anunciasse o `IDC` e o `DIC` —, reprovam só `memoria:
+a carga sincroniza o cache de instrucoes do codigo`; a entrada compartilhada
+sem o `tlbi`, ou a privada com ele de volta, só `paginacao: a entrada nova
+so do processo publica, e a compartilhada leva o tlbi`; a remoção sem o
+`tlbi` (a M3 do adversário), só o caso novo `memoria: remapear uma pagina
+privada neste nucleo nao le o frame antigo`, que lê o conteúdo velho —
+`smp: desmapear do kernel vale em todo nucleo` deixou de pegá-la, porque o
+`tlbi` da entrada nova compartilhada cobre a falta na página do kernel,
+como antes do trabalho arm-tlbi —; o `tlbi` por endereço só neste núcleo (a
+M5), nas duas rodadas, a segunda metade de `memoria: marcar a copia na
+escrita derruba a traducao gravavel da TLB, neste nucleo e noutro` — o
+outro dono viu a escrita, sem resolução nenhuma — e `smp: desmapear do
+kernel vale em todo nucleo`, e a primeira metade passa. Passam, e são
+equivalentes no emulador: as tabelas livres antes da invalidação, no ARM e
+no x86 — o percurso do QEMU sem aceleração não guarda os níveis
+intermediários, e as entradas das páginas debaixo de uma tabela esvaziada
+já saíram, cada uma com o `tlbi` ou o `invlpg` da remoção dela —; e, no
+x86, a remoção sem o `invlpg` — lá o mapeamento novo faz o `invlpg` do
+endereço, e o remapear do caso novo fica coberto por ele.
+
 **As travas são justas.** O `spin::Mutex` é um teste-e-troca: ganha quem
 chegar primeiro naquele instante, e um núcleo que solta e pede de novo ganha
 quase sempre. Medido: um processo num núcleo secundário escrevendo no log,
@@ -1698,6 +1770,21 @@ não compila.
   próximo boot: ele ainda pode acordar tarde, e acorda na pilha dela antes
   de ver que foi dado como falho e se recolher — devolvê-la seria dar a
   outro fio uma pilha que um núcleo ainda usa.
+- No ARM, o que o lote ICACHE corrigiu na paginação e na carga não se vê
+  no emulador: o cache de instruções que guarda o código de outro
+  processo, a falha de tradução espúria de um núcleo sem o FEAT_ETS e a
+  cache dos níveis intermediários com uma tabela já livre — o QEMU sem
+  aceleração não tem nenhum dos três. Os casos conferem os dois primeiros
+  pela conta das operações; o terceiro, e o mesmo no x86, só a leitura do
+  código. Quem os veria é um processador de verdade — o KVM, o HVF, a
+  máquina.
+- As entradas de topo das regiões do kernel nascem na raiz que está ativa
+  quando a primeira página da região é mapeada, e nada garante que seja a
+  do kernel. Hoje é: o heap, as pilhas e o MMIO nascem no boot; as
+  superfícies, no boot com tela, e sem tela no primeiro Argon2, que roda
+  num fio do kernel. Uma região que nascesse primeiro na chamada de um
+  processo ficaria só na raiz dele, e sairia com ele. Conferido no lote
+  ICACHE (o item G do adversário do trabalho arm-tlbi), sem defeito hoje.
 
 ## Userspace
 
@@ -1739,6 +1826,34 @@ instante existe uma página que o usuário possa escrever *e* executar.
 Segmentos que dividiriam uma página são recusados: permissão é propriedade da
 página, e a única negociação possível seria conceder a união — que é
 exatamente como se perde o `W^X`.
+
+**O código que a carga escreve chega à busca de instruções.** No ARM o
+cache de instruções não acompanha as escritas: a carga escreve o código de
+um segmento pelo cache de dados, e a busca de instruções pode achar no cache
+dela, do mesmo frame, o código do processo que o teve antes — o alocador
+entrega primeiro o frame que acabou de voltar —, e o processo novo
+executaria o código do outro, com a autoridade dele. Por isso, antes de uma
+página que o kernel escreveu ficar executável, a carga faz a sequência do
+manual da Arm para o código escrito como dado
+(`arch::sincronizar_instrucoes`): `dc cvau` em cada linha e `dsb ish`,
+`ic ivau` em cada linha e `dsb ish`, e `isb`. As linhas saem do `CTR_EL0`,
+as menores de todos os núcleos — cada um anota as suas ao acordar —, e o
+`IDC` e o `DIC`, quando todos os núcleos os anunciam, dispensam a parte que
+cobrem; o Cortex-A72, que a CI emula, não anuncia nenhum dos dois. No x86
+não há o que fazer: o cache de instruções é coerente com as escritas, e o
+processo entra num núcleo pela troca de `CR3`, que serializa. A carga é o
+único caminho por onde o kernel escreve código: o lançamento e a troca de
+imagem são a mesma; o `fork` não escreve — o filho divide os frames do pai,
+já sincronizados —; e a cópia na escrita nunca copia uma página executável,
+porque só marca as graváveis, e nenhuma página do usuário é gravável e
+executável (`elf::validar` recusa o segmento que pede as duas, e o resto do
+kernel só mapeia dados para o processo). O emulador não mostra a falta — o
+QEMU sem aceleração mantém o código traduzido coerente com a memória, e lá o
+`dc cvau` e o `ic ivau` não fazem nada —, e por isso o caso `memoria: a
+carga sincroniza o cache de instrucoes do codigo` confere pela conta: na
+carga do exemplo, as páginas sincronizadas — as do fio dele, e não as da
+máquina — são as do código, e só elas, com uma limpeza e uma invalidação por
+linha.
 
 O ELF de exemplo é montado no mesmo bloco de assembly que contém o programa,
 sem um segundo alvo de build. O arranjo tem uma fraqueza óbvia — quem escreve
