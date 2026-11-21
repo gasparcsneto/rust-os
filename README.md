@@ -8833,6 +8833,25 @@ do resumo; separar as duas de novo, como era, não tem caso que a reprove
 de forma determinística: a leitura teria de cair entre elas, e não há
 gancho ali que a segure.
 
+O lógico do retrato teve a dele, na CI 528. O `system.info` lia o civil no
+retrato e o lógico depois, e o lógico lê o civil de novo: um segundo do
+civil que virasse entre as duas leituras punha o lógico um segundo à
+frente do civil do retrato, com a marca `adiantado` sem salto nenhum. A
+vez da hora não mascara as interrupções, e o fio que a tem pode perder o
+núcleo entre as duas. Foi o que a fumaça da hora autenticada do x86 viu,
+em release, logo depois de uma rodada gradual — que nunca volta o civil.
+Os programas leem o mesmo objeto (`tls::hora`), e a validade deles diria
+`o logico adiantado` do mesmo jeito. O registro do fechamento de uma
+rodada tinha a mesma corrida: a marca saía
+do lógico lido depois do civil da rodada, e é dela que o NSF tira o lógico
+parado. Agora o `system.info` lê o lógico antes do retrato, e o
+fechamento marca pelo lógico de antes da rodada: lido antes, o lógico só
+passa do civil se o civil voltou, e o segundo que vira no meio o deixa um
+segundo atrás, e não à frente. O caso `hora: o segundo que vira entre as
+leituras nao marca adiantado` espera o segundo virar entre as duas
+leituras, nos dois pontos — o pior caso da corrida, a toda leitura —, e
+reprova as duas formas antigas (a N234 e a N235).
+
 ### As mutações dos consumidores
 
 Dezoito mutações contra o que os consumidores e o NSF prometem — que a
@@ -11462,7 +11481,13 @@ dorme, pelo nascimento e pela cota` — com o coletor segurado, uma sonda
 presa a outro núcleo pede três nascimentos com a tabela cheia de mortos, e
 três vezes a conta do gate com dois `ola` mortos na cota 2, e o núcleo em
 que o coletor dorme recebe um cutucão a cada recusa
-(`nucleos::cutucoes_de`) —; e `zumbis: o chamado que chega durante a
+(`nucleos::cutucoes_de`). O núcleo conferido é o que o próprio chamado
+anotou, com a trava do escalonador na mão
+(`fios::chamado_anotado_de_teste`), e não um lido antes do pedido: o
+coletor cede a vez quando há outro fio pronto no núcleo dele, e pode mudar
+de núcleo, ou ficar esperando a vez, entre a leitura e o chamado — a CI
+528 viu isso no ARM, com o cutucão certo noutro núcleo e o caso
+reprovado —; e `zumbis: o chamado que chega durante a
 passada do coletor nao espera o tique` — a suíte põe a marca no fim de uma
 passada, e o coletor a atende sem dormir no meio. O lote B3 confere a
 janela: `zumbis: o chamado que chega na janela do sono do coletor acorda o
@@ -15992,6 +16017,41 @@ ppm (2056 s em 2056) e o ARM a -20 ppm (2056 s em 2056), os dois dentro da
 guarda. O último job foi o dos fluxos entre dispositivos (mesma
 arquitetura), que esperou 40,8 minutos na fila e rodou 39,0; o maior, a
 persistência do x86, parte 2/3, com 58,4.
+
+A CI 527 (`6a09516`, o trabalho arm-tlbi e as correções do revisor do lote
+A7) passou 47 de 48 na primeira tentativa, em 90,8 minutos e 1358 de
+máquina. Reprovou a fumaça do teclado USB do x86, em depuração, na rede
+pelo gate: "o agente na porta so foi respondido depois da espera da serial
+(2292 ms)".
+O job rodou de novo uma vez e passou, em 28,2 minutos. A análise, só de
+leitura, aponta a repintura da tela: num kernel de depuração com o console
+cheio, cada linha de log que rola repinta a tela inteira no primeiro
+núcleo, com as interrupções mascaradas, e o canal do agente só roda nele.
+A medida ainda não foi feita. O holdover da bancada de
+tempo, na parte 3/3: o x86 a -243 ppm (2056 s em 2056) e o ARM a -26 ppm
+(2056 s em 2056), os dois dentro da guarda. O último job foi o dos fluxos
+entre dispositivos (x86_64 e aarch64), que esperou 49,5 minutos na fila e
+rodou 35,2; o maior, a persistência do x86, parte 1/3, com 76,2.
+
+A CI 528 (`7b821da`, o lote A8) passou 46 de 48 na primeira tentativa, em
+83,3 minutos e 1374 de máquina. As duas reprovações foram corridas que
+dependem do instante, nenhuma no código do lote. A fumaça da hora
+autenticada do x86, em release, viu o lógico adiantado depois de uma
+rodada gradual: "sincronizado civil -1494ms u Some(2034) logico -1s marcas
+["adiantado"]". Era a corrida entre a leitura do civil e a do lógico no
+`system.info`, que estava também no registro do fechamento de uma rodada,
+e foi corrigida no código (ver [As mutações do relógio e do
+serviço](#as-mutações-do-relógio-e-do-serviço)). E a suíte do ARM, na
+máquina da virtio-gpu, parte 2/2, reprovou o caso do cutucão do coletor:
+"o coletor no nucleo Some(2); cutucoes nele 0, no sistema 1". Era uma
+corrida do próprio caso, que lia o núcleo do coletor antes do pedido, e o
+caso foi corrigido (ver *O chamado do coletor*, em
+[Coordenação](#coordenação)). Os dois jobs rodaram de novo uma vez e
+passaram: o do x86 em 30,8 minutos, e o da virtio-gpu do ARM em 31,2. O
+holdover da bancada de tempo, na parte 3/3: o x86 a -185 ppm (2056 s em
+2056) e o ARM a -43 ppm (2056 s em 2056), os dois dentro da guarda. O
+último job foi a parte 1/2 do iniciador do ARM, que esperou 33,4 minutos
+na fila e rodou 48,9; o maior, a persistência do x86, parte 2/3, com 64,7.
 
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na
