@@ -16254,6 +16254,15 @@ holdover da bancada de tempo, na parte 3/3: o x86 a -185 ppm (2056 s em
 último job foi a parte 1/2 do iniciador do ARM, que esperou 33,4 minutos
 na fila e rodou 48,9; o maior, a persistência do x86, parte 2/3, com 64,7.
 
+A CI 529 (`5d962f7`, as duas correções da CI 528 e a documentação delas)
+passou verde, 48 de 48, na primeira tentativa, em 89,5 minutos e 1380 de
+máquina, com o caso novo do lógico e o caso do cutucão corrigido. O
+holdover da bancada de tempo, na parte 3/3: o x86 a -320 ppm (2056 s em
+2056) e o ARM a -2 ppm (2056 s em 2056), os dois dentro da guarda. O último
+job foi o dos fluxos entre dispositivos (mesma arquitetura), que esperou
+50,0 minutos na fila e rodou 34,0; o maior, a persistência do x86, parte
+2/3, com 76,0.
+
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na
 508 e 58 na 509 —, e o que sobra até o piso é a ordem da fila, que não se
