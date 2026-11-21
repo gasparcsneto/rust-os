@@ -23761,6 +23761,197 @@ fn sob_interface_nativa(
     Ok(())
 }
 
+/// Um registro do anel de log, como `log.tail` o devolve.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RegistroDoLog {
+    seq: u64,
+    /// O relógio do kernel quando o registro entrou no anel — antes de ele
+    /// ser impresso na COM1 e na tela.
+    uptime_ms: u64,
+    subsistema: String,
+    mensagem: String,
+}
+
+/// Os registros de uma resposta de `log.tail`, do mais velho ao mais novo,
+/// e quantos o kernel já emitiu desde o boot — o número do próximo. `None`
+/// se a resposta não se lê.
+fn registros_do_log(resposta: &str) -> Option<(Vec<RegistroDoLog>, u64)> {
+    let r = protocolo::json::Json(resposta.trim().as_bytes()).member("result")?;
+    let emitidos = r.member("total_emitted")?.as_u64()?;
+    let lista = r.member("records")?;
+    let mut registros = Vec::new();
+    // Uma mensagem tem até 160 bytes no anel; escapada, até seis vezes isso.
+    let mut texto = [0u8; 1024];
+    while let Some(e) = lista.item(registros.len()) {
+        registros.push(RegistroDoLog {
+            seq: e.member("seq")?.as_u64()?,
+            uptime_ms: e.member("uptime_ms")?.as_u64()?,
+            subsistema: e.member("subsystem")?.as_str()?.to_string(),
+            mensagem: e.member("message")?.desescapar_em(&mut texto)?.to_string(),
+        });
+    }
+    Some((registros, emitidos))
+}
+
+/// O kernel num instante, pelos relatórios que um agente lê: o relógio, o
+/// pulso de cada núcleo, as apresentações da tela e quantos registros de log
+/// já saíram. Dois retratos, um de cada lado de uma janela, dizem o que a
+/// encheu — ver [`Retrato::janela`].
+///
+/// # Por que a sonda da rede tira retratos
+///
+/// A CI 527 reprovou a sonda com o agente da porta 2 respondido em 2292 ms,
+/// contra um teto de 1500, e o relatório só tinha o número: o tempo que foi
+/// para outro lugar não deixava rastro, e o que restava era adivinhar pelo
+/// log da COM1. Com os retratos, a sonda diz, a cada rodada e não só na
+/// reprovação, se o núcleo dos dispositivos — o que colhe os bytes das portas
+/// e roda o executor do canal — ficou mascarado na janela, quanto, e o que a
+/// tela e o log fizeram nela.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Retrato {
+    uptime_ms: u64,
+    /// Os tiques do timer de cada núcleo, na ordem do índice: o dos
+    /// dispositivos, o zero, primeiro.
+    tiques: Vec<u64>,
+    /// Quantas atualizações chegaram à tela — zero sem compositor.
+    apresentacoes: u64,
+    /// A última delas: x, y, largura e altura.
+    ultimo_dano: Option<[u64; 4]>,
+    /// Quantos registros de log o kernel já emitiu: o número do próximo.
+    emitidos: u64,
+}
+
+impl Retrato {
+    /// Pelo canal de `pedir`: a serial, ou um agente com `system.read`,
+    /// `ui.read` e `log.read` no papel — o observador, e quem herda dele.
+    fn tirar(
+        pedir: &mut dyn FnMut(&str, &str) -> Result<String, String>,
+    ) -> Result<Retrato, String> {
+        let info = pedir("system.info", "{}")?;
+        let tela = pedir("display.info", "{}")?;
+        let log = pedir("log.tail", r#"{"count":0}"#)?;
+        Retrato::de(&info, &tela, &log)
+            .ok_or_else(|| format!("retrato: um relatorio nao se le\n  {info}\n  {tela}\n  {log}"))
+    }
+
+    /// O retrato das respostas de `system.info`, `display.info` e
+    /// `log.tail`.
+    fn de(info: &str, tela: &str, log: &str) -> Option<Retrato> {
+        use protocolo::json::Json;
+        let info = Json(info.trim().as_bytes()).member("result")?;
+        let tela = Json(tela.trim().as_bytes()).member("result")?;
+        let lista = info.member("cores")?;
+        let mut nucleos: Vec<(u64, u64)> = Vec::new();
+        while let Some(n) = lista.item(nucleos.len()) {
+            nucleos.push((n.member("index")?.as_u64()?, n.member("ticks")?.as_u64()?));
+        }
+        nucleos.sort_unstable();
+        // Sem compositor, `display.info` diz só `present: false`: nenhuma
+        // apresentação, e nenhum dano.
+        let (apresentacoes, ultimo_dano) = match tela.member("updates") {
+            None => (0, None),
+            Some(n) => (
+                n.as_u64()?,
+                match tela.member("last_damage") {
+                    Some(d) if !d.is_null() => Some([
+                        d.member("x")?.as_u64()?,
+                        d.member("y")?.as_u64()?,
+                        d.member("width")?.as_u64()?,
+                        d.member("height")?.as_u64()?,
+                    ]),
+                    _ => None,
+                },
+            ),
+        };
+        Some(Retrato {
+            uptime_ms: info.member("uptime_ms")?.as_u64()?,
+            tiques: nucleos.into_iter().map(|(_, t)| t).collect(),
+            apresentacoes,
+            ultimo_dano,
+            emitidos: registros_do_log(log)?.1,
+        })
+    }
+
+    /// O que aconteceu de `self` a `depois`, numa linha em ASCII:
+    ///
+    /// - quanto o relógio do kernel andou;
+    /// - quantos tiques cada núcleo contou. Um núcleo com as interrupções
+    ///   mascaradas não conta tique, e o relógio anda pelos outros — ver
+    ///   `tempo::avancar`, no kernel. O que o núcleo dos dispositivos contou
+    ///   a menos que o que mais contou é o tempo que ele passou mascarado,
+    ///   em períodos do timer, e vai convertido pela conta do próprio
+    ///   relógio;
+    /// - quantas apresentações chegaram à tela, e o tamanho da última;
+    /// - as linhas de log que entraram no anel nesse meio, tiradas de
+    ///   `registros` — uma leitura de `log.tail` feita depois de `depois`.
+    fn janela(&self, depois: &Retrato, registros: &[RegistroDoLog]) -> String {
+        let relogio = depois.uptime_ms.saturating_sub(self.uptime_ms);
+        let mut partes = vec![format!("relogio +{relogio} ms")];
+
+        let andou: Vec<u64> = self
+            .tiques
+            .iter()
+            .zip(&depois.tiques)
+            .map(|(a, d)| d.saturating_sub(*a))
+            .collect();
+        match andou.split_first() {
+            None => partes.push("sem tiques no relatorio".into()),
+            Some((zero, [])) => partes.push(format!("um nucleo so, +{zero} tiques")),
+            Some((zero, outros)) => {
+                let menor = outros.iter().min().copied().unwrap_or(0);
+                let maior = outros.iter().max().copied().unwrap_or(0);
+                let falta = maior.saturating_sub(*zero);
+                let mascarado = (falta * relogio).checked_div(maior).unwrap_or(0);
+                partes.push(format!(
+                    "tiques: nucleo 0 +{zero}, os outros +{menor}..+{maior} (o nucleo 0 ficou ~{mascarado} ms sem tique)"
+                ));
+            }
+        }
+
+        let apresentacoes = depois.apresentacoes.saturating_sub(self.apresentacoes);
+        partes.push(match (apresentacoes, depois.ultimo_dano) {
+            (0, _) => "tela: nenhuma apresentacao".into(),
+            (n, Some([x, y, l, a])) => {
+                format!("tela: {n} apresentacao(oes), a ultima {l}x{a} em ({x},{y})")
+            }
+            (n, None) => format!("tela: {n} apresentacao(oes)"),
+        });
+
+        let na_janela: Vec<&RegistroDoLog> = registros
+            .iter()
+            .filter(|r| (self.emitidos..depois.emitidos).contains(&r.seq))
+            .collect();
+        let esperadas = depois.emitidos.saturating_sub(self.emitidos);
+        let mut log = format!("log: {esperadas} linha(s)");
+        // A leitura de depois pode não alcançar as primeiras da janela: o
+        // anel e o `count` têm teto.
+        let fora = esperadas.saturating_sub(na_janela.len() as u64);
+        if fora > 0 {
+            log.push_str(&format!(" ({fora} fora da leitura)"));
+        }
+        for r in na_janela {
+            let mensagem: String = r
+                .mensagem
+                .chars()
+                .take(72)
+                .map(|c| {
+                    if c.is_ascii() && !c.is_ascii_control() {
+                        c
+                    } else {
+                        '?'
+                    }
+                })
+                .collect();
+            log.push_str(&format!(
+                " | [{}] {} ms {} {mensagem}",
+                r.seq, r.uptime_ms, r.subsistema
+            ));
+        }
+        partes.push(log);
+        partes.join("; ")
+    }
+}
+
 /// A rede no kernel de produção — ver "Rede nativa" no README: pela
 /// serial, que é do papel `sistema`, o endereço que o DHCP deu, uma conexão
 /// ao eco da bancada com o texto indo e voltando, a recusa de um destino
@@ -23900,6 +24091,10 @@ fn sob_a_rede(
     // No silêncio a serial espera, e o executor não: um agente numa porta é
     // respondido enquanto isso.
     const SILENCIO_MS: u64 = 1500;
+    // O retrato de antes, pela serial, antes de a porta conectar; o de
+    // depois, pela porta, logo depois do ping. O que a janela tiver de
+    // atraso fica entre os dois — ver [`Retrato`].
+    let antes = Retrato::tirar(&mut |m, p| serial.pedir(m, p))?;
     // A porta conecta antes: o aperto do kernel de depuração leva centenas
     // de milissegundos, e o que se mede é o pedido.
     let mut agente = AgenteNaPorta::conectar(arch, 2)?;
@@ -23908,15 +24103,46 @@ fn sob_a_rede(
         "net.recv",
         &format!(r#"{{"connection":{conexao},"wait":{SILENCIO_MS}}}"#),
     )?;
-    let ping = agente.pedir("agent.ping", "{}")?;
-    let respondido = comeco.elapsed();
+    // A resposta da serial é lida num fio à parte: a espera dela corre
+    // enquanto o agente pede e o retrato de depois é tirado, e o tempo dela
+    // é o da chegada, e não o de quem a lê depois do retrato.
+    let (ping, respondido, depois, registros, silencio, durou) =
+        std::thread::scope(|fios| -> Result<_, String> {
+            let leitura = fios.spawn(|| {
+                let resposta = serial.receber(silencio_id);
+                (resposta, comeco.elapsed())
+            });
+            let pela_porta = (|| -> Result<_, String> {
+                let ping = agente.pedir("agent.ping", "{}")?;
+                let respondido = comeco.elapsed();
+                let depois = Retrato::tirar(&mut |m, p| agente.pedir(m, p))?;
+                let registros = agente.pedir("log.tail", r#"{"count":64}"#)?;
+                Ok((ping, respondido, depois, registros))
+            })();
+            let (silencio, durou) = leitura
+                .join()
+                .map_err(|_| "rede: o fio da leitura da serial caiu".to_string())?;
+            let (ping, respondido, depois, registros) = pela_porta?;
+            Ok((ping, respondido, depois, registros, silencio?, durou))
+        })?;
     if !ping.contains(r#""result""#) {
         return Err(format!(
             "rede: o agente na porta nao foi respondido\n  {ping}"
         ));
     }
-    let silencio = serial.receber(silencio_id)?;
-    let durou = comeco.elapsed();
+    let janela = antes.janela(
+        &depois,
+        &registros_do_log(&registros)
+            .map(|(r, _)| r)
+            .unwrap_or_default(),
+    );
+    // O que se mediu vai sempre, e não só na reprovação: uma rodada que
+    // passa perto do teto é a evidência que falta quando outra o passa.
+    println!(
+        "  [rede] medido  o ping na porta 2 em {} ms, a leitura da serial em {} ms; do retrato antes da porta ao de depois do ping: {janela}",
+        respondido.as_millis(),
+        durou.as_millis()
+    );
     if !silencio.contains(r#""returned":0"#) || !silencio.contains(r#""state":"established""#) {
         return Err(format!(
             "rede: a leitura no silencio nao veio vazia\n  {silencio}"
@@ -23924,13 +24150,13 @@ fn sob_a_rede(
     }
     if respondido >= Duration::from_millis(SILENCIO_MS) {
         return Err(format!(
-            "rede: o agente na porta so foi respondido depois da espera da serial ({} ms)",
+            "rede: o agente na porta so foi respondido depois da espera da serial ({} ms); na janela: {janela}",
             respondido.as_millis()
         ));
     }
     if durou < Duration::from_millis(SILENCIO_MS - 100) {
         return Err(format!(
-            "rede: a leitura no silencio voltou antes do prazo ({} ms)",
+            "rede: a leitura no silencio voltou antes do prazo ({} ms); na janela: {janela}",
             durou.as_millis()
         ));
     }
@@ -28591,5 +28817,127 @@ mod testes {
                 "remoto remoto\n",
             ]
         );
+    }
+
+    /// Os registros de um `log.tail`: o número, o relógio, o subsistema e a
+    /// mensagem desescapada, na ordem da resposta, e quantos já saíram. Uma
+    /// resposta sem `total_emitted`, ou um registro sem um campo, não se lê.
+    #[test]
+    fn os_registros_de_um_log_tail() {
+        use super::*;
+        let r = r#"{"jsonrpc":"2.0","id":3,"result":{"records":[{"seq":162,"uptime_ms":50930,"level":"info","subsystem":"usuario","message":"guardar conferido: o armazem pelo mesmo gate"},{"seq":163,"uptime_ms":51790,"level":"info","subsystem":"agent","message":"porta 2: \"agente-2\" entrou"}],"total_emitted":164}}"#;
+        let (registros, emitidos) = registros_do_log(r).expect("a resposta se le");
+        assert_eq!(emitidos, 164);
+        assert_eq!(
+            registros,
+            [
+                RegistroDoLog {
+                    seq: 162,
+                    uptime_ms: 50930,
+                    subsistema: "usuario".into(),
+                    mensagem: "guardar conferido: o armazem pelo mesmo gate".into(),
+                },
+                RegistroDoLog {
+                    seq: 163,
+                    uptime_ms: 51790,
+                    subsistema: "agent".into(),
+                    mensagem: "porta 2: \"agente-2\" entrou".into(),
+                },
+            ]
+        );
+        let vazio = r#"{"jsonrpc":"2.0","id":4,"result":{"records":[],"total_emitted":7}}"#;
+        assert_eq!(registros_do_log(vazio), Some((Vec::new(), 7)));
+        assert_eq!(
+            registros_do_log(r#"{"jsonrpc":"2.0","id":4,"result":{"records":[]}}"#),
+            None
+        );
+        let sem_seq = r#"{"jsonrpc":"2.0","id":4,"result":{"records":[{"uptime_ms":1,"subsystem":"a","message":"b"}],"total_emitted":1}}"#;
+        assert_eq!(registros_do_log(sem_seq), None);
+    }
+
+    /// A janela entre dois retratos: o relógio, os tiques que o núcleo dos
+    /// dispositivos contou a menos — e o tempo mascarado que eles dão —, as
+    /// apresentações da tela e só as linhas de log que entraram nela.
+    #[test]
+    fn a_janela_entre_dois_retratos() {
+        use super::*;
+        let info = |uptime: u64, tiques: [u64; 4]| {
+            let nucleos: Vec<String> = tiques
+                .iter()
+                .enumerate()
+                .rev()
+                .map(|(i, t)| {
+                    format!(r#"{{"index":{i},"state":"online","hardware_id":{i},"ticks":{t}}}"#)
+                })
+                .collect();
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"result":{{"arch":"x86_64","cores_online":4,"cores":[{}],"framebuffer":{{"width":1280}},"uptime_ms":{uptime}}}}}"#,
+                nucleos.join(",")
+            )
+        };
+        let tela = |n: u64| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":2,"result":{{"present":true,"layers":[{{"id":0,"x":0,"y":0}}],"updates":{n},"last_damage":{{"x":0,"y":40,"width":1280,"height":752}},"device":null}}}}"#
+            )
+        };
+        let log = |n: u64| {
+            format!(r#"{{"jsonrpc":"2.0","id":3,"result":{{"records":[],"total_emitted":{n}}}}}"#)
+        };
+        let antes = Retrato::de(
+            &info(50_000, [5000, 5100, 5101, 5102]),
+            &tela(900),
+            &log(162),
+        )
+        .expect("o retrato de antes se le");
+        // Os núcleos vêm na ordem do índice, mesmo fora dela na resposta.
+        assert_eq!(antes.tiques, [5000, 5100, 5101, 5102]);
+        let depois = Retrato::de(
+            &info(51_100, [5031, 5209, 5210, 5211]),
+            &tela(902),
+            &log(164),
+        )
+        .expect("o retrato de depois se le");
+        let registro = |seq: u64, mensagem: &str| RegistroDoLog {
+            seq,
+            uptime_ms: 50_000 + seq,
+            subsistema: "agent".into(),
+            mensagem: mensagem.into(),
+        };
+        let registros = [
+            registro(161, "de antes"),
+            registro(162, "porta 2: agente-2 entrou (cc3d388b) — com acento"),
+            registro(163, "processo encerrou com codigo 77"),
+            registro(164, "de depois"),
+        ];
+        assert_eq!(
+            antes.janela(&depois, &registros),
+            "relogio +1100 ms; tiques: nucleo 0 +31, os outros +109..+109 (o nucleo 0 ficou ~787 ms sem tique); \
+             tela: 2 apresentacao(oes), a ultima 1280x752 em (0,40); \
+             log: 2 linha(s) | [162] 50162 ms agent porta 2: agente-2 entrou (cc3d388b) ? com acento \
+             | [163] 50163 ms agent processo encerrou com codigo 77"
+        );
+        // A leitura de depois que não alcança o começo da janela diz quantas
+        // ficaram de fora.
+        assert!(
+            antes
+                .janela(&depois, &registros[2..])
+                .ends_with("log: 2 linha(s) (1 fora da leitura) | [163] 50163 ms agent processo encerrou com codigo 77")
+        );
+        // Um núcleo só não tem com quem comparar, e uma máquina sem tela não
+        // apresenta.
+        let so = |uptime: u64, t: u64| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"result":{{"cores":[{{"index":0,"state":"online","ticks":{t}}}],"uptime_ms":{uptime}}}}}"#
+            )
+        };
+        let sem_tela = r#"{"jsonrpc":"2.0","id":2,"result":{"present":false}}"#;
+        let a = Retrato::de(&so(10, 1), sem_tela, &log(5)).expect("se le sem tela");
+        let b = Retrato::de(&so(30, 3), sem_tela, &log(5)).expect("se le sem tela");
+        assert_eq!(
+            a.janela(&b, &[]),
+            "relogio +20 ms; um nucleo so, +2 tiques; tela: nenhuma apresentacao; log: 0 linha(s)"
+        );
+        // Um relatório que não se lê não vira um retrato de zeros.
+        assert_eq!(Retrato::de("{}", sem_tela, &log(5)), None);
     }
 }
