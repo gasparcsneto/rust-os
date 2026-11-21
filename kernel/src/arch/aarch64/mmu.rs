@@ -733,6 +733,14 @@ unsafe fn descer(entrada: *mut u64) -> Result<*mut u64, &'static str> {
     // SAFETY: uma barreira de memória, sem pré-condição.
     unsafe { asm!("dsb ishst", options(nostack)) };
 
+    // Só na suíte: a tabela, como chega ao descritor que a liga — ver
+    // `paginacao::tabela_nova_de_teste`.
+    #[cfg(feature = "modo-teste")]
+    // SAFETY: o frame da tabela nova, de 4 KiB, só nosso até a ligação.
+    unsafe {
+        crate::paginacao::tabela_nova_de_teste::anotar(frame as *const u64)
+    };
+
     // SAFETY: instalamos o descritor de tabela apontando para o frame novo.
     unsafe { *entrada = (frame & MASCARA_ENDERECO) | VALIDO | TABELA };
 

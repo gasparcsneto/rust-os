@@ -33119,6 +33119,116 @@ fn memoria_remapear_uma_pagina_privada_neste_nucleo_nao_le_o_frame_antigo() -> R
     Ok(())
 }
 
+/// A tabela de página nova chega zerada a quem a liga (o achado 4 do
+/// adversário do lote ICACHE, de antes dele).
+///
+/// # O que estava faltando
+///
+/// No x86 o pacote `x86_64` liga a tabela nova — escreve a entrada que
+/// aponta para ela — e só então a zera, e o frame vinha do alocador com o
+/// que tinha antes: as tabelas de um espaço desmontado voltam como estavam,
+/// com as entradas presentes. Entre a ligação e o zerar, um percurso de
+/// tabela — especulativo, deste núcleo, ou de outro numa região do kernel —
+/// leria o conteúdo velho como tabela, e a tradução que tirasse dele ficaria
+/// na TLB. O `allocate_frame` de lá zera agora antes de entregar o frame ao
+/// pacote. No aarch64 o `descer` já zerava, com o `dsb ishst` antes do
+/// descritor que liga a tabela.
+///
+/// # Como o caso põe um frame sujo ali
+///
+/// Sem isso, o caso passaria sempre que o alocador entregasse por acaso um
+/// frame limpo. O caso tira um frame, enche-o de lixo e o encomenda ao
+/// alocador deste núcleo (`frames::encomendar_o_frame`), com as interrupções
+/// mascaradas: a primeira alocação daqui em diante o leva. O mapeamento é o
+/// de `arch::mapear_frame`, com o frame da página tirado antes, numa entrada
+/// privada vazia: a primeira alocação dele é a da primeira tabela nova. O
+/// lixo é de entradas não presentes no x86 e inválidas no aarch64 — o bit
+/// zero desligado —: sem o zerar, nenhum percurso nem a desmontagem do
+/// espaço do caso o leriam como um frame de alguém.
+///
+/// # O que se confere
+///
+/// O ponto em que cada backend entrega a tabela para ser ligada anota se ela
+/// chegou zerada (`paginacao::tabela_nova_de_teste`), e o caso exige as
+/// tabelas novas deste mapeamento — três no x86, duas no aarch64 —, todas
+/// zeradas. O emulador não mostra a janela: o percurso do QEMU sem
+/// aceleração não é especulativo, e um zerar depois da ligação passaria em
+/// todo caso que olhasse só o resultado.
+fn paginacao_a_tabela_nova_chega_zerada_antes_de_ser_ligada() -> Resultado {
+    use crate::arch::{self, Permissoes, TAMANHO_PAGINA};
+    use crate::paginacao::tabela_nova_de_teste as tabelas;
+
+    const PAGINA: u64 = crate::usuario::BASE;
+    // Abaixo da entrada privada: no x86 a raiz, e as três tabelas novas — o
+    // diretório de ponteiros, o diretório e a tabela de páginas —; no
+    // aarch64 a raiz é a L1, e as novas são a L2 e a L3.
+    const NOVAS: u64 = if cfg!(target_arch = "x86_64") { 3 } else { 2 };
+    const LIXO: u64 = 0xD1D1_D1D1_D1D1_D1D0;
+
+    let privada = arch::ENTRADA_PRIVADA as usize;
+    let kernel = arch::espaco_do_kernel();
+
+    let (novas, sujas) = arch::sem_interrupcoes(|| -> Result<(u64, u64), &'static str> {
+        let espaco = crate::paginacao::Espaco::novo(privada)?;
+        // SAFETY: a raiz veio de `Espaco::novo` e carrega as entradas de topo
+        // do kernel; voltamos ao espaço do kernel antes de largá-la, e o
+        // `Drop` dele devolve as tabelas e a página que ficarem mapeadas.
+        let r = unsafe {
+            arch::trocar_espaco(espaco.raiz());
+            let r = (|| -> Result<(u64, u64), &'static str> {
+                let pagina = crate::frames::alocar().ok_or("sem frame para a pagina")?;
+                core::ptr::write_bytes(arch::acesso_fisico(pagina), 0, TAMANHO_PAGINA as usize);
+                let Some(suja) = crate::frames::alocar() else {
+                    crate::frames::liberar(pagina);
+                    return Err("sem frame para a tabela suja");
+                };
+                let lixo = arch::acesso_fisico(suja) as *mut u64;
+                for i in 0..(TAMANHO_PAGINA / 8) as usize {
+                    core::ptr::write_volatile(lixo.add(i), LIXO);
+                }
+                crate::frames::encomendar_o_frame(suja);
+                let antes = tabelas::deste_nucleo();
+                // O frame da página veio do alocador, e ninguém mais o
+                // alcança: o contrato de `mapear_frame`.
+                let mapeou = arch::mapear_frame(PAGINA, pagina, Permissoes::DADOS_USUARIO);
+                let depois = tabelas::deste_nucleo();
+                let sobrou = crate::frames::retirar_o_frame_encomendado();
+                if let Some(frame) = sobrou {
+                    crate::frames::liberar(frame);
+                }
+                if let Err(motivo) = mapeou {
+                    crate::frames::liberar(pagina);
+                    return Err(motivo);
+                }
+                if sobrou.is_some() {
+                    return Err("nenhuma tabela nova levou o frame sujo: o caso nao mediria nada");
+                }
+                Ok((depois.0 - antes.0, depois.1 - antes.1))
+            })();
+            arch::trocar_espaco(kernel);
+            r
+        };
+        drop(espaco);
+        r
+    })?;
+    crate::log_info!(
+        "teste",
+        "tabela nova: o mapeamento criou {} tabela(s), {} suja(s) ao ser ligada(s), esperadas {} e 0",
+        novas,
+        sujas,
+        NOVAS
+    );
+    if sujas != 0 {
+        return Err(
+            "uma tabela nova chegou com o conteudo de antes a quem a liga: ela nao foi zerada antes",
+        );
+    }
+    if novas != NOVAS {
+        return Err("o mapeamento nao anotou as tabelas novas que cria");
+    }
+    Ok(())
+}
+
 /// O neto de um `fork` nasce com a memória de dados gravável.
 ///
 /// # O caso que só aparece na segunda geração
@@ -44122,6 +44232,12 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "memoria: remapear uma pagina privada neste nucleo nao le o frame antigo",
         f: memoria_remapear_uma_pagina_privada_neste_nucleo_nao_le_o_frame_antigo,
+    },
+    // O lote ICACHE-2, no fim pelo mesmo motivo: a tabela nova zerada antes
+    // de ser ligada (o achado 4 do adversário do lote ICACHE).
+    Caso {
+        nome: "paginacao: a tabela nova chega zerada antes de ser ligada",
+        f: paginacao_a_tabela_nova_chega_zerada_antes_de_ser_ligada,
     },
 ];
 

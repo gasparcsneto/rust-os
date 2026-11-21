@@ -142,8 +142,47 @@ struct AlocadorDeFrames;
 // SAFETY: `crate::frames::alocar` só entrega frames livres e nunca o mesmo
 // duas vezes, que é exatamente a garantia exigida por este trait.
 unsafe impl FrameAllocator<Size4KiB> for AlocadorDeFrames {
+    /// O frame de uma tabela de página nova, **já zerado**.
+    ///
+    /// # Por que zerar aqui, se o pacote zera
+    ///
+    /// Porque o pacote zera depois de ligar: o `create_next_table` do `x86_64`
+    /// escreve a entrada que aponta para a tabela nova e só então a zera. O
+    /// frame vem do alocador com o que tinha — as tabelas de um espaço
+    /// desmontado voltam como estavam, com as entradas presentes —, e entre a
+    /// ligação e o zerar um percurso de tabela — especulativo, deste núcleo,
+    /// ou de outro numa região do kernel, que todos traduzem — leria o
+    /// conteúdo velho como tabela: entradas presentes para frames de outro
+    /// dono, ou páginas grandes. A tradução que saísse dali ficaria na TLB: o
+    /// zerar do pacote a tira da tabela, e não da TLB, e o `invlpg` do fim do
+    /// mapeamento é só da página mapeada (o achado 4 do adversário do lote
+    /// ICACHE, de antes dele; medido por ele, 118 de 181 tabelas novas
+    /// chegavam com entradas presentes de antes).
+    ///
+    /// Zerada aqui, ela chega vazia a quem a liga. As escritas de um núcleo
+    /// ficam visíveis na ordem do programa no x86, também ao percorredor de
+    /// tabelas (citado sem conferir no manual): os zeros daqui antes da
+    /// entrada de lá — o que o `dsb ishst` do `descer` do aarch64 garante por
+    /// lá. O zerar do pacote, depois, escreve zero sobre zero.
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
-        crate::frames::alocar().map(|fisico| PhysFrame::containing_address(PhysAddr::new(fisico)))
+        let fisico = crate::frames::alocar()?;
+        let tabela = acesso_fisico(fisico);
+        if tabela.is_null() {
+            // Sem o mapa da memória física não há como zerar, e o `mapeador`
+            // já teria recusado antes de chegar aqui.
+            crate::frames::liberar(fisico);
+            return None;
+        }
+        // SAFETY: o frame acabou de sair do alocador, só nós o temos, e o mapa
+        // da memória física o alcança por `acesso_fisico`.
+        unsafe { core::ptr::write_bytes(tabela, 0, TAMANHO_PAGINA as usize) };
+        // Só na suíte: a tabela, como chega a quem a liga.
+        #[cfg(feature = "modo-teste")]
+        // SAFETY: o mesmo frame, de 4 KiB, ainda só nosso.
+        unsafe {
+            crate::paginacao::tabela_nova_de_teste::anotar(tabela as *const u64)
+        };
+        Some(PhysFrame::containing_address(PhysAddr::new(fisico)))
     }
 }
 

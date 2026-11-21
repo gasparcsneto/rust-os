@@ -207,6 +207,58 @@ pub mod sincronia_de_teste {
     }
 }
 
+/// Só para a suíte: as tabelas de página novas que cada núcleo entregou para
+/// serem ligadas, e quantas delas chegaram com alguma coisa do dono de antes.
+///
+/// Quem anota é o ponto em que cada backend entrega a tabela nova para ser
+/// ligada — no x86 o `allocate_frame`, que o pacote `x86_64` liga ao sair; no
+/// aarch64 o `descer`, logo antes do descritor que aponta para ela —, depois
+/// do zerar de cada um. Uma tabela que chega suja ali é ligada com o que o
+/// frame tinha: o caso `paginacao: a tabela nova chega zerada antes de ser
+/// ligada` confere que nenhuma chega.
+///
+/// Por núcleo, como os contadores de `tlbi` do aarch64: o caso conta com as
+/// interrupções mascaradas, e nada mais roda neste núcleo entre as duas
+/// leituras.
+#[cfg(feature = "modo-teste")]
+pub mod tabela_nova_de_teste {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::nucleos::MAX_NUCLEOS;
+
+    static NOVAS: [AtomicU64; MAX_NUCLEOS] = [const { AtomicU64::new(0) }; MAX_NUCLEOS];
+    static SUJAS: [AtomicU64; MAX_NUCLEOS] = [const { AtomicU64::new(0) }; MAX_NUCLEOS];
+
+    /// Anota a tabela nova que este núcleo vai ligar, pelo endereço por onde
+    /// o kernel a enxerga.
+    ///
+    /// # Safety
+    ///
+    /// `tabela` aponta para o frame de 4 KiB da tabela, que quem chama
+    /// acabou de tirar do alocador e ainda não ligou.
+    pub unsafe fn anotar(tabela: *const u64) {
+        // Lida de verdade, e não deduzida do zerar que veio antes: é a
+        // memória que o percorredor vai ler.
+        //
+        // SAFETY: as 512 entradas do frame da tabela, que é só de quem chama.
+        let suja = (0..512).any(|i| unsafe { core::ptr::read_volatile(tabela.add(i)) } != 0);
+        let nucleo = crate::arch::nucleo_atual();
+        NOVAS[nucleo].fetch_add(1, Ordering::Relaxed);
+        if suja {
+            SUJAS[nucleo].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// `(tabelas novas, sujas)` que este núcleo entregou até agora.
+    pub fn deste_nucleo() -> (u64, u64) {
+        let nucleo = crate::arch::nucleo_atual();
+        (
+            NOVAS[nucleo].load(Ordering::Relaxed),
+            SUJAS[nucleo].load(Ordering::Relaxed),
+        )
+    }
+}
+
 /// Desfaz o mapeamento e devolve o frame ao alocador.
 ///
 /// Só use quando o frame tiver vindo de [`mapear_novo`]: liberar um frame que

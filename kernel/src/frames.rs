@@ -408,6 +408,64 @@ pub fn falhas_pendentes() -> usize {
     FALHAS_ENCOMENDADAS.load(Ordering::SeqCst)
 }
 
+/// Só para a suíte: o frame que a próxima alocação de um núcleo entrega no
+/// lugar de um livre — ver [`encomendar_o_frame`].
+#[cfg(feature = "modo-teste")]
+mod encomenda_de_teste {
+    use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    /// O frame encomendado; zero, nenhum — o frame zero nunca circula.
+    static FRAME: AtomicU64 = AtomicU64::new(0);
+    /// O núcleo que encomendou.
+    static NUCLEO: AtomicUsize = AtomicUsize::new(0);
+
+    pub(super) fn encomendar(frame: u64) {
+        // O núcleo antes do frame: quem vê o frame vê também de quem ele é.
+        NUCLEO.store(crate::arch::nucleo_atual(), Ordering::SeqCst);
+        FRAME.store(frame, Ordering::SeqCst);
+    }
+
+    pub(super) fn retirar() -> Option<u64> {
+        let frame = FRAME.swap(0, Ordering::SeqCst);
+        (frame != 0).then_some(frame)
+    }
+
+    /// O frame encomendado, se a encomenda é deste núcleo. Sem encomenda, uma
+    /// leitura só — a de quase toda alocação.
+    pub(super) fn tomar() -> Option<u64> {
+        if FRAME.load(Ordering::Relaxed) == 0
+            || NUCLEO.load(Ordering::SeqCst) != crate::arch::nucleo_atual()
+        {
+            return None;
+        }
+        retirar()
+    }
+}
+
+/// Só para a suíte: a próxima alocação **deste núcleo** entrega `frame` — um
+/// frame que o caso já tirou do alocador e preparou —, no lugar de um livre.
+///
+/// É como um caso põe, sem depender do acaso do alocador, o conteúdo que
+/// quiser no frame que um caminho do kernel aloca: `paginacao: a tabela nova
+/// chega zerada antes de ser ligada` põe um frame sujo onde a tabela nova
+/// nasce. Deste núcleo, e só dele: o caso encomenda com as interrupções
+/// mascaradas, e uma alocação de outro núcleo, ao mesmo tempo, não o leva.
+///
+/// O frame continua alocado, e quem o recebe passa a ser o dono dele, como se
+/// o tivesse tirado do alocador. A encomenda que ninguém levou volta a quem a
+/// fez por [`retirar_o_frame_encomendado`].
+#[cfg(feature = "modo-teste")]
+pub fn encomendar_o_frame(frame: u64) {
+    encomenda_de_teste::encomendar(frame);
+}
+
+/// Só para a suíte: desfaz a encomenda de [`encomendar_o_frame`] e devolve o
+/// frame — `None` se uma alocação já o levou.
+#[cfg(feature = "modo-teste")]
+pub fn retirar_o_frame_encomendado() -> Option<u64> {
+    encomenda_de_teste::retirar()
+}
+
 /// Entrega um frame livre, ou `None` se a memória acabou.
 ///
 /// O endereço devolvido é físico e alinhado em [`TAMANHO_FRAME`]. O conteúdo
@@ -431,6 +489,12 @@ pub fn alocar() -> Option<u64> {
             .is_ok()
     {
         return None;
+    }
+    // A entrega encomendada também: o frame já é de quem o encomendou, e
+    // passa a quem pediu sem voltar ao mapa de bits.
+    #[cfg(feature = "modo-teste")]
+    if let Some(frame) = encomenda_de_teste::tomar() {
+        return Some(frame);
     }
 
     com_alocador(|a| {
