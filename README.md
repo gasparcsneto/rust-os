@@ -1516,7 +1516,11 @@ GIC com o destino do primeiro, e a tela também: um núcleo secundário compõe
 no buffer de fundo e pede ao primeiro que apresente. Medido no emulador: a
 cópia para a memória de vídeo saindo de um núcleo secundário custava 1,2
 bilhão de ciclos por quadro cheio, contra 9 milhões para compor — cem vezes
-mais lenta. O eco do Terminal passou de 280 ms por linha a menos de 20.
+mais lenta. O eco do Terminal passou de 280 ms por linha a menos de 20. E o
+primeiro apresenta com as interrupções mascaradas — de dentro da escrita no
+console, do tique, do cutucão —: o que a apresentação custa é o tempo em que
+o canal do agente para. Ver *O custo de uma linha*, em [O console
+rola](#o-console-rola).
 
 ### O canal com um núcleo travado
 
@@ -3693,7 +3697,13 @@ recebe `MUDOU` (-17), e nunca metade de um conteúdo e metade de outro.
 O programa [`guardar`](programas/src/bin/guardar.rs) faz o caminho inteiro
 de dentro: declara `fs.read` e `fs.write` no manifesto, cria o diretório
 dele, grava, ouve o conflito de versão, lê pelo descritor, vê o `MUDOU`, é
-recusado fora do alcance de quem o lançou, e manda binário pelo anexo.
+recusado fora do alcance de quem o lançou, e manda binário pelo anexo. Na
+fumaça, o `xtask` o lança pela serial e espera a saída **dele**: a linha
+`processo encerrou com codigo 77` que entrou no anel depois do pedido. A
+espera casava a última linha com esse texto, e havia uma de antes — o filho
+do `contido` sai com o mesmo código —: ela passava na hora, a saída do
+`guardar` nunca era conferida, e ele corria por cima da sonda seguinte, a da
+rede (a CI 527).
 
 ### O que as mutações mostraram
 
@@ -3970,6 +3980,22 @@ suspensos dos processos e segue atendendo os outros, com o fio do
 processo dormindo como em qualquer pedido; e o interpretador, que guarda
 o suspenso de cada console — a entrada daquele console fica na fila — e
 segue atendendo os outros consoles e as janelas.
+
+**Na fumaça, o executor não espera.** Enquanto a serial espera 1,5 s num
+`net.recv` sem dado, um agente na porta 2 pede um `agent.ping` e tem de ser
+respondido antes do prazo; a serial, só no prazo. O tempo conta a partir de
+um pedido do agente já respondido: o aperto termina no kernel depois de a
+resposta dele sair — a auditoria, a linha `entrou` no log e a sessão
+estabelecida vêm depois —, e medido da resposta ele caía dentro da janela.
+A sonda diz sempre o que mediu: o tempo do ping, o da serial e, entre um
+retrato de antes e um de depois, quanto o relógio andou, os tiques de cada
+núcleo, as apresentações da tela e as linhas de log que entraram no anel; e
+confere que o fim do aperto ficou de fora. Um núcleo com as interrupções
+mascaradas não conta tique, e o relógio anda pelos outros: o que o núcleo
+dos dispositivos contou a menos é o tempo em que ele não colheu as portas
+nem rodou o executor do canal. Foi essa conta que achou a causa da
+reprovação da CI 527 — ver *O custo de uma linha*, em [O console
+rola](#o-console-rola).
 
 **A entrega é decidida de novo.** Acordado, o pedido é executado outra
 vez, inteiro, pelo mesmo gate: uma decisão nova, com a política, o
@@ -15253,6 +15279,29 @@ A razão para não rolar era de custo — em debug, repintar a tela passa de
 comum, e rolar é mover um bloco de memória (as linhas de pixel são contíguas)
 e pintar só a última linha. O compositor leva à tela o que mudou.
 
+**O custo de uma linha.** O que muda numa rolagem é o console inteiro, e é o
+console inteiro que vai à tela — pelo núcleo dos dispositivos, com as
+interrupções mascaradas (ver [Vários núcleos](#vários-núcleos)). A
+apresentação copiava pixel a pixel, uma escrita volátil por pixel, e no
+kernel de depuração cada uma era uma chamada de função: uma tela inteira
+levava 126 ms no x86 (1280x800) e 135 ms no ARM (1280x720), a cada linha de
+log com o console cheio — e nesse tempo o canal do agente parava. A CI 527
+reprovou a fumaça do teclado USB por isso: a sonda da rede mediu 2292 ms num
+ping que leva dezenas. Medido numa fumaça local, em depuração, com a sonda
+de antes: com o console cheio, o núcleo dos dispositivos ficou de 450 a 623
+ms sem tique na janela do ping, com seis linhas de log nela; com o console
+ainda com espaço, de 20 a 40 ms, com as mesmas linhas. Agora o caminho
+rápido copia a linha inteira de uma vez, pelo `memcpy` do
+`compiler_builtins`, que vem otimizado com o `core` em qualquer perfil: 1,8
+ms no x86 e 2,3 no ARM, em depuração; em release, de 1,5 para 1,1 ms no x86,
+e de 3,5 para 1,5 no ARM. Com o `guardar` lançado logo antes da porta e o
+console cheio, o núcleo dos dispositivos ficava de 470 a 780 ms mascarado na
+janela, e passou a ficar de 80 a 190; com o hospedeiro ocupado como o runner
+da CI, o ping chegou a 1559 ms antes, e não passou de 263 depois. O caso
+`tela: apresentar nao regrediu em ordem de grandeza` mede a cada rodada,
+contra a mesma cópia para o mesmo framebuffer, e reprova em depuração a
+volta a pixel a pixel.
+
 Duas coisas sobem junto com o texto. A grade de caracteres, para a árvore
 semântica continuar descrevendo o que está na tela. E a linha de comando: o
 interpretador guarda quantas rolagens havia quando o prompt foi desenhado, e
@@ -16339,11 +16388,14 @@ A7) passou 47 de 48 na primeira tentativa, em 90,8 minutos e 1358 de
 máquina. Reprovou a fumaça do teclado USB do x86, em depuração, na rede
 pelo gate: "o agente na porta so foi respondido depois da espera da serial
 (2292 ms)".
-O job rodou de novo uma vez e passou, em 28,2 minutos. A análise, só de
-leitura, aponta a repintura da tela: num kernel de depuração com o console
-cheio, cada linha de log que rola repinta a tela inteira no primeiro
-núcleo, com as interrupções mascaradas, e o canal do agente só roda nele.
-A medida ainda não foi feita. O holdover da bancada de
+O job rodou de novo uma vez e passou, em 28,2 minutos. A medida confirmou
+a análise: num kernel de depuração com o console cheio, cada linha de log
+que rola apresenta a tela inteira no primeiro núcleo, com as interrupções
+mascaradas, e o canal do agente só roda nele; e duas coisas da sonda punham
+linhas na janela que ela mede — o `guardar` da sonda do armazém, que ninguém
+esperava, e o fim do aperto da porta. As três foram corrigidas: ver *Na
+fumaça, o executor não espera*, em [Rede nativa](#rede-nativa), e *O custo
+de uma linha*, em [O console rola](#o-console-rola). O holdover da bancada de
 tempo, na parte 3/3: o x86 a -243 ppm (2056 s em 2056) e o ARM a -26 ppm
 (2056 s em 2056), os dois dentro da guarda. O último job foi o dos fluxos
 entre dispositivos (x86_64 e aarch64), que esperou 49,5 minutos na fila e
