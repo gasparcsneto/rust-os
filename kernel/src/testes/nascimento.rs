@@ -4086,6 +4086,13 @@ const CAMINHO_DO_DESFECHO_NO_COMANDO: &str = "/bin/nao-existe";
 /// (`u64::MAX`: o gancho nao rodou).
 static NO_COMANDO_GRAVAR: AtomicU64 = AtomicU64::new(u64::MAX);
 static NO_COMANDO_GRAVAR_NO_COMANDO: AtomicU64 = AtomicU64::new(u64::MAX);
+/// O controle positivo do gancho, desde o lote A9 (o I2 do adversario do
+/// lote A8): o numero do registro que ele grava com `ERROR` pelo
+/// `gravar_no_comando` -- que so grava dentro de um comando, e fora devolve
+/// zero -- (`u64::MAX`: o gancho nao rodou).
+static NO_COMANDO_CONTROLE: AtomicU64 = AtomicU64::new(u64::MAX);
+/// O detalhe do controle positivo do gancho.
+const CONTROLE_NO_COMANDO: &str = "controle: o gancho rodou dentro do comando";
 
 /// O gancho de antes das perguntas do gate sobre quem pede: roda no
 /// lancamento do `user.run`, dentro do comando, e tenta gravar o desfecho
@@ -4109,6 +4116,15 @@ fn o_desfecho_que_permite_no_comando() {
         ),
         SeqCst,
     );
+    NO_COMANDO_CONTROLE.store(
+        crate::autorizacao::gravar_um_desfecho_de_teste(
+            CAMINHO_DO_DESFECHO_NO_COMANDO,
+            politica::Codigo::Error,
+            CONTROLE_NO_COMANDO,
+            true,
+        ),
+        SeqCst,
+    );
 }
 
 /// O lote A8, pelo T1 do adversario do lote A7, sobre o caso do I2: a guarda
@@ -4122,11 +4138,19 @@ fn o_desfecho_que_permite_no_comando() {
 /// zero, o log diz uma vez em cada, nada com `processo 4000000009 lancado`
 /// vai a auditoria, o `user.run` grava o desfecho dele -- `ERROR`, a leitura
 /// -- e o NSF, que o leu, nao acha o nascimento.
+///
+/// E, desde o lote A9 (o I2 do adversario do lote A8), o controle positivo
+/// de que o gancho rodou dentro do comando: o gancho e de quem o toma
+/// primeiro, e um lancamento de fora de um comando que o tomasse daria zero
+/// nos dois caminhos -- tambem com a DG4. O mesmo embrulho grava, pelo
+/// `gravar_no_comando`, um `ERROR`, que so dentro de um comando se grava, e
+/// tem de sair como a execucao do `user.run` do caso.
 pub(super) fn contencao_o_desfecho_que_permite_nao_grava_no_comando() -> Resultado {
     use politica::Codigo;
     use seguranca::evento::Tipo;
     NO_COMANDO_GRAVAR.store(u64::MAX, SeqCst);
     NO_COMANDO_GRAVAR_NO_COMANDO.store(u64::MAX, SeqCst);
+    NO_COMANDO_CONTROLE.store(u64::MAX, SeqCst);
     crate::pessoas::esquecer_registradas();
     let resultado = super::com_o_nsf(|| {
         let quem = operador_que_lanca(181, "desfecho-no-comando");
@@ -4150,17 +4174,43 @@ pub(super) fn contencao_o_desfecho_que_permite_nao_grava_no_comando() -> Resulta
         });
         let gravar = NO_COMANDO_GRAVAR.load(SeqCst);
         let no_comando = NO_COMANDO_GRAVAR_NO_COMANDO.load(SeqCst);
+        let controle_do_gancho = NO_COMANDO_CONTROLE.load(SeqCst);
         crate::log_info!(
             "teste",
             "contencao: dentro do comando, o desfecho com ALLOW devolveu {} pelo gravar e {} pelo \
-             gravar_no_comando, e o log disse {} vez(es): {}",
+             gravar_no_comando, o controle com ERROR gravou o registro {}, e o log disse {} \
+             vez(es): {}",
             gravar,
             no_comando,
+            controle_do_gancho,
             disse,
             r
         );
-        if gravar == u64::MAX || no_comando == u64::MAX {
+        if gravar == u64::MAX || no_comando == u64::MAX || controle_do_gancho == u64::MAX {
             return Err("o gancho nao rodou dentro do user.run: o caso nao conferiu nada");
+        }
+        // O controle positivo: o `ERROR` pelo `gravar_no_comando` so se grava
+        // dentro de um comando, e sai como a execucao do `user.run` do caso.
+        if controle_do_gancho == 0 {
+            return Err(
+                "o controle do gancho com ERROR nao gravou: o gancho rodou fora de um comando, e \
+                 o caso nao conferiu o desfecho dentro dele",
+            );
+        }
+        match super::registro_numero(controle_do_gancho) {
+            Some(e)
+                if e.metodo == "user.run"
+                    && e.recurso == CAMINHO_DO_DESFECHO_NO_COMANDO
+                    && e.codigo == Codigo::Error
+                    && e.detalhe.contains(CONTROLE_NO_COMANDO) => {}
+            Some(e) => {
+                crate::log_error!("teste", "{:?}", e);
+                return Err(
+                    "o controle do gancho nao saiu como a execucao do user.run do caso: o gancho \
+                     rodou noutro comando",
+                );
+            }
+            None => return Err("o registro do controle do gancho saiu do anel"),
         }
         if gravar != 0 || no_comando != 0 {
             return Err(
@@ -4182,6 +4232,7 @@ pub(super) fn contencao_o_desfecho_que_permite_nao_grava_no_comando() -> Resulta
             ev.metodo == "user.run"
                 && ev.recurso == CAMINHO_DO_DESFECHO_NO_COMANDO
                 && ev.codigo == Codigo::Error
+                && !ev.detalhe.contains(CONTROLE_NO_COMANDO)
         });
         let Some(&(controle, _)) = execucoes.last() else {
             return Err("o user.run do caso ficou sem o desfecho: o caso nao conferiu nada");
