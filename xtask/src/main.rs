@@ -7074,7 +7074,12 @@ fn carga_fora_do_lugar_em(lugar: &LugarDaCarga, fonte: &str) -> Vec<String> {
 /// a mudança é revisada. E o nome de cada uma continua sendo o dela: nenhum
 /// `macro_rules!` a redefine, nem um `as` dá o nome dela a outra, nem um
 /// `use` ou um `#[macro_use]` traz outra com o nome dela
-/// ([`macros_da_carga_redefinidas`]).
+/// ([`macros_da_carga_redefinidas`]); e, desde o lote A9, o corpo das que o
+/// kernel define — os três registros do log — é o da lista
+/// ([`CORPO_DE_UM_REGISTRO`], [`registros_do_log_fora`]), com o
+/// `::core::format_args!`, e o `core` e o `alloc` são os pacotes de verdade
+/// ([`PACOTES_DAS_MACROS_DA_CARGA`]): o que uma delas expande também está
+/// fechado.
 ///
 /// # Por quê, desde o lote A8
 ///
@@ -7098,6 +7103,153 @@ const MACROS_DA_CARGA: [&str; 5] = [
     "crate::log_warn",
     "crate::log_info",
 ];
+
+/// Os pacotes que as macros de [`MACROS_DA_CARGA`] chamam pelo nome: o
+/// `alloc` do `alloc::format!` e o `core` do `::core::format_args!` dos
+/// registros do log. Nenhum outro item recebe o nome deles — o `as` de
+/// [`macros_da_carga_redefinidas`] —, e nenhuma dependência do kernel entra
+/// com outro nome ([`dependencias_fora`]).
+///
+/// # Por quê, desde o lote A9
+///
+/// O `::` do começo de um caminho só olha os pacotes, e não os itens do
+/// módulo: o `::core::format_args!` não se sombreia por um `macro_rules!` nem
+/// por um `use`. Mas os pacotes que ele olha são os da raiz do crate — o
+/// prelúdio dos pacotes —, e um `extern crate x as core;` no `main.rs`, ou uma
+/// dependência renomeada no `Cargo.toml` (`core = { package = "x", … }`), põe
+/// lá outro pacote com o nome `core`: com o `rustc` do canal, o
+/// `::core::format_args!` de um `#![no_std]` passa a ser o `format_args` que
+/// esse pacote exporta, sem aviso. O mesmo vale para o `alloc`, que o `as`
+/// já recusava desde o lote A8.
+const PACOTES_DAS_MACROS_DA_CARGA: [&str; 2] = ["alloc", "core"];
+
+/// As macros de [`MACROS_DA_CARGA`] que o kernel define — os três
+/// registros do log, no `log.rs` —, cada uma com o nível dela: o corpo de
+/// cada uma é o [`CORPO_DE_UM_REGISTRO`] com o nível no lugar de `NIVEL`
+/// ([`registros_do_log_fora`]).
+const REGISTROS_DO_LOG: [(&str, &str); 3] = [
+    ("log_error", "Error"),
+    ("log_warn", "Warn"),
+    ("log_info", "Info"),
+];
+
+/// O corpo de um registro do log de [`REGISTROS_DO_LOG`], como o `log.rs` o
+/// escreve hoje, do primeiro braço ao último — a comparação é token a token
+/// ([`tokens_de`]): o espaço e a quebra de linha não contam, e um comentário
+/// conta.
+///
+/// # Por quê, desde o lote A9
+///
+/// A lista das macros da carga lê o caminho da invocação, e confiava no que
+/// ela expande. O que um registro do log expande é o corpo dele, e o corpo não
+/// se conferia: um braço novo do `log_warn` — `(@metodos $t:ident { $($c:tt)*
+/// }) => { impl $t { $($c)* } };` — e o `crate::log_warn!(@metodos NaoLancou {
+/// … })` dentro de `lancar_por` escreviam o `impl` do M1 do lote A7 com o
+/// caminho da lista; e o `format_args!` que os três chamavam pelo nome se
+/// resolvia em quem registra — um `macro_rules! format_args` no
+/// `usuario/mod.rs` fazia o `crate::log_warn!` de verdade de `lancar_por`
+/// escrever o mesmo `impl` (o A2 do adversário do lote A8). O texto exato, e
+/// não as regras: o corpo é curto, não mudou desde que foi escrito, e
+/// qualquer mudança nele é das que se revisam — um braço, um nome, um
+/// caminho —; as regras repetiriam a corrida das formas que as guardas de
+/// texto já perderam. E não um resumo, como um SHA-256: a diferença de uma
+/// lista de texto se lê na revisão, e a de um resumo, não. Os três chamam o
+/// `::core::format_args!`, que não se sombreia por um item do módulo — o
+/// `::` só olha os pacotes —, e o `core` é o de verdade
+/// ([`PACOTES_DAS_MACROS_DA_CARGA`]).
+const CORPO_DE_UM_REGISTRO: &str = r#"
+    ($sub:expr, $fmt:expr) => {
+        { let _ = $crate::log::registrar($crate::log::Level::NIVEL, $sub, ::core::format_args!($fmt)); }
+    };
+    ($sub:expr, $fmt:expr, $($arg:tt)*) => {
+        { let _ = $crate::log::registrar($crate::log::Level::NIVEL, $sub, ::core::format_args!($fmt, $($arg)*)); }
+    };
+"#;
+
+/// Os tokens de `texto`, um por item, para a comparação de
+/// [`registros_do_log_fora`]: cada sequência de letras, dígitos e `_`, e
+/// cada um dos outros caracteres, sozinho; os espaços — os de
+/// [`so_o_codigo`] também — separam e não contam.
+fn tokens_de(texto: &str) -> Vec<String> {
+    let de_nome = |x: char| x.is_alphanumeric() || x == '_';
+    let mut tokens: Vec<String> = Vec::new();
+    let mut anterior_de_nome = false;
+    for x in texto.chars() {
+        if x.is_whitespace() || matches!(x, '\u{200E}' | '\u{200F}') {
+            anterior_de_nome = false;
+        } else if de_nome(x) && anterior_de_nome {
+            if let Some(ultimo) = tokens.last_mut() {
+                ultimo.push(x);
+            }
+        } else {
+            tokens.push(x.to_string());
+            anterior_de_nome = de_nome(x);
+        }
+    }
+    tokens
+}
+
+/// O que `fonte` — o `kernel/src/log.rs` — tem dos registros de
+/// [`REGISTROS_DO_LOG`] fora da lista: cada um definido uma vez só, por um
+/// `macro_rules!` com o nome dele, e com o corpo — do delimitador que o
+/// abre ao que o fecha, lido cru, os comentários inclusive — igual, token a
+/// token ([`tokens_de`]), ao [`CORPO_DE_UM_REGISTRO`] com o nível dele. O
+/// registro que some, ou que se define duas vezes, é a conferência cega.
+fn registros_do_log_fora(fonte: &str) -> Vec<String> {
+    let c = so_o_codigo(fonte);
+    let cru: Vec<char> = fonte.chars().collect();
+    let linha_de = |i: usize| 1 + c[..i].iter().filter(|&&x| x == '\n').count();
+    let definicoes = definicoes_de_macro(&c);
+    let mut fora = Vec::new();
+    for (nome, nivel) in REGISTROS_DO_LOG {
+        let deste: Vec<(usize, usize)> = definicoes
+            .iter()
+            .copied()
+            .filter(|&(abre, _)| {
+                // O nome logo antes do corpo — também cru, `r#` —, inteiro.
+                let mut fim = abre;
+                while fim > 0 && c[fim - 1].is_whitespace() {
+                    fim -= 1;
+                }
+                let mut comeco = fim;
+                while comeco > 0 && (c[comeco - 1].is_alphanumeric() || c[comeco - 1] == '_') {
+                    comeco -= 1;
+                }
+                c[comeco..fim].iter().copied().eq(nome.chars())
+            })
+            .collect();
+        match deste[..] {
+            [(abre, fecha)] => {
+                let corpo: String = cru[abre + 1..fecha.min(cru.len())].iter().collect();
+                let esperado = CORPO_DE_UM_REGISTRO.replace("NIVEL", nivel);
+                if tokens_de(&corpo) != tokens_de(&esperado) {
+                    fora.push(format!(
+                        "kernel/src/log.rs:{}: o corpo de `{nome}!` não é o da lista do `xtask` \
+                         (`CORPO_DE_UM_REGISTRO`, com `{nivel}`): o `{nome}!` é uma das macros \
+                         que as funções da carga invocam, e o que ela expande vai para dentro \
+                         delas — um braço novo, ou outro nome no corpo, escreveria ali o `impl` \
+                         sem a palavra. Uma mudança no corpo muda a lista, e a mudança é revisada",
+                        linha_de(abre)
+                    ));
+                }
+            }
+            ref outras => fora.push(format!(
+                "kernel/src/log.rs: `macro_rules! {nome}` definido {} vezes, e não uma: a \
+                 conferência dos registros do log está cega",
+                outras.len()
+            )),
+        }
+    }
+    fora
+}
+
+/// [`registros_do_log_fora`] no `kernel/src/log.rs`, lido pelo caminho: o
+/// arquivo que suma reprova.
+fn conferir_os_registros_do_log(raiz: &Path) -> Result<Vec<String>, String> {
+    let texto = std::fs::read_to_string(raiz.join("kernel/src/log.rs"))
+        .map_err(|e| format!("não foi possível ler kernel/src/log.rs: {e}"))?;
+    Ok(registros_do_log_fora(&texto))
+}
 
 /// O montador e o ligador: as macros do `asm!`, do `global_asm!` e do
 /// `naked_asm!`, e o atributo que escolhe a seção de um item — nenhum nos
@@ -7166,7 +7318,14 @@ fn caminho_da_macro(c: &[char], abre: usize) -> (String, usize) {
 /// `alloc` ou `assert` — o último pedaço do caminho (`use dep::assert;`) ou
 /// o `self` de um grupo (`use dep::alloc::{self};`) —, um `use` montado por
 /// uma macro (um `$` no caminho), e um `#[macro_use]`, que põe as macros
-/// exportadas de um pacote na frente das do prelúdio. A linha e a forma.
+/// exportadas de um pacote na frente das do prelúdio. Desde o lote A9, o
+/// `format_args` também — o `macro_rules!`, o `as` e o `use` —: os
+/// registros do log o chamavam pelo nome, que se resolve em quem registra (o
+/// A2 do adversário do lote A8); hoje o chamam pelo caminho absoluto, que
+/// nenhum item do módulo sombreia, e a sombra fica recusada assim mesmo. E
+/// o `as core`, como o `as alloc`: na raiz do crate, um `extern crate … as
+/// core;` trocaria o pacote que o `::core::` alcança
+/// ([`PACOTES_DAS_MACROS_DA_CARGA`]). A linha e a forma.
 ///
 /// # Por quê, desde o lote A8
 ///
@@ -7206,9 +7365,13 @@ fn macros_da_carga_redefinidas(relativo: &str, fonte: &str) -> Vec<(usize, Strin
             .take_while(|&&x| de_nome(x))
             .collect()
     };
+    // O último pedaço do caminho de cada uma, e o `format_args`, que os
+    // registros do log chamam por dentro — pelo caminho absoluto desde o lote
+    // A9 (`CORPO_DE_UM_REGISTRO`), e a sombra fica recusada também.
     let nomes: Vec<&str> = MACROS_DA_CARGA
         .iter()
         .map(|m| m.rsplit("::").next().unwrap_or(m))
+        .chain(["format_args"])
         .collect();
     let mut achados = Vec::new();
     let definicao: Vec<char> = "macro_rules".chars().collect();
@@ -7236,10 +7399,19 @@ fn macros_da_carga_redefinidas(relativo: &str, fonte: &str) -> Vec<(usize, Strin
     }
     for i in (0..c.len()).filter(|&i| palavra(i, &['a', 's'])) {
         let nome = nome_em(depois_dos_espacos(i + 2));
-        if nome == "alloc" || nomes.contains(&nome.as_str()) {
+        if nomes.contains(&nome.as_str()) {
             achados.push((
                 linha_de(i),
                 format!("um `as {nome}`, que dá a outro item o nome de uma macro da lista"),
+            ));
+        } else if PACOTES_DAS_MACROS_DA_CARGA.contains(&nome.as_str()) {
+            achados.push((
+                linha_de(i),
+                format!(
+                    "um `as {nome}`, que dá a outro item o nome de um pacote que as macros da \
+                     lista chamam — na raiz do crate, um `extern crate … as {nome};` troca o que \
+                     o `{nome}::` delas alcança"
+                ),
             ));
         }
     }
@@ -7300,7 +7472,7 @@ fn macros_da_carga_redefinidas(relativo: &str, fonte: &str) -> Vec<(usize, Strin
             ));
             continue;
         }
-        for nome in ["alloc", "assert"] {
+        for nome in ["alloc", "assert", "format_args"] {
             let n: Vec<char> = nome.chars().collect();
             for k in (i + 3..fim).filter(|&k| palavra(k, &n)) {
                 // O nome novo de um `as` fica com a regra do `as`.
@@ -7401,6 +7573,120 @@ fn corpo_do_item(c: &[char], i: usize) -> std::ops::Range<usize> {
         }
     }
     abre..c.len()
+}
+
+/// A raiz do crate do kernel: o único arquivo que declara o módulo da suíte
+/// ([`modulo_da_suite_fora`]), e o do binário do kernel no grafo do cargo
+/// ([`dependencias_fora`]).
+const RAIZ_DO_KERNEL: &str = "kernel/src/main.rs";
+
+/// O que `fonte` — o arquivo `relativo` do kernel, fora da suíte — tem do
+/// módulo da suíte fora do lugar, no código ([`so_o_codigo`]), cada um na
+/// linha dele:
+///
+/// - o nome de módulo `testes` — também cru, `r#testes` — fora do
+///   [`RAIZ_DO_KERNEL`];
+/// - no [`RAIZ_DO_KERNEL`], o módulo `testes` declarado mais de uma vez, ou
+///   nenhuma, ou não como `mod testes;` — o arquivo, e não um módulo de
+///   linha —, com o [`ATRIBUTO_DA_SUITE`] entre os atributos logo acima e só
+///   uma visibilidade no meio;
+/// - em qualquer arquivo, um `mod` com o nome montado por uma macro, `mod
+///   $nome`, que pode ser o `testes`.
+///
+/// # Por quê, desde o lote A9
+///
+/// As guardas dos nomes, das chamadas e dos carregadores deixam de fora
+/// pelo caminho todo arquivo de `kernel/src/testes*` ([`da_suite`]): a suíte
+/// só existe na compilação de teste. Nada conferia que ela só existe lá — o
+/// inventário das guardas de texto dizia que nenhum arquivo de produção a
+/// traz, e nada o lia. No `main.rs`, um `#[cfg(not(feature = "modo-teste"))]
+/// mod testes { pub(crate) mod atalho; }` trazia o `kernel/src/testes/atalho.rs`
+/// para a compilação de produção, e ali o `lancar_como_sistema` fora do dono
+/// passava (o A5 do adversário do lote A8). Um arquivo da suíte só entra na
+/// compilação pelo módulo `testes` da raiz do crate — ou pelo `#[path]`, que
+/// [`onde_traz_outro_arquivo`] recusa fora da suíte —, e é ele que se
+/// confere aqui, em toda forma que o texto mostra: por extenso, cru, num
+/// módulo de linha, no corpo de uma macro, e montado por uma.
+fn modulo_da_suite_fora(relativo: &str, fonte: &str) -> Vec<String> {
+    let c = so_o_codigo(fonte);
+    let cru: Vec<char> = fonte.chars().collect();
+    let de_nome = |x: char| x.is_alphanumeric() || x == '_';
+    let palavra = |i: usize, p: &[char]| {
+        c.get(i..i + p.len()) == Some(p)
+            && (i == 0 || !de_nome(c[i - 1]))
+            && !c.get(i + p.len()).is_some_and(|&x| de_nome(x))
+    };
+    let depois_dos_espacos = |mut k: usize| {
+        while c.get(k).is_some_and(|x| x.is_whitespace()) {
+            k += 1;
+        }
+        k
+    };
+    let linha_de = |i: usize| 1 + c[..i].iter().filter(|&&x| x == '\n').count();
+    let testes: Vec<char> = "testes".chars().collect();
+    let mut fora = Vec::new();
+    // Cada `mod testes`: onde está o `mod`, e onde acaba o nome.
+    let mut declaracoes = Vec::new();
+    for i in (0..c.len()).filter(|&i| palavra(i, &['m', 'o', 'd'])) {
+        let mut k = depois_dos_espacos(i + 3);
+        if c.get(k) == Some(&'$') {
+            fora.push(format!(
+                "{relativo}:{}: um `mod` com o nome montado por uma macro — `mod $nome` —: o nome \
+                 pode ser o `testes`, e o arquivo do módulo, um da suíte, que as guardas dos nomes \
+                 não leem",
+                linha_de(i)
+            ));
+            continue;
+        }
+        if c[k.min(c.len())..].starts_with(&['r', '#']) {
+            k += 2;
+        }
+        if palavra(k, &testes) {
+            declaracoes.push((i, k + testes.len()));
+        }
+    }
+    if relativo != RAIZ_DO_KERNEL {
+        for (i, _) in declaracoes {
+            fora.push(format!(
+                "{relativo}:{}: um módulo `testes` fora do `{RAIZ_DO_KERNEL}`: o nome é o do \
+                 módulo da suíte, que só a raiz do crate declara, e só na compilação de teste",
+                linha_de(i)
+            ));
+        }
+        return fora;
+    }
+    let sem_espacos = |x: &[char]| x.iter().filter(|c| !c.is_whitespace()).collect::<String>();
+    let suite: Vec<char> = ATRIBUTO_DA_SUITE.chars().collect();
+    match declaracoes[..] {
+        [(i, fim_do_nome)] => {
+            let do_arquivo = c.get(depois_dos_espacos(fim_do_nome)) == Some(&';');
+            let comeco = c[..i]
+                .iter()
+                .rposition(|&x| matches!(x, ';' | '{' | '}' | ']'))
+                .map_or(0, |p| p + 1);
+            let antes: String = c[comeco..i].iter().collect();
+            let so_na_suite = so_a_visibilidade(&antes)
+                && atributos_antes(&c, comeco)
+                    .into_iter()
+                    .any(|(de, ate)| sem_espacos(&cru[de..ate]) == sem_espacos(&suite));
+            if !do_arquivo || !so_na_suite {
+                fora.push(format!(
+                    "{RAIZ_DO_KERNEL}:{}: o módulo `testes` não é `{ATRIBUTO_DA_SUITE} mod \
+                     testes;`: um arquivo de `kernel/src/testes*` entraria na compilação de \
+                     produção, onde as guardas dos nomes, das chamadas e dos carregadores, que \
+                     deixam a suíte de fora, não o leem",
+                    linha_de(i)
+                ));
+            }
+        }
+        ref outras => fora.push(format!(
+            "{RAIZ_DO_KERNEL}: o módulo `testes` declarado {} vezes, e não uma, como \
+             `{ATRIBUTO_DA_SUITE} mod testes;`: outro módulo com o nome da suíte traria um \
+             arquivo dela para a produção — e nenhum é a conferência cega",
+            outras.len()
+        )),
+    }
+    fora
 }
 
 /// [`fio_novo_fora_do_lancamento`] e [`carga_fora_do_lugar`] no
@@ -7753,10 +8039,32 @@ const NOMES_PROTEGIDOS: &[(&str, &[&str])] = &[
 /// crus, `r#"…"#`, e os crus de bytes e de C, `br"…"` e `cr"…"` — trocados
 /// por espaços. As quebras de linha ficam, e cada
 /// caractere fica na posição dele: a linha do que se acha é a da fonte. Um
-/// `r#` que não abre um texto é um identificador cru, e fica.
+/// `r#` que não abre um texto é um identificador cru, e fica. E as marcas
+/// de direção, U+200E e U+200F, viram espaço, como o `rustc` as lê.
+///
+/// # As marcas de direção, desde o lote A9
+///
+/// Para o `rustc`, o espaço entre os tokens é o `Pattern_White_Space` do
+/// Unicode, que tem a U+200E e a U+200F, e o `char::is_whitespace` das
+/// guardas não as tem: uma marca de direção entre o `#` e o `[`, entre o nome
+/// de uma macro e o `!`, depois do `use`, do `as` e do `mod`, ou entre o
+/// `feature` e o `(`, invisível na leitura, escondia a forma de toda guarda
+/// que pula espaços (o B1 do adversário do lote A8). Trocadas por espaço
+/// aqui, toda guarda que lê o código as lê como o `rustc`, e a posição de
+/// cada caractere não muda. Os outros controles bidirecionais — os de
+/// U+202A a U+202E e de U+2066 a U+2069 — não são espaço para o `rustc`, que
+/// os recusa no código, e nos comentários e nos textos as guardas não leem.
 fn so_o_codigo(fonte: &str) -> Vec<char> {
+    so_o_codigo_e_os_textos(fonte).0
+}
+
+/// [`so_o_codigo`], e onde está o conteúdo de cada literal de texto do
+/// código — o de dentro das aspas, sem os escapes resolvidos —, na ordem:
+/// as posições de `fonte` em caracteres, as mesmas do código.
+fn so_o_codigo_e_os_textos(fonte: &str) -> (Vec<char>, Vec<std::ops::Range<usize>>) {
     let c: Vec<char> = fonte.chars().collect();
     let mut codigo = c.clone();
+    let mut textos = Vec::new();
     let apagar = |codigo: &mut Vec<char>, de: usize, ate: usize| {
         for x in &mut codigo[de..ate.min(c.len())] {
             if *x != '\n' {
@@ -7815,6 +8123,7 @@ fn so_o_codigo(fonte: &str) -> Vec<char> {
                     j += 1;
                 }
                 let fim = j + 1 + cerquilhas;
+                textos.push(k + 1..j.min(c.len()));
                 apagar(&mut codigo, i, fim);
                 i = fim;
                 continue;
@@ -7825,6 +8134,7 @@ fn so_o_codigo(fonte: &str) -> Vec<char> {
             while j < c.len() && c[j] != '"' {
                 j += if c[j] == '\\' { 2 } else { 1 };
             }
+            textos.push(i + 1..j.min(c.len()));
             apagar(&mut codigo, i, j + 1);
             i = j + 1;
             continue;
@@ -7849,7 +8159,13 @@ fn so_o_codigo(fonte: &str) -> Vec<char> {
         }
         i += 1;
     }
-    codigo
+    // As marcas de direção, espaço para o `rustc`.
+    for x in &mut codigo {
+        if matches!(*x, '\u{200E}' | '\u{200F}') {
+            *x = ' ';
+        }
+    }
+    (codigo, textos)
 }
 
 /// Onde uma fonte Rust traz o código de outro arquivo, se traz: a linha e a
@@ -7867,6 +8183,17 @@ fn so_o_codigo(fonte: &str) -> Vec<char> {
 ///   para o crate um arquivo que não é `.rs`, que nenhuma conferência lê (o
 ///   P1 do adversário do lote A7). O `#[doc = $x]` só põe texto na
 ///   documentação, e é o único atributo com `$` do kernel;
+/// - desde o lote A9, o `#` que não abre um atributo — o `#` seguido de um
+///   fragmento de macro, `#$a` ou `# $a`, e o `#` sozinho nos tokens de uma
+///   invocação, `m!(#)` —: um atributo montado por uma macro, com o `#` e os
+///   colchetes vindos de lugares diferentes. O fragmento `tt` é
+///   transparente, e o `rustc` lê `#` e `[path = "neto.inc"]` como o
+///   atributo: `($a:tt) => { #$a mod neto; }`, invocado com `([path =
+///   "neto.inc"])`, e `($h:tt) => { $h[path = "neto.inc"] mod neto; }`,
+///   invocado com `(#)`, traziam o arquivo que nenhuma conferência lê — o P1
+///   do lote A7 de volta (o A3 do adversário do lote A8). Fora de um
+///   atributo, o `#` do código só é o de um identificador cru (`r#nome`): os
+///   dos textos crus somem com os textos;
 /// - o `include`, que traz o arquivo sem atributo nenhum — pela palavra, em
 ///   qualquer forma: o `include!`, e o `use core::include as …` que o traz
 ///   com outro nome, que um `include` seguido de `!` não via (o achado 3
@@ -7885,12 +8212,25 @@ fn onde_traz_outro_arquivo(fonte: &str) -> Option<(usize, &'static str)> {
     let de_nome = |x: char| x.is_alphanumeric() || x == '_';
     for i in 0..c.len() {
         if c[i] == '#' {
+            // O `#` de um identificador cru, `r#nome`: o `r` no começo de
+            // uma palavra, e o nome logo depois.
+            let do_cru = i >= 1
+                && c[i - 1] == 'r'
+                && (i < 2 || !de_nome(c[i - 2]))
+                && c.get(i + 1).is_some_and(|&x| de_nome(x));
+            if do_cru {
+                continue;
+            }
             let mut k = pular_espacos(i + 1);
             if c.get(k) == Some(&'!') {
                 k = pular_espacos(k + 1);
             }
             if c.get(k) != Some(&'[') {
-                continue;
+                return Some((
+                    linha_de(i),
+                    "um `#` que não abre um atributo — o `#$a`, ou o `#` sozinho nos tokens de \
+                     uma macro —: um atributo montado por uma macro, que pode ser o `path`",
+                ));
             }
             let dentro = pular_espacos(k + 1);
             if c.get(dentro) == Some(&'$') {
@@ -8568,7 +8908,12 @@ fn onde_um_recurso_de_macro_se_usa(fonte: &str) -> Vec<(usize, &'static str)> {
 /// exporte é conferido pelo recurso do pacote que a usa — o kernel —, e
 /// não pelo do que a define; e a opção do `rustc` que acrescenta um
 /// atributo ao crate, que ligaria um recurso sem o `main.rs`, não entra no
-/// build ([`linhas_com_atributo_do_crate`]).
+/// build: pelo texto do config, do `xtask` e da CI
+/// ([`linhas_com_atributo_do_crate`]), até o lote A8 — o escape do TOML e o
+/// config sem a extensão contornavam o texto (os K1 e K2 do adversário do
+/// lote A7) —, e, desde ele, pela lista fechada dos rustflags que o cargo lê
+/// ([`RUSTFLAGS_DO_KERNEL`]), e pela linha de comando do `xtask`
+/// ([`linha_de_comando_do_xtask_fora`], desde o lote A9).
 const RECURSOS_DO_KERNEL: [&str; 2] = ["abi_x86_interrupt", "cfg_overflow_checks"];
 
 /// Os recursos que `fonte` — o `kernel/src/main.rs` — liga, no código
@@ -8707,6 +9052,154 @@ fn arquivos_do_build(raiz: &Path) -> Result<Vec<String>, String> {
     Ok(arquivos)
 }
 
+/// O ambiente que o `xtask` põe nos processos que ele roda — o arquivo, e o
+/// nome como está escrito no `.env(…)` —, a lista fechada
+/// ([`linha_de_comando_do_xtask_fora`]): o diretório temporário da bancada
+/// do IC, a parte da suíte para a compilação do kernel, e o diretório de
+/// saída do modelo do SDK. Um novo muda a lista, e a mudança é revisada.
+const AMBIENTE_DOS_FILHOS: [(&str, &str); 3] = [
+    ("xtask/src/icp.rs", "\"TMPDIR\""),
+    ("xtask/src/main.rs", "partes::DA_SUITE"),
+    ("xtask/src/sdk.rs", "\"CARGO_TARGET_DIR\""),
+];
+
+/// Se `opcao` — o texto de um literal nos argumentos de um `.arg(…)` ou de
+/// um `.args(…)` do `xtask` — muda o que o cargo compila sem o config: o
+/// `--config`, um `-Z`, ou o `rustc` e o `rustdoc`, os subcomandos que
+/// passam opções ao compilador depois do `--`.
+fn muda_o_que_o_cargo_compila(opcao: &str) -> bool {
+    opcao.starts_with("--config")
+        || opcao.starts_with("-Z")
+        || opcao == "rustc"
+        || opcao == "rustdoc"
+}
+
+/// O que `fonte` — o arquivo `relativo` do `xtask` — põe no ambiente de um
+/// processo filho: o primeiro argumento de cada `.env(…)`, como está escrito,
+/// com os espaços reduzidos a um, e a linha; e cada `.envs(…)`, com `None`.
+fn ambiente_posto(fonte: &str) -> Vec<(usize, Option<String>)> {
+    let (c, _) = so_o_codigo_e_os_textos(fonte);
+    let cru: Vec<char> = fonte.chars().collect();
+    let mut postos = Vec::new();
+    for (linha, metodo, abre, fecha) in chamadas_de_metodo(&c, &["env", "envs"]) {
+        if metodo == "envs" {
+            postos.push((linha, None));
+            continue;
+        }
+        // Até a primeira vírgula de fora de um parêntese, de um colchete ou
+        // de uma chave.
+        let mut nivel = 0usize;
+        let mut fim = fecha;
+        for (k, &x) in c.iter().enumerate().take(fecha).skip(abre + 1) {
+            match x {
+                '(' | '[' | '{' => nivel += 1,
+                ')' | ']' | '}' => nivel = nivel.saturating_sub(1),
+                ',' if nivel == 0 => {
+                    fim = k;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let nome: String = cru[abre + 1..fim.min(cru.len())].iter().collect();
+        postos.push((
+            linha,
+            Some(nome.split_whitespace().collect::<Vec<_>>().join(" ")),
+        ));
+    }
+    postos
+}
+
+/// As chamadas de um dos `metodos` em `c` — uma fonte só com o código
+/// ([`so_o_codigo`]) —: o `.`, o nome, inteiro, e o parêntese, com espaços
+/// no meio. Para cada uma, a linha, o nome, e onde os argumentos abrem e
+/// fecham ([`fechamento`]).
+fn chamadas_de_metodo<'m>(c: &[char], metodos: &[&'m str]) -> Vec<(usize, &'m str, usize, usize)> {
+    let de_nome = |x: char| x.is_alphanumeric() || x == '_';
+    let depois_dos_espacos = |mut k: usize| {
+        while c.get(k).is_some_and(|x| x.is_whitespace()) {
+            k += 1;
+        }
+        k
+    };
+    let mut chamadas = Vec::new();
+    for i in (0..c.len()).filter(|&i| c[i] == '.') {
+        let comeco = depois_dos_espacos(i + 1);
+        let mut fim = comeco;
+        while c.get(fim).is_some_and(|&x| de_nome(x)) {
+            fim += 1;
+        }
+        let nome: String = c[comeco..fim].iter().collect();
+        let Some(metodo) = metodos.iter().find(|m| **m == nome) else {
+            continue;
+        };
+        let abre = depois_dos_espacos(fim);
+        if c.get(abre) == Some(&'(') {
+            let linha = 1 + c[..i].iter().filter(|&&x| x == '\n').count();
+            chamadas.push((linha, *metodo, abre, fechamento(c, abre)));
+        }
+    }
+    chamadas
+}
+
+/// O que `fonte` — o arquivo `relativo` do `xtask` — passa a um processo
+/// filho fora do que se confere, cada um na linha dele: o nome de um
+/// `.env(…)` fora de [`AMBIENTE_DOS_FILHOS`] — um `RUSTFLAGS`, um
+/// `CARGO_TARGET_<alvo>_RUSTFLAGS`, um `CARGO_BUILD_*` —, todo `.envs(…)`,
+/// cujos nomes o texto não diz, e, nos argumentos de um `.arg(…)` ou de um
+/// `.args(…)`, um literal que muda o que o cargo compila
+/// ([`muda_o_que_o_cargo_compila`]). O `compilador.rs`, que consulta o config
+/// pelo `-Zunstable-options` e cita as variáveis que recusa, fica de fora,
+/// como da regra das chamadas com outro toolchain.
+///
+/// # Por quê, desde o lote A9
+///
+/// A lista fechada dos rustflags do kernel ([`RUSTFLAGS_DO_KERNEL`]) vale
+/// para o config; um `--config 'target.….rustflags=[…]'` nos argumentos com
+/// que o `xtask` chama o cargo, ou um `.env("CARGO_TARGET_…_RUSTFLAGS", …)`
+/// no ambiente dele, passavam ao `rustc` do kernel o que a lista recusa —
+/// até um ingênuo, para um flag de perfilagem (o B4 do adversário do lote
+/// A8, e o item 14c do revisor). O que fica: o nome montado em pedaços, ou
+/// lido de uma variável, que o texto não diz — a revisão do `xtask` o vê.
+fn linha_de_comando_do_xtask_fora(relativo: &str, fonte: &str) -> Vec<String> {
+    if relativo == "xtask/src/compilador.rs" {
+        return Vec::new();
+    }
+    let mut fora = Vec::new();
+    for (linha, nome) in ambiente_posto(fonte) {
+        match nome {
+            Some(nome) if AMBIENTE_DOS_FILHOS.contains(&(relativo, nome.as_str())) => {}
+            Some(nome) => fora.push(format!(
+                "{relativo}:{linha}: `.env({nome}, …)` fora da lista do `xtask` \
+                 ({AMBIENTE_DOS_FILHOS:?}): o ambiente de um processo filho — o do cargo do \
+                 kernel — muda o que ele compila sem passar pelo config que se confere: um \
+                 `RUSTFLAGS`, um `CARGO_TARGET_<alvo>_RUSTFLAGS`. Um novo muda a lista, e a \
+                 mudança é revisada"
+            )),
+            None => fora.push(format!(
+                "{relativo}:{linha}: um `.envs(…)`: os nomes que ele põe no ambiente de um \
+                 processo filho não se leem no texto — um `.env(…)` para cada um, na lista do \
+                 `xtask`"
+            )),
+        }
+    }
+    let (c, textos) = so_o_codigo_e_os_textos(fonte);
+    let cru: Vec<char> = fonte.chars().collect();
+    for (linha, _, abre, fecha) in chamadas_de_metodo(&c, &["arg", "args"]) {
+        for texto in textos.iter().filter(|t| abre < t.start && t.end <= fecha) {
+            let opcao: String = cru[texto.clone()].iter().collect();
+            if muda_o_que_o_cargo_compila(&opcao) {
+                fora.push(format!(
+                    "{relativo}:{linha}: `{opcao}` nos argumentos de um processo filho: o \
+                     `--config`, o `-Z`, o `cargo rustc` e o `cargo rustdoc` mudam o que o cargo \
+                     compila sem o config que se confere — os rustflags do kernel fora da lista"
+                ));
+            }
+        }
+    }
+    fora
+}
+
 /// O que a árvore em `raiz` tem de recurso instável do kernel fora do
 /// lugar: o que o `main.rs` liga fora de [`RECURSOS_DO_KERNEL`]
 /// ([`recursos_fora_da_lista`]); o `${…}` e o item `macro` no código da
@@ -8714,7 +9207,14 @@ fn arquivos_do_build(raiz: &Path) -> Result<Vec<String>, String> {
 /// ([`onde_um_recurso_de_macro_se_usa`]); e o atributo de crate pela linha
 /// de comando no que compila o kernel ([`arquivos_do_build`],
 /// [`linhas_com_atributo_do_crate`]). Os A4 e A5 do adversário do lote A6.
-/// Lidos pelo caminho: o arquivo que suma reprova.
+/// E, desde o lote A8, o que o cargo passa ao `rustc` do kernel: o
+/// `RUSTFLAGS` e as outras variáveis do cargo na CI
+/// ([`variaveis_do_cargo_na_ci`], com a lista desde o lote A9), o config
+/// efetivo ([`config_do_kernel_fora`]), o config sem a extensão e o
+/// `Cargo.toml` do kernel ([`manifesto_do_kernel_fora`]); e, desde o lote
+/// A9, a linha de comando com que o `xtask` chama o cargo
+/// ([`linha_de_comando_do_xtask_fora`]). Lidos pelo caminho: o arquivo que
+/// suma reprova.
 fn recursos_do_kernel_fora(raiz: &Path) -> Result<Vec<String>, String> {
     let ler = |relativo: &str| {
         std::fs::read_to_string(raiz.join(relativo))
@@ -8748,7 +9248,10 @@ fn recursos_do_kernel_fora(raiz: &Path) -> Result<Vec<String>, String> {
             ));
         }
         if relativo.starts_with(".github/") {
-            fora.extend(rustflags_na_ci(&relativo, &texto));
+            fora.extend(variaveis_do_cargo_na_ci(&relativo, &texto));
+        }
+        if relativo.starts_with("xtask/src/") {
+            fora.extend(linha_de_comando_do_xtask_fora(&relativo, &texto));
         }
     }
     // Desde o lote A8, o config do cargo como o cargo o lê, o sem a
@@ -8855,17 +9358,26 @@ fn textos_do_json(json: &str) -> Option<Vec<String>> {
 ///   ([`RUSTFLAGS_DO_KERNEL`]), e o ligador de cada um;
 /// - na tabela de cada alvo do kernel, outra chave que os `rustflags` — o
 ///   `linker`, o `runner`, as saídas de um `build.rs` de um `links`
-///   (`[target.<alvo>.<links>]`) —; e um `cfg(…)` com `rustflags`, que se
-///   somam aos do alvo que ele casa;
+///   (`[target.<alvo>.<links>]`) —; e, desde o lote A9, a tabela `target`
+///   fechada: nenhuma outra que as dos dois alvos do kernel — a de um
+///   `cfg(…)`, com os `rustflags` que se somam aos do alvo que ele casa ou
+///   com o ligador dele, e a do hospedeiro, com o ligador que roda a cada
+///   `build.rs` e macro procedural ligados na compilação do kernel;
 /// - o `build.rustflags`, que vale quando a tabela do alvo não tem os dela;
 /// - a tabela `[unstable]`, que liga um recurso instável do cargo — os
 ///   `rustflags` de um perfil, o `build-std` —, e a `[env]`, que põe
 ///   variáveis no ambiente do `rustc`, as que o kernel lê com `env!` e
 ///   `option_env!`;
-/// - os `rustflags` de um perfil.
+/// - desde o lote A9, a `[source]` e a `[patch]`, que trocam o código de um
+///   pacote do crates.io — a `[source]`, sem mudar a origem que o `cargo
+///   metadata` diz —, e a `[host]`, o ligador e os rustflags do hospedeiro
+///   pelo `-Zhost-config`;
+/// - a tabela `[profile]` inteira — desde o lote A9; antes, só os
+///   `rustflags` de um perfil —: os perfis oficiais são os dos `Cargo.toml`.
 ///
 /// Cada achado começa por `kernel/.cargo`. A consulta que falha é um achado:
-/// falha fechada.
+/// falha fechada. O config de `kernel/` é também o da raiz — o cargo lê os
+/// diretórios de cima —, e o que ele não pode ter, a raiz também não.
 fn config_do_kernel_fora(raiz: &Path) -> Vec<String> {
     let dir = raiz.join("kernel");
     let consultar = |chave: &str| compilador::valor_do_config(&dir, chave);
@@ -8926,10 +9438,22 @@ fn config_do_kernel_fora(raiz: &Path) -> Vec<String> {
                              do `build.rs` de um `links` trocariam o que o build faz"
                         ));
                     }
-                } else if chave.starts_with("cfg(") && dentro.iter().any(|c| c == "rustflags") {
+                } else {
+                    // Desde o lote A9, a tabela `target` fechada: a de um
+                    // `cfg(…)` e a do hospedeiro também (os A6 e A7 do
+                    // adversário do lote A8, e o item 3 do revisor).
                     fora.push(format!(
-                        "kernel/.cargo: `target.'{chave}'.rustflags`: os rustflags de um \
-                         `cfg(…)` se somam aos do alvo do kernel que ele casa, fora da lista"
+                        "kernel/.cargo: `target.'{}'` = {}: a tabela `target` do config do \
+                         kernel só tem as dos dois alvos dele — a de um `cfg(…)` soma rustflags \
+                         aos do alvo que ela casa e escolhe o ligador dele, e a do hospedeiro \
+                         escolhe o ligador que roda a cada `build.rs` e macro procedural ligados \
+                         na compilação do kernel",
+                        // A chave como o config a escreve: a de um `cfg(…)`
+                        // tem aspas, que o JSON escapa.
+                        textos_do_json(&format!("\"{chave}\""))
+                            .and_then(|t| t.into_iter().next())
+                            .unwrap_or_else(|| chave.clone()),
+                        valor.raw_str().unwrap_or("?")
                     ));
                 }
             }
@@ -8952,6 +9476,26 @@ fn config_do_kernel_fora(raiz: &Path) -> Vec<String> {
             "põe variáveis no ambiente do `rustc` — as que o kernel lê com `env!` e \
              `option_env!` —, fora do que o `xtask` passa",
         ),
+        (
+            "source",
+            "troca o código de um pacote do crates.io por outro — uma pasta, um `vendor` —, e o \
+             `cargo metadata` continua dizendo a origem do crates.io: o resumo do `Cargo.lock` \
+             se confere contra o que a pasta diz",
+        ),
+        (
+            "patch",
+            "troca um pacote do grafo do kernel por outro, fora da lista das dependências",
+        ),
+        (
+            "host",
+            "escolhe o ligador e os rustflags dos `build.rs` e das macros procedurais, pelo \
+             `-Zhost-config`",
+        ),
+        (
+            "profile",
+            "muda o perfil com que o kernel se compila — os rustflags, o `overflow-checks`, o \
+             `panic`, o `lto` —, fora dos perfis oficiais, os dos `Cargo.toml`",
+        ),
     ] {
         match consultar(chave) {
             Ok(None) => {}
@@ -8960,14 +9504,6 @@ fn config_do_kernel_fora(raiz: &Path) -> Vec<String> {
             }
             Err(e) => nao_respondeu(e, &mut fora),
         }
-    }
-    match consultar("profile") {
-        Ok(Some(perfis)) if perfis.contains("\"rustflags\"") => fora.push(format!(
-            "kernel/.cargo: `rustflags` num perfil ({perfis}): os rustflags de um perfil, fora da \
-             lista"
-        )),
-        Ok(_) => {}
-        Err(e) => nao_respondeu(e, &mut fora),
     }
     fora
 }
@@ -9011,10 +9547,23 @@ fn manifesto_do_kernel_fora(texto: &str) -> Vec<String> {
     fora
 }
 
+/// As variáveis do cargo que a CI pode pôr: a cor do terminal, a compilação
+/// incremental e o diretório de saída — nenhuma muda o que se compila
+/// ([`variaveis_do_cargo_na_ci`]). Uma nova muda a lista, e a mudança é
+/// revisada.
+const VARIAVEIS_DO_CARGO_NA_CI: [&str; 3] =
+    ["CARGO_TERM_COLOR", "CARGO_INCREMENTAL", "CARGO_TARGET_DIR"];
+
 /// As linhas de `texto` — um arquivo da CI, `relativo` — com um `RUSTFLAGS`
 /// — o `RUSTFLAGS`, o `CARGO_ENCODED_RUSTFLAGS`, o `CARGO_BUILD_RUSTFLAGS`, o
-/// `CARGO_TARGET_<alvo>_RUSTFLAGS`, o de um perfil — ou um `CARGO_UNSTABLE_`,
-/// em qualquer lugar da linha.
+/// `CARGO_TARGET_<alvo>_RUSTFLAGS`, o de um perfil — ou, desde o lote A9, uma
+/// variável `CARGO_*` fora de [`VARIAVEIS_DO_CARGO_NA_CI`] — o
+/// `CARGO_UNSTABLE_*`, como antes, e o `CARGO_BUILD_*`, o
+/// `CARGO_TARGET_<alvo>_LINKER` e o `_RUNNER`, o `CARGO_PROFILE_*`, o
+/// `CARGO_ALIAS_*` —, em qualquer lugar da linha. A ação do compilador
+/// ([`compilador`]) cita as variáveis que recusa, e fica de fora da lista,
+/// não do `RUSTFLAGS`: ela não escreve no ambiente dos passos seguintes,
+/// que o `invariantes` confere nela.
 ///
 /// # Por quê, desde o lote A8
 ///
@@ -9023,18 +9572,47 @@ fn manifesto_do_kernel_fora(texto: &str) -> Vec<String> {
 /// — o `CARGO_BUILD_RUSTFLAGS`, o `CARGO_TARGET_<alvo>_RUSTFLAGS`, o
 /// `CARGO_UNSTABLE_*` —, que chegariam ao kernel de um job da CI sem passar
 /// pela conferência do config, que roda no job dos lints. Nenhuma está na CI.
-fn rustflags_na_ci(relativo: &str, texto: &str) -> Vec<String> {
+///
+/// # E as outras do cargo, desde o lote A9
+///
+/// O ligador de um alvo e o do hospedeiro, o executor e os perfis também se
+/// põem pelo ambiente — `CARGO_TARGET_X86_64_UNKNOWN_NONE_LINKER`,
+/// `CARGO_TARGET_<hospedeiro>_RUNNER`, `CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS`
+/// —, num job que não é o dos lints, onde a consulta do config não roda (o B3
+/// do adversário do lote A8). Pela lista do que a CI pode pôr, e não pela
+/// forma de cada uma: o cargo lê como config toda `CARGO_<tabela>_<chave>`.
+fn variaveis_do_cargo_na_ci(relativo: &str, texto: &str) -> Vec<String> {
+    let do_compilador = relativo == ".github/actions/compilador/action.yml";
+    let de_nome = |x: char| x.is_ascii_uppercase() || x.is_ascii_digit() || x == '_';
     texto
         .lines()
         .enumerate()
-        .filter(|(_, linha)| linha.contains("RUSTFLAGS") || linha.contains("CARGO_UNSTABLE_"))
-        .map(|(n, linha)| {
-            format!(
-                "{relativo}:{}: um `RUSTFLAGS` ou um `CARGO_UNSTABLE_` na CI — o `xtask` não tira \
-                 do build do kernel o que o cargo lê como config —: {}",
-                n + 1,
-                linha.trim()
-            )
+        .filter_map(|(n, linha)| {
+            let mut fora_da_lista: Vec<&str> = Vec::new();
+            if !do_compilador {
+                for (i, _) in linha.match_indices("CARGO_") {
+                    if linha[..i].chars().next_back().is_some_and(de_nome) {
+                        continue;
+                    }
+                    let fim = linha[i..]
+                        .find(|x: char| !de_nome(x))
+                        .map_or(linha.len(), |k| i + k);
+                    let nome = &linha[i..fim];
+                    if !VARIAVEIS_DO_CARGO_NA_CI.contains(&nome) && !fora_da_lista.contains(&nome) {
+                        fora_da_lista.push(nome);
+                    }
+                }
+            }
+            (linha.contains("RUSTFLAGS") || !fora_da_lista.is_empty()).then(|| {
+                format!(
+                    "{relativo}:{}: um `RUSTFLAGS`, ou uma variável do cargo fora da lista do \
+                     `xtask` ({fora_da_lista:?}; a lista: {VARIAVEIS_DO_CARGO_NA_CI:?}), na CI — \
+                     o cargo as lê como o config, e o `xtask` não as tira do build do kernel: o \
+                     ligador, o executor, os perfis, os rustflags —: {}",
+                    n + 1,
+                    linha.trim()
+                )
+            })
         })
         .collect()
 }
@@ -9085,8 +9663,10 @@ const DEPENDENCIAS_DO_KERNEL: [(&str, &str); 18] = [
 /// Os pacotes de macros procedurais do grafo do kernel — o de todas as
 /// plataformas, como o `cargo metadata` o resolve —, cada um com os pacotes
 /// que dependem dele: a lista fechada ([`dependencias_fora`]). Nenhum é
-/// dependência direta, e nenhum se reexporta: o kernel não alcança nenhum
-/// pelo nome. Os que um alvo do kernel compila hoje são o `const_fn` e o
+/// dependência direta, e o kernel não alcança nenhum pelo nome: o `defmt`
+/// reexporta o `defmt-macros`, e o `thiserror`, o `thiserror-impl`, mas
+/// nenhum dos dois compila para o kernel, que não os nomeia. Os que um alvo
+/// do kernel compila hoje são o `const_fn` e o
 /// `rustversion`, que o `x86_64` usa por dentro; os outros ficam fora da
 /// compilação — o `curve25519-dalek-derive` pela `cfg` dos rustflags
 /// (`curve25519_dalek_backend="serial"`), o `defmt-macros` e o
@@ -9101,13 +9681,49 @@ const MACROS_PROCEDURAIS_DO_GRAFO: [(&str, &[&str]); 5] = [
     ("thiserror-impl", &["thiserror"]),
 ];
 
+/// As features do kernel — o nome, e o que cada uma liga —, a lista fechada
+/// ([`dependencias_fora`]): as do `kernel/Cargo.toml` hoje, sem uma padrão.
+/// Uma nova, ou uma que ligue outra coisa, muda a lista, e a mudança é
+/// revisada.
+///
+/// # Por quê, desde o lote A9
+///
+/// O `--cfg feature="…"` de uma feature padrão vai a todo build do kernel,
+/// sem linha nenhuma no `xtask` nem na CI: um `default` com o `"quedas"` punha os
+/// pontos de queda — o plano lido do último setor da partição de estado, o
+/// contador que anda de fora — também no kernel de produção, e a conferência
+/// das quedas só lia o `xtask` (o B2 do adversário do lote A8). Pelo grafo
+/// que o cargo resolve, e não pelo texto do manifesto: o `default` escrito
+/// de qualquer jeito aparece lá como é, e o `default-features` de uma
+/// dependência, que tem a mesma palavra, não.
+const FEATURES_DO_KERNEL: [(&str, &[&str]); 2] = [
+    ("modo-teste", &["protocolo/arrays", "hora/servidor"]),
+    // A feature da bancada de persistência, pelo nome que só ela escreve
+    // (`conferir_quedas_so_na_bancada`).
+    (persistencia::FEATURE_DE_QUEDAS, &[]),
+];
+
 /// Um pacote da saída do `cargo metadata`: o nome, a origem — `None` para
-/// um de uma pasta —, o manifesto e os tipos dos alvos dele.
+/// um de uma pasta —, o manifesto, os tipos dos alvos dele, cada alvo com
+/// os tipos dele e a raiz — o `src_path` —, as features e o nome da
+/// biblioteca, o alvo que um pacote que depende dele alcança.
 struct PacoteDoGrafo<'a> {
     nome: &'a str,
     origem: Option<&'a str>,
     manifesto: &'a str,
     tipos: Vec<&'a str>,
+    alvos: Vec<(Vec<&'a str>, Option<&'a str>)>,
+    features: Option<protocolo::json::Json<'a>>,
+    biblioteca: Option<&'a str>,
+}
+
+/// Se um alvo com os `tipos` é a biblioteca de um pacote — a que um pacote
+/// que depende dele alcança pelo nome —: o `lib`, os `*lib` e o
+/// `proc-macro`.
+fn e_biblioteca(tipos: &[&str]) -> bool {
+    tipos
+        .iter()
+        .any(|t| *t == "lib" || t.ends_with("lib") || *t == "proc-macro")
 }
 
 /// O que o grafo do kernel — `metadata`, a saída do `cargo metadata` de
@@ -9116,15 +9732,22 @@ struct PacoteDoGrafo<'a> {
 ///
 /// - o pacote do kernel com outro alvo que o binário: o `build.rs`, que
 ///   roda antes da compilação e lhe passa código e opções, uma biblioteca, uma
-///   macro procedural;
+///   macro procedural; e, desde o lote A9, o binário com a raiz fora do
+///   [`RAIZ_DO_KERNEL`] — um `[[bin]] path` —, e as features fora de
+///   [`FEATURES_DO_KERNEL`] — uma padrão, uma nova, uma que ligue outra
+///   coisa;
 /// - uma dependência direta de fora de [`DEPENDENCIAS_DO_KERNEL`], de outra
 ///   origem — um `[patch]`, um `git`, outra pasta — ou de macros
-///   procedurais; e uma da lista que sumiu: a lista velha;
+///   procedurais; uma da lista que sumiu: a lista velha; e, desde o lote A9,
+///   uma renomeada, que o kernel alcança por outro nome que o da biblioteca
+///   dela — o `core`, o `alloc` ([`PACOTES_DAS_MACROS_DA_CARGA`]);
 /// - um pacote de macros procedurais do grafo de fora de
 ///   [`MACROS_PROCEDURAIS_DO_GRAFO`], ou usado por outro pacote; e um da lista
 ///   que sumiu;
 /// - um pacote do grafo que não vem do crates.io nem do repositório;
-/// - um pacote do repositório com `build.rs`, ou de macros procedurais.
+/// - um pacote do repositório com `build.rs`, ou de macros procedurais; e,
+///   desde o lote A9, com a biblioteca fora do `src/` dele — um `[lib]
+///   path` —, que [`pacotes_do_repositorio_fora`] não leria.
 ///
 /// E as pastas dos pacotes do repositório no grafo, fora o kernel,
 /// relativas à raiz: o que [`pacotes_do_repositorio_fora`] lê.
@@ -9149,18 +9772,26 @@ fn dependencias_fora(metadata: &str, raiz: &Path) -> (Vec<String>, Vec<String>) 
             continue;
         };
         let mut tipos = Vec::new();
+        let mut raizes = Vec::new();
+        let mut biblioteca = None;
         let alvos = p.member("targets");
         for a in 0.. {
             let Some(alvo) = alvos.and_then(|l| l.item(a)) else {
                 break;
             };
             let do_alvo = alvo.member("kind");
+            let mut deste = Vec::new();
             for t in 0.. {
                 let Some(tipo) = do_alvo.and_then(|l| l.item(t)).and_then(|t| t.as_str()) else {
                     break;
                 };
                 tipos.push(tipo);
+                deste.push(tipo);
             }
+            if biblioteca.is_none() && e_biblioteca(&deste) {
+                biblioteca = texto(alvo.member("name"));
+            }
+            raizes.push((deste, texto(alvo.member("src_path"))));
         }
         let origem = texto(p.member("source"));
         pacotes.insert(
@@ -9170,11 +9801,18 @@ fn dependencias_fora(metadata: &str, raiz: &Path) -> (Vec<String>, Vec<String>) 
                 origem,
                 manifesto,
                 tipos,
+                alvos: raizes,
+                features: p.member("features"),
+                biblioteca,
             },
         );
     }
     let resolve = m.member("resolve");
     let mut deps: std::collections::BTreeMap<&str, Vec<&str>> = std::collections::BTreeMap::new();
+    // E o nome com que cada nó alcança cada dependência: o da biblioteca
+    // dela, ou o novo de uma renomeada.
+    let mut nomes_das_deps: std::collections::BTreeMap<&str, Vec<(Option<&str>, &str)>> =
+        std::collections::BTreeMap::new();
     let nos = resolve.and_then(|r| r.member("nodes"));
     for k in 0.. {
         let Some(no) = nos.and_then(|l| l.item(k)) else {
@@ -9185,15 +9823,18 @@ fn dependencias_fora(metadata: &str, raiz: &Path) -> (Vec<String>, Vec<String>) 
         };
         let de_no = no.member("deps");
         let mut ids = Vec::new();
+        let mut nomeadas = Vec::new();
         for d in 0.. {
             let Some(dep) = de_no.and_then(|l| l.item(d)) else {
                 break;
             };
             if let Some(pkg) = texto(dep.member("pkg")) {
                 ids.push(pkg);
+                nomeadas.push((texto(dep.member("name")), pkg));
             }
         }
         deps.insert(id, ids);
+        nomes_das_deps.insert(id, nomeadas);
     }
     let Some(kernel) = texto(resolve.and_then(|r| r.member("root"))).and_then(|r| pacotes.get(r))
     else {
@@ -9232,6 +9873,59 @@ fn dependencias_fora(metadata: &str, raiz: &Path) -> (Vec<String>, Vec<String>) 
              `build.rs` roda antes da compilação e lhe passa código e opções, fora do que as \
              guardas leem",
             kernel.tipos
+        ));
+    }
+    // Desde o lote A9, e com a raiz em `kernel/src/main.rs`: um `[[bin]]
+    // path` a leva para um arquivo que nenhuma guarda lê, e as do `main.rs`
+    // passam a ler um que não compila mais (o A4 do adversário do lote A8).
+    let raiz_do_binario = format!("{raiz_texto}/{RAIZ_DO_KERNEL}");
+    for (tipos, raiz_do_alvo) in &kernel.alvos {
+        let raiz_do_alvo = raiz_do_alvo.map(|r| r.replace('\\', "/"));
+        if *tipos == ["bin"] && raiz_do_alvo.as_deref() != Some(raiz_do_binario.as_str()) {
+            fora.push(format!(
+                "kernel/Cargo.toml: a raiz do binário do kernel é `{}`, e não `{RAIZ_DO_KERNEL}`: \
+                 um `[[bin]] path` leva a raiz do crate para um arquivo que as guardas não leem, \
+                 e as do `main.rs` — os recursos, o trinco, a ordem do boot, a suíte — passariam \
+                 a ler um que não compila",
+                raiz_do_alvo.as_deref().unwrap_or("(o cargo não a diz)")
+            ));
+        }
+    }
+    // E as features, as da lista, sem uma padrão — ver [`FEATURES_DO_KERNEL`].
+    let mut lidas: Vec<(String, Vec<String>)> = Vec::new();
+    if let Some(features) = kernel.features {
+        let mut nomes = Vec::new();
+        features.para_cada_chave(|n| nomes.push(n));
+        for nome in nomes {
+            let mut liga = Vec::new();
+            let valor = features.member(nome);
+            for k in 0.. {
+                let Some(v) = valor.and_then(|l| l.item(k)) else {
+                    break;
+                };
+                liga.push(v.as_str().unwrap_or("?").to_string());
+            }
+            liga.sort();
+            lidas.push((nome.to_string(), liga));
+        }
+    }
+    lidas.sort();
+    let mut da_lista: Vec<(String, Vec<String>)> = FEATURES_DO_KERNEL
+        .iter()
+        .map(|(nome, liga)| {
+            let mut liga: Vec<String> = liga.iter().map(|l| (*l).to_string()).collect();
+            liga.sort();
+            ((*nome).to_string(), liga)
+        })
+        .collect();
+    da_lista.sort();
+    if lidas != da_lista {
+        fora.push(format!(
+            "kernel/Cargo.toml: as features do kernel são {lidas:?}, e não as da lista do `xtask` \
+             ({FEATURES_DO_KERNEL:?}): uma feature padrão (`default`) vai a todo build — o \
+             `quedas`, que lê o plano das quedas do fim da partição de estado, também ao de \
+             produção —, e uma nova, ou uma que ligue outra coisa, muda o que o kernel compila \
+             sem passar pelo `xtask`. Uma nova muda a lista, e a mudança é revisada"
         ));
     }
     let raiz_do_grafo = texto(resolve.and_then(|r| r.member("root"))).unwrap_or("");
@@ -9279,6 +9973,27 @@ fn dependencias_fora(metadata: &str, raiz: &Path) -> (Vec<String>, Vec<String>) 
             ));
         }
     }
+    // Desde o lote A9, cada direta pelo nome da biblioteca dela: uma
+    // renomeada — `core = { package = "x", … }` — põe outro pacote no lugar
+    // do `core` ou do `alloc` que as macros da lista chamam, e o código diz
+    // um nome que a lista não tem (ver [`PACOTES_DAS_MACROS_DA_CARGA`]). O
+    // cargo escreve o nome com `_` no lugar do `-`.
+    for (nome, pkg) in nomes_das_deps.get(raiz_do_grafo).into_iter().flatten() {
+        let Some(p) = pacotes.get(pkg) else {
+            continue;
+        };
+        let da_biblioteca = p.biblioteca.unwrap_or(p.nome).replace('-', "_");
+        if nome.map(|n| n.replace('-', "_")).as_deref() != Some(da_biblioteca.as_str()) {
+            fora.push(format!(
+                "kernel/Cargo.toml: a dependência `{}` entra no kernel com o nome `{}`, e não \
+                 com o da biblioteca dela, `{da_biblioteca}`: uma dependência renomeada — `core = \
+                 {{ package = … }}` — troca o pacote que o `::core::` e o `alloc::` das macros da \
+                 lista alcançam, e o código diz um nome que a lista do `xtask` não tem",
+                p.nome,
+                nome.unwrap_or("(o cargo não o diz)")
+            ));
+        }
+    }
     // O grafo, a partir do kernel.
     let mut vistos = std::collections::BTreeSet::new();
     let mut pilha = vec![raiz_do_grafo];
@@ -9317,6 +10032,25 @@ fn dependencias_fora(metadata: &str, raiz: &Path) -> (Vec<String>, Vec<String>) 
                          kernel depende roda na compilação dele, fora do que as guardas leem",
                         p.nome, p.tipos
                     ));
+                }
+                // Desde o lote A9, a biblioteca dentro do `src/` dele, que
+                // [`pacotes_do_repositorio_fora`] lê: um `[lib] path` a
+                // levaria para fora (o A4 do adversário do lote A8).
+                let src = format!("{raiz_texto}/{pasta}/src/");
+                for (tipos, raiz_do_alvo) in &p.alvos {
+                    let raiz_do_alvo = raiz_do_alvo.map(|r| r.replace('\\', "/"));
+                    if tipos.iter().any(|t| *t == "lib" || t.ends_with("lib"))
+                        && !raiz_do_alvo.as_deref().is_some_and(|r| r.starts_with(&src))
+                    {
+                        fora.push(format!(
+                            "kernel/Cargo.toml: a biblioteca do pacote do repositório `{}` está \
+                             em `{}`, fora de `{pasta}/src/`, que as guardas dos pacotes do \
+                             repositório leem: um `[lib] path` a leva para um arquivo que \
+                             nenhuma lê",
+                            p.nome,
+                            raiz_do_alvo.as_deref().unwrap_or("(o cargo não a diz)")
+                        ));
+                    }
                 }
                 pastas.push(pasta);
             }
@@ -9483,10 +10217,13 @@ fn conferir_as_dependencias_do_kernel() -> Result<ExitCode, String> {
     if fora.is_empty() {
         println!(
             "[xtask] as dependências do kernel, pelo grafo do cargo: as diretas, só as {} da \
-             lista, cada uma da origem dela, e nenhuma de macros procedurais; no grafo, só os \
+             lista, cada uma da origem dela e pelo nome da biblioteca dela, sem renomear, e \
+             nenhuma de macros procedurais; no grafo, só os \
              pacotes de macros procedurais da lista ({}), cada um com quem o usa, e só pacotes \
-             do crates.io e do repositório; o kernel sem `build.rs`; e os pacotes do repositório \
-             sem `build.rs`, sem macro exportada, sem recurso instável e sem trazer outro arquivo",
+             do crates.io e do repositório; o kernel sem `build.rs`, com a raiz em \
+             `kernel/src/main.rs` e só as features da lista, sem uma padrão; e os pacotes do \
+             repositório sem `build.rs`, com a biblioteca no `src/` deles, sem macro exportada, \
+             sem recurso instável e sem trazer outro arquivo",
             DEPENDENCIAS_DO_KERNEL.len(),
             MACROS_PROCEDURAIS_DO_GRAFO
                 .iter()
@@ -9515,10 +10252,13 @@ fn conferir_os_recursos_do_kernel() -> Result<ExitCode, String> {
              macro 2.0 nem `${{…}}` na suíte — no resto do kernel, é a conferência dos nomes \
              protegidos —; nenhum atributo de crate pela linha de comando no config do cargo, \
              no `xtask` nem na CI; e o config do cargo do kernel, como o cargo o lê: os \
-             rustflags de cada alvo, os da lista, sem ligador, sem `build.rustflags`, \
-             `[unstable]`, `[env]` nem rustflags de perfil, sem o config sem a extensão, e o \
-             `Cargo.toml` do kernel sem `cargo-features`, `rustflags` nem escape; e nenhum \
-             `RUSTFLAGS` nem `CARGO_UNSTABLE_` na CI",
+             rustflags de cada alvo, os da lista, e nenhuma outra tabela `target` — nem a de um \
+             `cfg(…)`, nem a do hospedeiro —, sem ligador, sem `build.rustflags`, `[unstable]`, \
+             `[env]`, `[source]`, `[patch]`, `[host]` nem `[profile]`, sem o config sem a \
+             extensão, e o `Cargo.toml` do kernel sem `cargo-features`, `rustflags` nem escape; \
+             nenhum `RUSTFLAGS` na CI, e só as variáveis do cargo da lista; e o `xtask` só põe \
+             no ambiente dos filhos o da lista, sem `--config`, `-Z`, `cargo rustc` nem `cargo \
+             rustdoc`",
             RECURSOS_DO_KERNEL.join(", ")
         );
         Ok(ExitCode::SUCCESS)
@@ -9570,7 +10310,20 @@ fn montadas_por_uma_metavariavel(c: &[char], chave: &[char]) -> Vec<usize> {
 /// argumentos, `(`, `[` ou `{`, com espaços no meio. Para cada uma, onde os
 /// argumentos abrem e onde fecham. A definição de uma macro,
 /// `macro_rules! nome {…}`, não é uma: depois do `!` vem o nome; e o `!`
-/// depois de uma palavra-chave — `if !(…)`, `while !(…)` — é a negação.
+/// depois de uma palavra-chave — `if !(…)`, `while !(…)` — é a negação. O
+/// nome cru de uma palavra-chave — `r#if!(…)` — não é a palavra-chave: é o
+/// nome de uma macro.
+///
+/// # O nome cru, desde o lote A9
+///
+/// O `rustc` aceita uma macro com o nome cru de uma palavra-chave — o
+/// próprio `core` define `macro_rules! r#try` —, e o `r#if` de `r#if!(…)` se
+/// lia como o `if` de `if !(…)`: a invocação não existia para nenhuma guarda
+/// que lê os tokens de uma macro. Um `macro_rules! r#if` no nível do módulo e
+/// um `r#if!(NaoLancou { … })` dentro de `lancar_por` escreviam ali o `impl`
+/// do M1 do lote A7, fora da lista das macros da carga; e o nome protegido,
+/// o trinco do boot e o passo da carga nos argumentos dela passavam também
+/// (o A1 do adversário do lote A8).
 fn invocacoes_de_macro(c: &[char]) -> Vec<(usize, usize)> {
     const NEGAM: [&str; 7] = ["if", "while", "match", "return", "in", "break", "else"];
     let de_nome = |x: char| x.is_alphanumeric() || x == '_';
@@ -9588,7 +10341,8 @@ fn invocacoes_de_macro(c: &[char]) -> Vec<(usize, usize)> {
             comeco_do_nome -= 1;
         }
         let nome: String = c[comeco_do_nome..fim_do_nome].iter().collect();
-        if nome.is_empty() || NEGAM.contains(&nome.as_str()) {
+        let cru = comeco_do_nome >= 2 && c[comeco_do_nome - 2..comeco_do_nome] == ['r', '#'];
+        if nome.is_empty() || (!cru && NEGAM.contains(&nome.as_str())) {
             continue;
         }
         let mut abre = k + 1;
@@ -12117,13 +12871,15 @@ mod testes_dos_nomes_protegidos {
     }
 
     /// A saída de um `cargo metadata` com o `grafo` — o primeiro pacote é o
-    /// kernel —, o projeto em `raiz`: os pacotes, com a origem, o manifesto e
-    /// um alvo por tipo; e o `resolve`, com a raiz e as dependências de cada
-    /// um.
+    /// kernel —, o projeto em `raiz`: os pacotes, com a origem, o manifesto,
+    /// um alvo por tipo, com a raiz de cada um onde o cargo a poria — o
+    /// `src/main.rs`, o `build.rs`, o `src/lib.rs` —, e as features — as da
+    /// lista no kernel, nenhuma nos outros; e o `resolve`, com a raiz e as
+    /// dependências de cada um.
     fn metadata_de_mentira(raiz: &str, grafo: &[PacoteDeMentira]) -> String {
         let mut pacotes = Vec::new();
         let mut nos = Vec::new();
-        for (nome, origem, tipos, deps) in grafo {
+        for (i, (nome, origem, tipos, deps)) in grafo.iter().enumerate() {
             let (fonte, manifesto) =
                 if origem.starts_with("registry+") || origem.starts_with("git+") {
                     (
@@ -12135,13 +12891,28 @@ mod testes_dos_nomes_protegidos {
                 } else {
                     (String::from("null"), format!("{raiz}/{origem}/Cargo.toml"))
                 };
+            let pasta = manifesto.strip_suffix("/Cargo.toml").unwrap();
             let alvos: Vec<String> = tipos
                 .iter()
-                .map(|t| format!("{{\"kind\":[\"{t}\"],\"name\":\"{nome}\"}}"))
+                .map(|t| {
+                    let raiz_do_alvo = match t.as_str() {
+                        "bin" => format!("{pasta}/src/main.rs"),
+                        "custom-build" => format!("{pasta}/build.rs"),
+                        _ => format!("{pasta}/src/lib.rs"),
+                    };
+                    format!(
+                        "{{\"kind\":[\"{t}\"],\"name\":\"{nome}\",\"src_path\":\"{raiz_do_alvo}\"}}"
+                    )
+                })
                 .collect();
+            let features = if i == 0 {
+                features_de_mentira(&super::FEATURES_DO_KERNEL)
+            } else {
+                String::from("{}")
+            };
             pacotes.push(format!(
                 "{{\"name\":\"{nome}\",\"id\":\"id:{nome}\",\"source\":{fonte},\
-                 \"manifest_path\":\"{manifesto}\",\"targets\":[{}]}}",
+                 \"manifest_path\":\"{manifesto}\",\"targets\":[{}],\"features\":{features}}}",
                 alvos.join(",")
             ));
             let ds: Vec<String> = deps
@@ -12159,6 +12930,19 @@ mod testes_dos_nomes_protegidos {
             nos.join(","),
             grafo[0].0
         )
+    }
+
+    /// As features de um pacote, como o `cargo metadata` as escreve: o nome
+    /// e o que cada uma liga.
+    fn features_de_mentira(features: &[(&str, &[&str])]) -> String {
+        let itens: Vec<String> = features
+            .iter()
+            .map(|(nome, liga)| {
+                let liga: Vec<String> = liga.iter().map(|l| format!("\"{l}\"")).collect();
+                format!("\"{nome}\":[{}]", liga.join(","))
+            })
+            .collect();
+        format!("{{{}}}", itens.join(","))
     }
 
     /// As dependências do kernel pelo grafo do cargo (o D1 do adversário do
@@ -12295,6 +13079,126 @@ mod testes_dos_nomes_protegidos {
         );
     }
 
+    /// A raiz do binário do kernel, a da biblioteca de cada pacote do
+    /// repositório e as features do kernel, pelo grafo (os A4 e B2 do
+    /// adversário do lote A8, no lote A9): o grafo de hoje passa, também com
+    /// o nome de uma dependência com `_`, como o cargo o escreve; o binário
+    /// com a raiz fora do `kernel/src/main.rs` — um `[[bin]] path` —, ou sem a
+    /// raiz no grafo, a biblioteca de um pacote do repositório fora do `src/`
+    /// dele, as features — uma padrão, uma nova, uma da lista que liga outra
+    /// coisa, uma que sumiu — e a dependência renomeada para `core` reprovam,
+    /// cada uma com a mensagem dela.
+    #[test]
+    fn a_raiz_e_as_features_do_kernel_pelo_grafo() {
+        let raiz = std::path::Path::new("/projeto");
+        let hoje = metadata_de_mentira("/projeto", &grafo_de_hoje());
+        assert_eq!(
+            super::dependencias_fora(&hoje, raiz).0,
+            Vec::<String>::new()
+        );
+        let com_traco = "{\"name\":\"tock-registers\",\"pkg\"";
+        assert_eq!(hoje.matches(com_traco).count(), 1);
+        assert_eq!(
+            super::dependencias_fora(
+                &hoje.replacen(com_traco, "{\"name\":\"tock_registers\",\"pkg\"", 1),
+                raiz
+            )
+            .0,
+            Vec::<String>::new()
+        );
+        let do_kernel = ",\"src_path\":\"/projeto/kernel/src/main.rs\"";
+        let do_diario = "\"src_path\":\"/projeto/diario/src/lib.rs\"";
+        let da_lista = format!(
+            "\"features\":{}",
+            features_de_mentira(&super::FEATURES_DO_KERNEL)
+        );
+        fn features(lista: &[(&str, &[&str])]) -> String {
+            format!("\"features\":{}", features_de_mentira(lista))
+        }
+        let casos: [(&str, &str, String, &str); 8] = [
+            (
+                "o bin path",
+                do_kernel,
+                String::from(",\"src_path\":\"/projeto/kernel/src/main.inc\""),
+                "a raiz do binário do kernel é `/projeto/kernel/src/main.inc`, e não \
+                 `kernel/src/main.rs`",
+            ),
+            (
+                "a raiz que o grafo não diz",
+                do_kernel,
+                String::new(),
+                "a raiz do binário do kernel é `(o cargo não a diz)`",
+            ),
+            (
+                "o lib path",
+                do_diario,
+                String::from("\"src_path\":\"/projeto/diario/fonte/lib.rs\""),
+                "a biblioteca do pacote do repositório `diario` está em \
+                 `/projeto/diario/fonte/lib.rs`, fora de `diario/src/`",
+            ),
+            (
+                "a feature padrão",
+                da_lista.as_str(),
+                features(&[
+                    ("default", &[super::persistencia::FEATURE_DE_QUEDAS]),
+                    ("modo-teste", &["protocolo/arrays", "hora/servidor"]),
+                    (super::persistencia::FEATURE_DE_QUEDAS, &[]),
+                ]),
+                "as features do kernel são [(\"default\", [\"quedas\"])",
+            ),
+            (
+                "uma feature nova",
+                da_lista.as_str(),
+                features(&[
+                    ("modo-teste", &["protocolo/arrays", "hora/servidor"]),
+                    ("perfilar", &[]),
+                    (super::persistencia::FEATURE_DE_QUEDAS, &[]),
+                ]),
+                "(\"perfilar\", [])",
+            ),
+            (
+                "a feature que liga outra coisa",
+                da_lista.as_str(),
+                features(&[
+                    (
+                        "modo-teste",
+                        &[
+                            "protocolo/arrays",
+                            "hora/servidor",
+                            super::persistencia::FEATURE_DE_QUEDAS,
+                        ],
+                    ),
+                    (super::persistencia::FEATURE_DE_QUEDAS, &[]),
+                ]),
+                "(\"modo-teste\", [\"hora/servidor\", \"protocolo/arrays\", \"quedas\"])",
+            ),
+            (
+                "a feature que sumiu",
+                da_lista.as_str(),
+                features(&[("modo-teste", &["protocolo/arrays", "hora/servidor"])]),
+                "e não as da lista do `xtask`",
+            ),
+            (
+                "a dependência renomeada",
+                "{\"name\":\"protocolo\",\"pkg\":\"id:protocolo\"}",
+                String::from("{\"name\":\"core\",\"pkg\":\"id:protocolo\"}"),
+                "a dependência `protocolo` entra no kernel com o nome `core`, e não com o da \
+                 biblioteca dela, `protocolo`",
+            ),
+        ];
+        for (rotulo, velho, novo, esperado) in casos {
+            assert_eq!(hoje.matches(velho).count(), 1, "{rotulo}");
+            let metadata = hoje.replacen(velho, &novo, 1);
+            let (achados, _) = super::dependencias_fora(&metadata, raiz);
+            assert!(
+                achados.len() == 1
+                    && achados[0].starts_with("kernel/Cargo.toml: ")
+                    && achados[0].contains(esperado),
+                "{rotulo}: {achados:?}"
+            );
+        }
+    }
+
     /// Os pacotes do repositório de que o kernel depende (no lote A8): um
     /// `#[macro_export]`, um recurso instável e o que traz outro arquivo — o
     /// `use core::include as …` que o kernel invocaria pelo nome do pacote —
@@ -12373,7 +13277,11 @@ mod testes_dos_nomes_protegidos {
     /// os rustflags de um `cfg(…)`, o ligador de um alvo, o `[unstable]`, o
     /// `[env]` e os rustflags de um perfil —, e o config sem a extensão, igual
     /// ao `config.toml`, só por existir. Os alvos da lista são os do
-    /// `xtask`.
+    /// `xtask`. E, desde o lote A9 (os A6 e A7 do adversário do lote A8, e o
+    /// item 3 do revisor), a tabela `target` fechada — o ligador do
+    /// hospedeiro e o de um `cfg(…)`, também no config da raiz, que o cargo lê
+    /// de dentro de `kernel/` —, a `[source]`, a `[patch]`, a `[host]` e o
+    /// perfil inteiro, também sem rustflags.
     #[test]
     fn o_config_efetivo_do_kernel() {
         assert_eq!(
@@ -12391,13 +13299,52 @@ mod testes_dos_nomes_protegidos {
         let config = ler_do_projeto("kernel/.cargo/config.toml");
         let x86 = "[target.x86_64-unknown-none]\n";
         assert_eq!(config.matches(x86).count(), 1);
-        let casos: [(&str, String, &[&str]); 5] = [
+        const SO_OS_DOIS: &str =
+            "a tabela `target` do config do kernel só tem as dos dois alvos dele";
+        let casos: Vec<(&str, String, &[&str])> = vec![
             (
                 "o cfg",
                 format!(
                     "{config}\n[target.'cfg(target_os = \"none\")']\nrustflags = [\"--cfg\", \"x\"]\n"
                 ),
-                &[".rustflags`: os rustflags de um `cfg(…)`"],
+                &["`target.'cfg(target_os = \"none\")'` = {\"rustflags\":[\"--cfg\",\"x\"]}"],
+            ),
+            (
+                "o ligador do hospedeiro",
+                format!(
+                    "{config}\n[target.x86_64-unknown-linux-gnu]\nlinker = \"ferramentas/ligar\"\n"
+                ),
+                &[SO_OS_DOIS],
+            ),
+            (
+                "o ligador de um cfg",
+                format!(
+                    "{config}\n[target.'cfg(target_os = \"none\")']\nlinker = \"ferramentas/ligar\"\n"
+                ),
+                &["`target.'cfg(target_os = \"none\")'` = {\"linker\":\"ferramentas/ligar\"}"],
+            ),
+            (
+                "o source",
+                format!(
+                    "{config}\n[source.crates-io]\nreplace-with = \"vendorizado\"\n\n\
+                     [source.vendorizado]\ndirectory = \"../vendor\"\n"
+                ),
+                &["`source` = {\"crates-io\":{\"replace-with\":\"vendorizado\"}"],
+            ),
+            (
+                "o patch",
+                format!("{config}\n[patch.crates-io]\nspin = {{ path = \"../spin\" }}\n"),
+                &["`patch` = {\"crates-io\""],
+            ),
+            (
+                "o host",
+                format!("{config}\n[host]\nlinker = \"ferramentas/ligar\"\n"),
+                &["`host` = {\"linker\":\"ferramentas/ligar\"}"],
+            ),
+            (
+                "o perfil sem rustflags",
+                format!("{config}\n[profile.release]\noverflow-checks = false\n"),
+                &["`profile` = {\"release\":{\"overflow-checks\":false}}"],
             ),
             (
                 "o ligador",
@@ -12420,7 +13367,7 @@ mod testes_dos_nomes_protegidos {
             (
                 "o perfil",
                 format!("{config}\n[profile.dev]\nrustflags = [\"-Zx\"]\n"),
-                &["`rustflags` num perfil"],
+                &["`profile` = {\"dev\":{\"rustflags\":[\"-Zx\"]}}"],
             ),
         ];
         for (rotulo, texto, esperados) in casos {
@@ -12506,7 +13453,7 @@ mod testes_dos_nomes_protegidos {
                   run: CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS=-Zz cargo xtask build\n\
                   run: echo \"CARGO_ENCODED_RUSTFLAGS=x\" >> \"$GITHUB_ENV\"\n\
                   run: CARGO_UNSTABLE_BUILD_STD=core cargo xtask build\n";
-        let achados = super::rustflags_na_ci(".github/workflows/ci.yml", ci);
+        let achados = super::variaveis_do_cargo_na_ci(".github/workflows/ci.yml", ci);
         let linhas: Vec<&str> = achados
             .iter()
             .map(|a| a.split(": ").next().unwrap())
@@ -12543,13 +13490,14 @@ mod testes_dos_nomes_protegidos {
     /// comentário ou num texto, a regra não vale. E o nome de cada uma
     /// continua sendo o dela: o `macro_rules!` com o nome de uma, também
     /// cru, ou com o nome montado, o `as` que dá a outro item o nome de uma
-    /// ou o do `alloc`, o `mod alloc`, o `use` que traz de fora um `alloc` ou
+    /// ou o do `alloc` — e, desde o lote A9, o do `core`, também num `extern
+    /// crate` —, o `mod alloc`, o `use` que traz de fora um `alloc` ou
     /// um `assert` — o último pedaço, num grupo, cru, ou o `self` de um
     /// grupo —, o `use` montado por uma macro e o `#[macro_use]` reprovam em
     /// qualquer arquivo, na linha deles — o `log.rs`, que define os três
     /// registros, não; nem um `as` de outro nome, o `use` que só passa pelo
-    /// `alloc`, o `self as`, o `extern crate alloc` e o `use<…>` de um `impl
-    /// Trait`.
+    /// `alloc` ou pelo `core`, o `self as`, o `extern crate alloc` e o
+    /// `use<…>` de um `impl Trait`.
     #[test]
     fn as_macros_das_funcoes_da_carga_so_as_da_lista() {
         let arquivo = super::ARQUIVO_DO_LANCAMENTO;
@@ -12653,6 +13601,13 @@ mod testes_dos_nomes_protegidos {
                 "use crate::metodos as assert;\nextern crate core as alloc;\nmod r#alloc {}\n",
                 &[1, 2, 3],
             ),
+            // O `core` do `::core::format_args!` dos registros do log, desde o
+            // lote A9: na raiz, o `extern crate … as core;` troca o pacote.
+            (
+                barra,
+                "extern crate self as core;\nextern crate protocolo as r#core;\nuse crate::x as core;\n",
+                &[1, 2, 3],
+            ),
             (
                 "kernel/src/testes/x.rs",
                 "pub(crate) use crate::m as log_info;\n",
@@ -12693,7 +13648,7 @@ mod testes_dos_nomes_protegidos {
                 String::from(
                     "use alloc::vec::Vec;\nuse alloc::{format, string::String};\n\
                      use dep::alloc::{self as a};\nuse dep::{alloc as b, assert as c};\n\
-                     extern crate alloc;\n\
+                     extern crate alloc;\nuse core::fmt::Write as _;\nlet n = x as core_t;\n\
                      fn f() -> impl Iterator<Item = u8> + use<> { core::iter::empty() }\n\
                      let assertado = 1;\n",
                 ),
@@ -12907,6 +13862,951 @@ mod testes_dos_nomes_protegidos {
             assert_eq!(onde_traz_outro_arquivo(fonte), None, "{fonte}");
         }
     }
+
+    // -----------------------------------------------------------------------
+    // O adversário do lote A8, integrados no lote A9. Cada caso abaixo
+    // reprovava no `7b821da`: a forma passava pelas guardas de texto. Quatro
+    // foram adaptados à guarda que fecha a fonte: o braço novo do `log_warn`
+    // se acusa pelo corpo dos registros (`registros_do_log_fora`); a raiz do
+    // crate e a feature padrão, pelo grafo do cargo, com a raiz de cada alvo e
+    // as features (`dependencias_fora`); o módulo da suíte, pela regra dele
+    // (`modulo_da_suite_fora`); e o ambiente da CI, pela função de nome novo
+    // (`variaveis_do_cargo_na_ci`).
+    // -----------------------------------------------------------------------
+
+    /// `texto` logo no começo do corpo da função de `assinatura`: a fonte e a
+    /// linha dele — como em `as_macros_das_funcoes_da_carga_so_as_da_lista`.
+    fn no_corpo_a8(real: &str, assinatura: &str, texto: &str) -> (String, usize) {
+        let inicio = real.find(assinatura).unwrap();
+        let abre = inicio + real[inicio..].find('{').unwrap() + 1;
+        let fonte = format!("{}\n{texto}{}", &real[..abre], &real[abre..]);
+        (fonte, real[..abre].lines().count() + 1)
+    }
+
+    /// A1: a macro com o nome cru de uma palavra-chave — `r#if!`, `r#match!`,
+    /// `r#while!`, `r#return!`, `r#in!`, `r#break!`, `r#else!` — não é uma
+    /// invocação para `invocacoes_de_macro`, que lê o `if` de `r#if` como a
+    /// negação de `if !(…)`. Nas três funções da carga, a lista fechada
+    /// (`MACROS_DA_CARGA`) não a vê. O `rustc` aceita o nome: o `core` define
+    /// `macro_rules! r#try`.
+    #[test]
+    fn adversario_a8_a1_a_macro_de_nome_cru_de_palavra_chave_na_carga() {
+        let arquivo = super::ARQUIVO_DO_LANCAMENTO;
+        let real = ler_do_projeto(arquivo);
+        let mut cegos = Vec::new();
+        for nome in ["if", "match", "while", "return", "in", "break", "else"] {
+            let texto = format!("    r#{nome}!(NaoLancou {{ fn x() {{}} }});\n");
+            for assinatura in [
+                "fn lancar_por(",
+                "unsafe fn executar(",
+                "fn trocar_a_imagem<'a>(",
+            ] {
+                let (fonte, linha) = no_corpo_a8(&real, assinatura, &texto);
+                let achados: Vec<String> = super::carga_fora_do_lugar(&fonte)
+                    .into_iter()
+                    .filter(|a| a.contains("a macro `"))
+                    .collect();
+                if linhas_de(arquivo, &achados) != [linha] {
+                    cegos.push(format!("r#{nome}! em `{assinatura}`"));
+                }
+            }
+        }
+        assert!(
+            cegos.is_empty(),
+            "a lista das macros da carga nao viu: {cegos:?}"
+        );
+    }
+
+    /// A1: o M1 do adversário do lote A7 de volta, pelo `r#if!` — a macro no
+    /// nível do módulo escreve o `impl NaoLancou { pub(crate) fn sem_gate(…) }`
+    /// dentro de `lancar_por`, com o `hospedar` e a `Carga` de lá, e nenhuma
+    /// guarda do `invariantes` acusa nada.
+    #[test]
+    fn adversario_a8_a1_o_impl_pelo_r_if() {
+        let arquivo = super::ARQUIVO_DO_LANCAMENTO;
+        let real = ler_do_projeto(arquivo);
+        let modulo =
+            "/// O lançamento do `user.run`: o comando em execução neste fio, que o gate\n";
+        let ancora = "    limpar_ultima_saida();\n\n    // O recurso";
+        assert_eq!(real.matches(modulo).count(), 1);
+        assert_eq!(real.matches(ancora).count(), 1);
+        let macro_ = "macro_rules! r#if {\n    ($t:ident { $($corpo:tt)* }) => {\n        \
+                      #[allow(non_local_definitions)]\n        impl $t {\n            \
+                      $($corpo)*\n        }\n    };\n}\n\n";
+        let carga = "    fn carga_sem_gate(imagem: alloc::vec::Vec<u8>) -> u64 {\n        \
+                     let carga = alloc::boxed::Box::new(Carga {\n            \
+                     imagem: alloc::borrow::Cow::Owned(imagem),\n            editor: None,\n            \
+                     desfecho: crate::autorizacao::desfecho_do_lancamento(\"<sem gate>\"),\n        \
+                     });\n        alloc::boxed::Box::into_raw(carga) as u64\n    }\n";
+        let dentro = "    r#if!(NaoLancou {\n        #[allow(dead_code)]\n        pub(crate) fn \
+                      sem_gate(imagem: alloc::vec::Vec<u8>) -> Result<u64, &'static str> {\n            \
+                      crate::fios::criar(\"sem-gate\", hospedar, carga_sem_gate(imagem))\n                \
+                      .map(|id| id.numero())\n        }\n    });\n\n";
+        let com = real
+            .replacen(modulo, &format!("{macro_}{modulo}"), 1)
+            .replacen(ancora, &format!("{carga}{dentro}{ancora}"), 1);
+        let mut achados = super::fio_novo_fora_do_lancamento(&com);
+        achados.extend(super::carga_fora_do_lugar(&com));
+        achados.extend(nomes_protegidos_fora(arquivo, &com).0);
+        achados.extend(carregadores_nos_irmaos(arquivo, &com));
+        achados.extend(super::carregadores_renomeados(arquivo, &com));
+        achados.extend(
+            super::macros_da_carga_redefinidas(arquivo, &com)
+                .into_iter()
+                .map(|(linha, forma)| format!("{linha}: {forma}")),
+        );
+        achados.extend(
+            onde_traz_outro_arquivo(&com).map(|(linha, forma)| format!("{linha}: {forma}")),
+        );
+        assert!(
+            !achados.is_empty(),
+            "o `r#if!` escreveu o `impl` dentro de `lancar_por`, e nada se acusou"
+        );
+    }
+
+    /// A1: o mesmo ponto cego nas outras guardas que leem os tokens de uma
+    /// macro por `invocacoes_de_macro` — o nome protegido nos argumentos de
+    /// uma macro, no dono (o B3 do adversário do lote A5); o trinco do boot
+    /// nos argumentos de uma macro, que o poderia jogar fora (o achado 3 do
+    /// adversário do delta do lote A3); e o passo da carga que é método nos
+    /// tokens de uma macro, fora do lugar. O controle, com `m!`, se acusa.
+    #[test]
+    fn adversario_a8_a1_os_tokens_de_uma_macro_de_nome_cru() {
+        let arquivo = super::ARQUIVO_DO_LANCAMENTO;
+        let real = ler_do_projeto(arquivo);
+        let nos_argumentos = |invocacao: &str| {
+            let com = format!(
+                "{real}\n{invocacao}!(crate::autorizacao::desfecho_do_lancamento(\"x\"));\n"
+            );
+            nomes_protegidos_fora(arquivo, &com)
+                .0
+                .iter()
+                .any(|a| a.contains("nos argumentos de uma macro"))
+        };
+        assert!(nos_argumentos("guardar"), "o controle nao se acusou");
+        let main = ler_do_projeto("kernel/src/main.rs");
+        let tres = "        usuario::lancar_o_servidor_de_janelas();\n        \
+                    usuario::lancar_o_terminal();\n        \
+                    crate::autorizacao::fechar_os_lancamentos_do_kernel();\n";
+        assert_eq!(main.matches(tres).count(), 1);
+        let embrulhado = |invocacao: &str| {
+            let com = main.replacen(
+                tres,
+                &format!(
+                    "        {invocacao}!(\n            usuario::lancar_o_servidor_de_janelas();\n            \
+                     usuario::lancar_o_terminal();\n            \
+                     crate::autorizacao::fechar_os_lancamentos_do_kernel();\n        );\n"
+                ),
+                1,
+            );
+            !trinco_fora_de_ordem(&com).is_empty()
+        };
+        assert!(embrulhado("m"), "o controle do trinco nao se acusou");
+        let metodo = |invocacao: &str| {
+            let com = format!("{real}\nfn y(p: P) {{\n    {invocacao}!(p, trocar);\n}}\n");
+            !super::carga_fora_do_lugar(&com).is_empty()
+        };
+        assert!(metodo("chamar"), "o controle do metodo nao se acusou");
+        let mut cegos = Vec::new();
+        if !nos_argumentos("r#if") {
+            cegos.push("o nome protegido nos argumentos de `r#if!`, no dono");
+        }
+        if !embrulhado("r#if") {
+            cegos.push("o trinco do boot nos argumentos de `r#if!`");
+        }
+        if !metodo("r#if") {
+            cegos.push("o `trocar` nos tokens de `r#if!`, fora de `trocar_a_imagem`");
+        }
+        assert!(cegos.is_empty(), "nada se acusou: {cegos:?}");
+    }
+
+    /// A2: a lista das macros da carga confia no que elas expandem, e a
+    /// expansão não está fechada. Os três registros do log invocam o
+    /// `format_args!` pelo nome, sem caminho, e o nome se resolve onde o
+    /// registro é invocado (a higiene do `macro_rules!`): um `macro_rules!
+    /// format_args`, um `use … as format_args` ou um `use dep::format_args`
+    /// no arquivo da carga trocam o que o `crate::log_warn!` de dentro de
+    /// `lancar_por` escreve. E o corpo das três, no `log.rs`, não se confere:
+    /// um braço novo do `log_warn` escreve um `impl` com o caminho da lista.
+    #[test]
+    fn adversario_a8_a2_o_que_as_macros_da_lista_expandem() {
+        let barra = "kernel/src/barra.rs";
+        let mut cegos = Vec::new();
+        for fonte in [
+            "macro_rules! format_args {\n    ($($t:tt)*) => {};\n}\n",
+            "use crate::metodos as format_args;\n",
+            "use dep::format_args;\n",
+        ] {
+            if super::macros_da_carga_redefinidas(barra, fonte).is_empty() {
+                cegos.push(fonte.to_string());
+            }
+        }
+        let log = ler_do_projeto("kernel/src/log.rs");
+        let cabeca = "macro_rules! log_warn {\n";
+        assert_eq!(log.matches(cabeca).count(), 1);
+        let braco = "    (@metodos $t:ident { $($c:tt)* }) => {\n        \
+                     #[allow(non_local_definitions)]\n        impl $t {\n            \
+                     $($c)*\n        }\n    };\n";
+        let com = log.replacen(cabeca, &format!("{cabeca}{braco}"), 1);
+        let mut achados: Vec<String> =
+            super::macros_da_carga_redefinidas("kernel/src/log.rs", &com)
+                .into_iter()
+                .map(|(linha, forma)| format!("{linha}: {forma}"))
+                .collect();
+        achados.extend(nomes_protegidos_fora("kernel/src/log.rs", &com).0);
+        achados.extend(super::carregadores_nas_macros_de_fora(
+            "kernel/src/log.rs",
+            &com,
+        ));
+        // Adaptado no lote A9: a guarda do corpo dos registros.
+        achados.extend(super::registros_do_log_fora(&com));
+        if achados.is_empty() {
+            cegos.push(String::from(
+                "o braco novo do `log_warn` que escreve um `impl`",
+            ));
+        }
+        assert!(cegos.is_empty(), "nada se acusou: {cegos:?}");
+    }
+
+    /// A2: o M1 do adversário do lote A7 de volta sem macro nova dentro de
+    /// `lancar_por`: o `crate::log_warn!` de verdade dele, com os argumentos
+    /// `recurso, motivo`, chama o `format_args!` do módulo, que escreve o
+    /// `impl NaoLancou { pub(crate) fn sem_gate(…) }` num bloco dentro dos
+    /// argumentos. Os outros registros caem no segundo braço, que é o
+    /// `core::format_args!`.
+    #[test]
+    fn adversario_a8_a2_o_impl_pelo_format_args_do_log() {
+        let arquivo = super::ARQUIVO_DO_LANCAMENTO;
+        let real = ler_do_projeto(arquivo);
+        let modulo =
+            "/// O lançamento do `user.run`: o comando em execução neste fio, que o gate\n";
+        let ancora = "    limpar_ultima_saida();\n\n    // O recurso";
+        assert_eq!(real.matches(modulo).count(), 1);
+        assert_eq!(real.matches(ancora).count(), 1);
+        let macro_ = "macro_rules! format_args {\n    ($f:expr, $r:ident, $m:ident) => {\n        \
+                      core::format_args!($f, $r, {\n            \
+                      #[allow(non_local_definitions)]\n            impl NaoLancou {\n                \
+                      #[allow(dead_code)]\n                pub(crate) fn sem_gate(\n                    \
+                      imagem: alloc::vec::Vec<u8>,\n                ) -> Result<u64, &'static str> {\n                    \
+                      crate::fios::criar(\"sem-gate\", hospedar, carga_sem_gate(imagem))\n                        \
+                      .map(|id| id.numero())\n                }\n            }\n            \
+                      $m\n        })\n    };\n    ($($t:tt)*) => {\n        \
+                      core::format_args!($($t)*)\n    };\n}\n\n";
+        let carga = "    fn carga_sem_gate(imagem: alloc::vec::Vec<u8>) -> u64 {\n        \
+                     let carga = alloc::boxed::Box::new(Carga {\n            \
+                     imagem: alloc::borrow::Cow::Owned(imagem),\n            editor: None,\n            \
+                     desfecho: crate::autorizacao::desfecho_do_lancamento(\"<sem gate>\"),\n        \
+                     });\n        alloc::boxed::Box::into_raw(carga) as u64\n    }\n\n";
+        let com = real
+            .replacen(modulo, &format!("{macro_}{modulo}"), 1)
+            .replacen(ancora, &format!("{carga}{ancora}"), 1);
+        let mut achados = super::fio_novo_fora_do_lancamento(&com);
+        achados.extend(super::carga_fora_do_lugar(&com));
+        achados.extend(nomes_protegidos_fora(arquivo, &com).0);
+        achados.extend(super::carregadores_renomeados(arquivo, &com));
+        achados.extend(
+            super::macros_da_carga_redefinidas(arquivo, &com)
+                .into_iter()
+                .map(|(linha, forma)| format!("{linha}: {forma}")),
+        );
+        achados.extend(
+            onde_traz_outro_arquivo(&com).map(|(linha, forma)| format!("{linha}: {forma}")),
+        );
+        assert!(
+            !achados.is_empty(),
+            "o `format_args!` do modulo escreveu o `impl` dentro de `lancar_por`, pelo \
+             `crate::log_warn!` da lista, e nada se acusou"
+        );
+    }
+
+    /// A3: o `#[path]` montado por uma macro com o `#` longe do `[`. O
+    /// `#$a`, com `$a` = `[path = "neto.inc"]`, e o `$h[…]`, com `$h` = `#`,
+    /// são um atributo para o `rustc` — o fragmento `tt` é transparente —, e
+    /// a guarda só lê o atributo que começa em `#[`: o `$` do lote A8 fica
+    /// fora dos colchetes que ela vê. O P1 do adversário do lote A7 de volta:
+    /// o `neto.inc` não é `.rs`, e nenhuma guarda o lê.
+    #[test]
+    fn adversario_a8_a3_o_path_montado_com_o_cerquilha_longe_do_colchete() {
+        let mut cegos = Vec::new();
+        for fonte in [
+            "macro_rules! com_atributo {\n    ($a:tt) => {\n        #$a\n        mod neto;\n    };\n}\n\
+             com_atributo!([path = \"neto.inc\"]);\n",
+            "macro_rules! com_atributo {\n    ($h:tt) => {\n        $h[path = \"neto.inc\"]\n        mod \
+             neto;\n    };\n}\ncom_atributo!(#);\n",
+        ] {
+            if !fonte_traz_outro_arquivo(fonte) {
+                cegos.push(fonte);
+            }
+        }
+        assert!(cegos.is_empty(), "nada se acusou: {cegos:?}");
+    }
+
+    /// A4: o `[[bin]] path` do `kernel/Cargo.toml` leva a raiz do crate para
+    /// fora do que as guardas leem — `kernel/src/main.inc`, que não é `.rs`:
+    /// nenhuma guarda o lê, nem a árvore do README, e as do `main.rs` (os
+    /// recursos, o trinco, a ordem do boot, a fase) leem o arquivo que não
+    /// compila mais. E o `[lib] path` de um pacote do repositório, o mesmo
+    /// com o `src/` que `pacotes_do_repositorio_fora` lê.
+    #[test]
+    fn adversario_a8_a4_a_raiz_do_crate_fora_do_que_se_le() {
+        let mut cegos = Vec::new();
+        let real = ler_do_projeto("kernel/Cargo.toml");
+        let manifesto = format!("{real}\n[[bin]]\nname = \"duke\"\npath = \"src/main.inc\"\n");
+        let raiz = "/projeto";
+        // Adaptado no lote A9: o grafo de mentira já dá a raiz de cada alvo.
+        let kernel =
+            "{\"kind\":[\"bin\"],\"name\":\"duke\",\"src_path\":\"/projeto/kernel/src/main.rs\"}";
+        let metadata = metadata_de_mentira(raiz, &grafo_de_hoje());
+        assert_eq!(metadata.matches(kernel).count(), 1);
+        let metadata = metadata.replacen(
+            kernel,
+            "{\"kind\":[\"bin\"],\"name\":\"duke\",\"src_path\":\"/projeto/kernel/src/main.inc\"}",
+            1,
+        );
+        if super::manifesto_do_kernel_fora(&manifesto).is_empty()
+            && super::dependencias_fora(&metadata, std::path::Path::new(raiz))
+                .0
+                .is_empty()
+        {
+            cegos.push("o `[[bin]] path` do kernel");
+        }
+        let raiz = std::env::temp_dir().join(format!("xtask-a8-lib-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&raiz);
+        for (_, pasta) in super::DEPENDENCIAS_DO_KERNEL
+            .iter()
+            .filter(|(_, origem)| *origem != super::DO_CRATES_IO)
+        {
+            std::fs::create_dir_all(raiz.join(pasta).join("src")).unwrap();
+        }
+        std::fs::create_dir_all(raiz.join("diario/fonte")).unwrap();
+        std::fs::write(
+            raiz.join("diario/fonte/lib.rs"),
+            "#[macro_export]\nmacro_rules! passos {\n    () => {};\n}\n",
+        )
+        .unwrap();
+        let caminho = raiz
+            .join("diario/fonte/lib.rs")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let diario = format!(
+            "{{\"kind\":[\"lib\"],\"name\":\"diario\",\"src_path\":\"{}/diario/src/lib.rs\"}}",
+            raiz.to_string_lossy().replace('\\', "/")
+        );
+        let metadata = metadata_de_mentira(&raiz.to_string_lossy(), &grafo_de_hoje());
+        assert_eq!(metadata.matches(&diario).count(), 1);
+        let metadata = metadata.replacen(
+            &diario,
+            &format!("{{\"kind\":[\"lib\"],\"name\":\"diario\",\"src_path\":\"{caminho}\"}}"),
+            1,
+        );
+        let achados = super::grafo_do_kernel_fora(&metadata, &raiz).unwrap();
+        let _ = std::fs::remove_dir_all(&raiz);
+        if achados.is_empty() {
+            cegos.push("o `[lib] path` de um pacote do repositorio");
+        }
+        assert!(cegos.is_empty(), "nada se acusou: {cegos:?}");
+    }
+
+    /// A5: um módulo de produção no caminho da suíte. No `main.rs`, um `mod
+    /// testes { pub(crate) mod atalho; }` com o `cfg` ao contrário traz o
+    /// `kernel/src/testes/atalho.rs` para a compilação de produção, e as
+    /// guardas dos nomes, das chamadas e dos carregadores deixam a suíte de
+    /// fora pelo caminho do arquivo (`da_suite_no_projeto`). O "nenhum arquivo
+    /// de produção a traz" do inventário não se confere.
+    #[test]
+    fn adversario_a8_a5_um_modulo_de_producao_no_caminho_da_suite() {
+        let main = ler_do_projeto("kernel/src/main.rs");
+        let com = format!(
+            "{main}\n#[cfg(not(feature = \"modo-teste\"))]\nmod testes {{\n    pub(crate) mod \
+             atalho;\n}}\n"
+        );
+        assert!(super::da_suite_no_projeto("kernel/src/testes/atalho.rs"));
+        let mut achados = nomes_protegidos_fora("kernel/src/main.rs", &com).0;
+        achados.extend(
+            onde_traz_outro_arquivo(&com).map(|(linha, forma)| format!("{linha}: {forma}")),
+        );
+        achados.extend(
+            super::macros_da_carga_redefinidas("kernel/src/main.rs", &com)
+                .into_iter()
+                .map(|(linha, forma)| format!("{linha}: {forma}")),
+        );
+        // Adaptado no lote A9: a regra do módulo da suíte.
+        achados.extend(super::modulo_da_suite_fora("kernel/src/main.rs", &com));
+        assert!(
+            !achados.is_empty(),
+            "um `mod testes {{ mod atalho; }}` de producao traz um arquivo da suite, que as \
+             guardas dos nomes nao leem, e nada se acusou"
+        );
+    }
+
+    /// A6, A7 e A8: o config do cargo que a consulta do lote A8 não lê — de
+    /// `kernel/` e da raiz, que o cargo também lê de dentro de `kernel/`. O
+    /// `[source]`, que troca o código de um pacote do crates.io por uma pasta
+    /// sem mudar a origem que o `cargo metadata` diz; o ligador do
+    /// hospedeiro, que roda na compilação do kernel a cada `build.rs` e a cada
+    /// macro procedural ligados — e, na raiz, ao ligar o próprio `xtask` —; o
+    /// ligador de um `cfg(…)`, que vale para o próprio kernel; e o executor do
+    /// hospedeiro, na raiz, que decide o que `cargo xtask invariantes` roda.
+    #[test]
+    fn adversario_a8_a6_a7_a8_o_config_que_a_consulta_nao_le() {
+        let config = ler_do_projeto("kernel/.cargo/config.toml");
+        let da_raiz = ler_do_projeto(".cargo/config.toml");
+        let casos: [(&str, &str, String); 4] = [
+            (
+                "o source",
+                "kernel/.cargo/config.toml",
+                format!(
+                    "{config}\n[source.crates-io]\nreplace-with = \"vendorizado\"\n\n\
+                     [source.vendorizado]\ndirectory = \"../vendor\"\n"
+                ),
+            ),
+            (
+                "o ligador do hospedeiro",
+                "kernel/.cargo/config.toml",
+                format!(
+                    "{config}\n[target.x86_64-unknown-linux-gnu]\nlinker = \"ferramentas/ligar\"\n"
+                ),
+            ),
+            (
+                "o ligador de um cfg",
+                "kernel/.cargo/config.toml",
+                format!(
+                    "{config}\n[target.'cfg(target_os = \"none\")']\nlinker = \"ferramentas/ligar\"\n"
+                ),
+            ),
+            (
+                "o executor do hospedeiro, na raiz",
+                ".cargo/config.toml",
+                format!("{da_raiz}\n[target.'cfg(unix)']\nrunner = \"ferramentas/rodar\"\n"),
+            ),
+        ];
+        let mut cegos = Vec::new();
+        for (rotulo, arquivo, texto) in casos {
+            let raiz = arvore_do_build(&format!("a8-{}", rotulo.replace([' ', ','], "-")));
+            std::fs::write(raiz.join(arquivo), &texto).unwrap();
+            let achados = super::config_do_kernel_fora(&raiz);
+            let _ = std::fs::remove_dir_all(&raiz);
+            if achados.is_empty() {
+                cegos.push(rotulo);
+            }
+        }
+        assert!(cegos.is_empty(), "nada se acusou: {cegos:?}");
+    }
+
+    /// B1: a marca de direção (U+200E, e a U+200F) é espaço para o `rustc` —
+    /// a referência da linguagem e o `proc-macro2` dizem — e não para o
+    /// `char::is_whitespace` das guardas. Entre o `#` e o `[`, entre o nome
+    /// de uma macro e o `!`, entre o `macro_rules` e o `!`, depois do `use`,
+    /// do `as` e do `mod`, e entre o `feature` e o `(`, ela esconde a forma.
+    #[test]
+    fn adversario_a8_b1_a_marca_de_direcao_e_espaco_para_o_rustc() {
+        let lrm = '\u{200E}';
+        let mut cegos = Vec::new();
+        if !fonte_traz_outro_arquivo(&format!("#{lrm}[path = \"testes/x.rs\"]\nmod y;\n")) {
+            cegos.push(String::from("o `#[path]`"));
+        }
+        let arquivo = super::ARQUIVO_DO_LANCAMENTO;
+        let real = ler_do_projeto(arquivo);
+        for texto in [
+            format!("    metodos{lrm}!(NaoLancou {{ fn x() {{}} }});\n"),
+            format!("    metodos!{lrm}(NaoLancou {{ fn x() {{}} }});\n"),
+        ] {
+            let (fonte, _) = no_corpo_a8(&real, "fn lancar_por(", &texto);
+            if !super::carga_fora_do_lugar(&fonte)
+                .iter()
+                .any(|a| a.contains("a macro `"))
+            {
+                cegos.push(texto.escape_unicode().to_string());
+            }
+        }
+        let barra = "kernel/src/barra.rs";
+        for fonte in [
+            format!("macro_rules{lrm}! assert {{\n    () => {{}};\n}}\n"),
+            format!("use{lrm}dep::assert;\n"),
+            format!("use crate::metodos as{lrm}assert;\n"),
+            format!("mod{lrm}alloc {{}}\n"),
+        ] {
+            if super::macros_da_carga_redefinidas(barra, &fonte).is_empty() {
+                cegos.push(fonte.escape_unicode().to_string());
+            }
+        }
+        let main = ler_do_projeto("kernel/src/main.rs");
+        let com = format!("{main}\n#![feature{lrm}(decl_macro)]\n");
+        if super::recursos_fora_da_lista(&com).is_empty() {
+            cegos.push(String::from("o `#![feature(…)]`"));
+        }
+        assert!(cegos.is_empty(), "nada se acusou: {cegos:?}");
+    }
+
+    /// B2: o `--cfg` de uma feature padrão do kernel. Um `default =
+    /// [\"quedas\"]` no `kernel/Cargo.toml` põe os pontos de queda — o plano
+    /// lido do fim da partição de estado — em todo kernel, também no de
+    /// produção; a conferência das quedas só lê o `xtask`, e a do manifesto,
+    /// a barra invertida, o `cargo-features` e os `rustflags`.
+    ///
+    /// Adaptado no lote A9: pelo grafo do cargo, que diz a feature padrão
+    /// escrita de qualquer jeito — o `kernel/Cargo.toml` só tem a âncora.
+    #[test]
+    fn adversario_a8_b2_a_feature_padrao_do_kernel() {
+        let real = ler_do_projeto("kernel/Cargo.toml");
+        let ancora = "quedas = []\n";
+        assert_eq!(real.matches(ancora).count(), 1);
+        let da_lista = features_de_mentira(&super::FEATURES_DO_KERNEL);
+        let metadata = metadata_de_mentira("/projeto", &grafo_de_hoje());
+        assert_eq!(metadata.matches(&da_lista).count(), 1);
+        let com = metadata.replacen(
+            &da_lista,
+            &features_de_mentira(&[
+                ("default", &[super::persistencia::FEATURE_DE_QUEDAS]),
+                ("modo-teste", &["protocolo/arrays", "hora/servidor"]),
+                (super::persistencia::FEATURE_DE_QUEDAS, &[]),
+            ]),
+            1,
+        );
+        assert!(
+            !super::dependencias_fora(&com, std::path::Path::new("/projeto"))
+                .0
+                .is_empty(),
+            "uma feature padrao do kernel liga o `quedas` em todo build, e nada se acusou"
+        );
+    }
+
+    /// B3: o ambiente da CI além do `RUSTFLAGS` e do `CARGO_UNSTABLE_`: o
+    /// ligador de um alvo do kernel e o do hospedeiro, e um perfil, num job
+    /// que não é o dos lints — onde a consulta do config não roda.
+    #[test]
+    fn adversario_a8_b3_o_ambiente_da_ci() {
+        let ci = "env:\n  CARGO_TARGET_X86_64_UNKNOWN_NONE_LINKER: ./ligar\n  \
+                  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: ./ligar\n  \
+                  CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS: \"false\"\n";
+        let achados = super::variaveis_do_cargo_na_ci(".github/workflows/ci.yml", ci);
+        assert_eq!(achados.len(), 3, "{achados:?}");
+    }
+
+    /// B4: a linha de comando com que o `xtask` compila o kernel. A lista
+    /// fechada dos rustflags (`RUSTFLAGS_DO_KERNEL`) vale para o config; um
+    /// `--config` ou um `CARGO_TARGET_<alvo>_RUSTFLAGS` que o próprio `xtask`
+    /// passasse ao cargo do kernel não se confere — só o atributo de crate.
+    #[test]
+    fn adversario_a8_b4_a_linha_de_comando_do_xtask() {
+        let raiz = arvore_do_build("a8-xtask");
+        std::fs::write(
+            raiz.join("xtask/src/main.rs"),
+            "fn main() {\n    let mut cargo = std::process::Command::new(\"cargo\");\n    \
+             cargo.args([\"--config\", \"target.x86_64-unknown-none.rustflags=['--cfg', 'x']\"]);\n    \
+             cargo.env(\"CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS\", \"--cfg y\");\n}\n",
+        )
+        .unwrap();
+        let achados = super::recursos_do_kernel_fora(&raiz).unwrap();
+        let _ = std::fs::remove_dir_all(&raiz);
+        assert!(
+            !achados.is_empty(),
+            "o `xtask` passou rustflags ao kernel fora da lista, e nada se acusou"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // As guardas novas do lote A9, cada uma com o caminho feliz, as formas
+    // que ela recusa e o que ela deixa passar.
+    // -----------------------------------------------------------------------
+
+    /// O corpo dos registros do log que as funções da carga invocam (o A2 do
+    /// adversário do lote A8, no lote A9): o `log.rs` de verdade passa, com o
+    /// `::core::format_args!` nos três. Reprovam, cada um na linha da
+    /// definição dele: um braço novo, o `format_args!` sem o caminho, outro
+    /// nível no corpo e um comentário no corpo — o lado seguro —; e a
+    /// definição duplicada ou que sumiu, a conferência cega. O espaço, a
+    /// quebra de linha e a marca de direção não contam.
+    #[test]
+    fn o_corpo_dos_registros_do_log_e_o_da_lista() {
+        let log = ler_do_projeto("kernel/src/log.rs");
+        assert_eq!(super::registros_do_log_fora(&log), Vec::<String>::new());
+        let linha_de = |nome: &str| {
+            log.lines()
+                .position(|l| l == format!("macro_rules! {nome} {{"))
+                .unwrap()
+                + 1
+        };
+        let corpo_de = |nivel: &str| {
+            format!("$crate::log::Level::{nivel}, $sub, ::core::format_args!($fmt));")
+        };
+        assert_eq!(log.matches(&corpo_de("Error")).count(), 1);
+        assert_eq!(log.matches(&corpo_de("Info")).count(), 1);
+        let cabeca = "macro_rules! log_warn {\n";
+        let casos: [(&str, String, String); 5] = [
+            (
+                "o braço novo",
+                log.replacen(
+                    cabeca,
+                    &format!("{cabeca}    (@x $t:ident) => {{ impl $t {{}} }};\n"),
+                    1,
+                ),
+                format!(
+                    "kernel/src/log.rs:{}: o corpo de `log_warn!`",
+                    linha_de("log_warn")
+                ),
+            ),
+            (
+                "o format_args sem o caminho",
+                log.replacen(
+                    &corpo_de("Error"),
+                    "$crate::log::Level::Error, $sub, format_args!($fmt));",
+                    1,
+                ),
+                format!(
+                    "kernel/src/log.rs:{}: o corpo de `log_error!`",
+                    linha_de("log_error")
+                ),
+            ),
+            (
+                "outro nível",
+                log.replacen(&corpo_de("Info"), &corpo_de("Error"), 1),
+                format!(
+                    "kernel/src/log.rs:{}: o corpo de `log_info!`",
+                    linha_de("log_info")
+                ),
+            ),
+            (
+                "o comentário",
+                log.replacen(
+                    &corpo_de("Info"),
+                    &format!("{} /* um comentário */", corpo_de("Info")),
+                    1,
+                ),
+                format!(
+                    "kernel/src/log.rs:{}: o corpo de `log_info!`",
+                    linha_de("log_info")
+                ),
+            ),
+            (
+                "duplicada",
+                format!("{log}\nmacro_rules! log_warn {{\n    () => {{}};\n}}\n"),
+                String::from("kernel/src/log.rs: `macro_rules! log_warn` definido 2 vezes"),
+            ),
+        ];
+        for (rotulo, fonte, esperado) in casos {
+            assert_ne!(fonte, log, "{rotulo}");
+            let achados = super::registros_do_log_fora(&fonte);
+            assert!(
+                achados.len() == 1 && achados[0].starts_with(&esperado),
+                "{rotulo}: {achados:?}"
+            );
+        }
+        let sem_o_info = log.replacen("macro_rules! log_info {", "macro_rules! log_inf {", 1);
+        let achados = super::registros_do_log_fora(&sem_o_info);
+        assert!(
+            achados.len() == 1 && achados[0].contains("`macro_rules! log_info` definido 0 vezes"),
+            "{achados:?}"
+        );
+        // O espaço, a quebra de linha e a marca de direção não contam.
+        let reformatado = log
+            .replace("{ let _ = $crate", "{\n            let _ = $crate")
+            .replace("::core::format_args!", "::core::format_args\u{200E}!");
+        assert_ne!(reformatado, log);
+        assert_eq!(
+            super::registros_do_log_fora(&reformatado),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            super::tokens_de("($a:expr)=>{ $crate::x!( $a ) }"),
+            super::tokens_de("( $a : expr ) =>\n{$crate :: x ! ($a)}")
+        );
+        assert_ne!(
+            super::tokens_de("let _ = x;"),
+            super::tokens_de("let_ = x;")
+        );
+    }
+
+    /// O módulo da suíte só na raiz do crate, como `#[cfg(feature =
+    /// "modo-teste")] mod testes;` (o A5 do adversário do lote A8, no lote
+    /// A9): o `main.rs` de verdade passa, e nenhum outro arquivo do kernel
+    /// tem um módulo `testes`. No `main.rs` reprovam: o módulo de linha com o
+    /// `cfg` ao contrário, ao lado do de verdade; o `cfg` ao contrário, sem o
+    /// atributo, e o módulo de linha no lugar do arquivo; e o que some — a
+    /// conferência cega. O `r#testes` com o atributo é o mesmo módulo, e passa.
+    /// Noutro arquivo, o `mod testes` — também cru, ou no corpo de uma macro —
+    /// e o `mod $nome` de uma macro reprovam; o `mod testes_de_x;` e o
+    /// caminho `crate::testes::x`, não.
+    #[test]
+    fn o_modulo_da_suite_so_na_raiz_do_crate() {
+        let main = ler_do_projeto("kernel/src/main.rs");
+        let raiz = super::RAIZ_DO_KERNEL;
+        assert_eq!(
+            super::modulo_da_suite_fora(raiz, &main),
+            Vec::<String>::new()
+        );
+        let mut de_verdade = Vec::new();
+        super::percorrer_fontes(
+            &super::raiz_do_projeto().join("kernel/src"),
+            &mut |caminho| {
+                let relativo = caminho
+                    .strip_prefix(super::raiz_do_projeto())
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if !super::da_suite_no_projeto(&relativo) {
+                    let texto = std::fs::read_to_string(caminho).unwrap();
+                    de_verdade.extend(super::modulo_da_suite_fora(&relativo, &texto));
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(de_verdade, Vec::<String>::new());
+        let declaracao = "#[cfg(feature = \"modo-teste\")]\nmod testes;\n";
+        assert_eq!(main.matches(declaracao).count(), 1);
+        let linha = main[..main.find(declaracao).unwrap()].lines().count() + 1;
+        for (rotulo, fonte, esperado) in [
+            (
+                "o modulo de linha ao lado",
+                format!(
+                    "{main}\n#[cfg(not(feature = \"modo-teste\"))]\nmod testes {{\n    pub(crate) mod \
+                     atalho;\n}}\n"
+                ),
+                format!("{raiz}: o módulo `testes` declarado 2 vezes"),
+            ),
+            (
+                "o cfg ao contrario",
+                main.replacen(
+                    declaracao,
+                    "#[cfg(not(feature = \"modo-teste\"))]\nmod testes;\n",
+                    1,
+                ),
+                format!("{raiz}:{}: o módulo `testes` não é", linha + 1),
+            ),
+            (
+                "sem o atributo",
+                main.replacen(declaracao, "mod testes;\n", 1),
+                format!("{raiz}:{linha}: o módulo `testes` não é"),
+            ),
+            (
+                "o modulo de linha no lugar",
+                main.replacen(
+                    declaracao,
+                    "#[cfg(feature = \"modo-teste\")]\nmod testes {\n    mod atalho;\n}\n",
+                    1,
+                ),
+                format!("{raiz}:{}: o módulo `testes` não é", linha + 1),
+            ),
+            (
+                "o que some",
+                main.replacen(declaracao, "", 1),
+                format!("{raiz}: o módulo `testes` declarado 0 vezes"),
+            ),
+        ] {
+            let achados = super::modulo_da_suite_fora(raiz, &fonte);
+            assert!(
+                achados.len() == 1 && achados[0].starts_with(&esperado),
+                "{rotulo}: {achados:?}"
+            );
+        }
+        let cru = main.replacen(
+            declaracao,
+            "#[cfg(feature = \"modo-teste\")]\nmod r#testes;\n",
+            1,
+        );
+        assert_eq!(
+            super::modulo_da_suite_fora(raiz, &cru),
+            Vec::<String>::new()
+        );
+        let barra = "kernel/src/barra.rs";
+        for (fonte, esperada) in [
+            ("fn f() {}\nmod testes {}\n", 2),
+            ("fn f() {}\nmod r#testes;\n", 2),
+            (
+                "macro_rules! m {\n    () => {\n        mod testes { mod atalho; }\n    };\n}\n",
+                3,
+            ),
+            (
+                "macro_rules! m {\n    ($n:ident) => {\n        mod $n;\n    };\n}\nm!(testes);\n",
+                3,
+            ),
+            (
+                "macro_rules! m {\n    ($n:ident) => {\n        pub mod $n {}\n    };\n}\n",
+                3,
+            ),
+        ] {
+            let achados = super::modulo_da_suite_fora(barra, fonte);
+            assert_eq!(
+                linhas_de(barra, &achados),
+                [esperada],
+                "{fonte}: {achados:?}"
+            );
+        }
+        for fonte in [
+            "mod testes_de_x;\n",
+            "use crate::testes::x;\nfn f() { crate::testes::y(); }\n",
+            "// mod testes;\nconst S: &str = \"mod testes;\";\n",
+        ] {
+            assert_eq!(
+                super::modulo_da_suite_fora(barra, fonte),
+                Vec::<String>::new(),
+                "{fonte}"
+            );
+        }
+    }
+
+    /// O `#` que não abre um atributo (o A3 do adversário do lote A8, no lote
+    /// A9): o `#$a` e o `# $a` de um corpo de macro, o `#` sozinho nos
+    /// argumentos de uma invocação e o `#!` sem o colchete reprovam, cada um
+    /// na linha dele; o identificador cru — o `r#type`, o `r#path` de um
+    /// atributo —, o `#` de um texto cru, de um caractere e de um comentário,
+    /// e o atributo de verdade, também interno, não.
+    #[test]
+    fn o_cerquilha_que_nao_abre_um_atributo() {
+        for (fonte, linha) in [
+            (
+                "macro_rules! m {\n    ($a:tt) => {\n        #$a\n        mod y;\n    };\n}\n",
+                3,
+            ),
+            (
+                "macro_rules! m {\n    ($a:tt) => {\n        # $a mod y;\n    };\n}\n",
+                3,
+            ),
+            ("fn f() {}\nm!(#);\n", 2),
+            ("fn f() {}\nm!(# x);\n", 2),
+            ("fn f() {}\nm! { # }\n", 2),
+            ("#!/bin/x\n", 1),
+        ] {
+            assert_eq!(
+                onde_traz_outro_arquivo(fonte).map(|(l, _)| l),
+                Some(linha),
+                "{fonte}"
+            );
+            assert!(
+                onde_traz_outro_arquivo(fonte)
+                    .unwrap()
+                    .1
+                    .contains("um `#` que não abre um atributo"),
+                "{fonte}"
+            );
+        }
+        for fonte in [
+            "let r#type = 1;\nfn r#match() {}\n",
+            "let s = r#\"# $a\"#;\nlet c = '#';\n// # $a\n",
+            "#![allow(dead_code)]\n#[inline]\nfn f() {}\n# [cfg(x)]\nfn g() {}\n",
+            "#[doc = \"um # no texto\"]\nfn h() {}\n",
+        ] {
+            assert_eq!(onde_traz_outro_arquivo(fonte), None, "{fonte}");
+        }
+    }
+
+    /// O que o `xtask` passa a um processo filho (o B4 do adversário do lote
+    /// A8, e o item 14c do revisor, no lote A9): o ambiente que as fontes de
+    /// verdade põem é exatamente o da lista — ela não está velha —, e nenhuma
+    /// passa uma opção que mude o que o cargo compila. Reprovam, na linha
+    /// deles: o `.env(…)` de fora da lista — também um da lista noutro
+    /// arquivo, e o partido em linhas —, o `.envs(…)`, e o `--config`, o
+    /// `--config=…`, o `-Z…`, o `rustc` e o `rustdoc` nos argumentos de um
+    /// `.arg(…)` ou de um `.args(…)`. O mesmo texto num comentário, num
+    /// literal fora desses argumentos e no `compilador.rs`, não.
+    #[test]
+    fn a_linha_de_comando_do_xtask() {
+        let raiz = super::raiz_do_projeto();
+        let mut postos = Vec::new();
+        let mut fora = Vec::new();
+        super::percorrer_fontes(&raiz.join("xtask/src"), &mut |caminho| {
+            let relativo = caminho
+                .strip_prefix(&raiz)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let texto = std::fs::read_to_string(caminho).unwrap();
+            fora.extend(super::linha_de_comando_do_xtask_fora(&relativo, &texto));
+            if relativo != "xtask/src/compilador.rs" {
+                for (_, nome) in super::ambiente_posto(&texto) {
+                    postos.push((relativo.clone(), nome));
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(fora, Vec::<String>::new());
+        postos.sort();
+        let mut da_lista: Vec<(String, Option<String>)> = super::AMBIENTE_DOS_FILHOS
+            .iter()
+            .map(|(a, n)| ((*a).to_string(), Some((*n).to_string())))
+            .collect();
+        da_lista.sort();
+        assert_eq!(postos, da_lista);
+        let arquivo = "xtask/src/x.rs";
+        let fonte = "fn f(c: &mut Command) {\n    c.env(\"RUSTFLAGS\", \"-Zx\");\n    c.env(\n        \
+                     \"CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS\",\n        \"x\",\n    );\n    \
+                     c.env(\"TMPDIR\", \"/x\");\n    c.envs([(\"A\", \"b\")]);\n    \
+                     c.args([\"build\", \"--config\", \"x\"]);\n    c.arg(\"--config=build.x=1\");\n    \
+                     c.arg(\"-Zbuild-std\");\n    c.args([\"rustc\", \"--\", \"-C\", \"x\"]);\n    \
+                     c.arg(\"rustdoc\");\n}\n";
+        let achados = super::linha_de_comando_do_xtask_fora(arquivo, fonte);
+        assert_eq!(
+            linhas_de(arquivo, &achados),
+            [2, 3, 7, 8, 9, 10, 11, 12, 13],
+            "{achados:?}"
+        );
+        for fonte in [
+            "// c.env(\"RUSTFLAGS\", x); c.arg(\"--config\");\nfn f() {}\n",
+            "const S: &str = \"--config\";\nfn f(c: &mut Command) { c.arg(\"build\").env_remove(\"RUSTFLAGS\"); }\n",
+            "fn f(c: &mut Command) { let _ = std::env::var(\"RUSTFLAGS\"); c.arg(format!(\"{}\", 1)); }\n",
+        ] {
+            assert_eq!(
+                super::linha_de_comando_do_xtask_fora(arquivo, fonte),
+                Vec::<String>::new(),
+                "{fonte}"
+            );
+        }
+        let noutro =
+            "fn f(c: &mut Command) {\n    c.env(\"RUSTFLAGS\", \"x\").args([\"-Zx\"]);\n}\n";
+        assert_eq!(
+            super::linha_de_comando_do_xtask_fora("xtask/src/compilador.rs", noutro),
+            Vec::<String>::new()
+        );
+    }
+
+    /// As variáveis do cargo na CI (o B3 do adversário do lote A8, no lote
+    /// A9): as da lista — a cor, a compilação incremental, o diretório de
+    /// saída — passam, num `env:` e numa linha de comando; o ligador de um
+    /// alvo e o do hospedeiro, o executor, os perfis, o `CARGO_BUILD_*`, o
+    /// `CARGO_ALIAS_*`, o `CARGO_UNSTABLE_*` e o `CARGO_HOME` reprovam, cada um
+    /// na linha dele; a ação do compilador, que cita as que recusa, fica de
+    /// fora da lista — e não do `RUSTFLAGS`. Os workflows e as ações de
+    /// verdade passam.
+    #[test]
+    fn as_variaveis_do_cargo_na_ci() {
+        let ci = "env:\n  CARGO_TERM_COLOR: always\n  CARGO_INCREMENTAL: 0\n\
+                  run: CARGO_TARGET_DIR=../target cargo clippy\n  CARGO_TARGET_AARCH64_UNKNOWN_NONE_SOFTFLOAT_LINKER: x\n\
+                  # o CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER num comentario\n  \
+                  CARGO_PROFILE_DEV_OPT_LEVEL: 3\n  CARGO_BUILD_JOBS: 1\n  CARGO_ALIAS_XTASK: x\n  \
+                  CARGO_UNSTABLE_BUILD_STD: core\n  CARGO_HOME: /x\n";
+        let achados = super::variaveis_do_cargo_na_ci(".github/workflows/ci.yml", ci);
+        assert_eq!(
+            linhas_de(".github/workflows/ci.yml", &achados),
+            [5, 6, 7, 8, 9, 10, 11],
+            "{achados:?}"
+        );
+        assert!(
+            achados[0].contains("[\"CARGO_TARGET_AARCH64_UNKNOWN_NONE_SOFTFLOAT_LINKER\"]"),
+            "{achados:?}"
+        );
+        let acao = ".github/actions/compilador/action.yml";
+        assert_eq!(
+            super::variaveis_do_cargo_na_ci(acao, "  CARGO_ALIAS_X: y\n"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            super::variaveis_do_cargo_na_ci(acao, "  RUSTFLAGS: y\n").len(),
+            1
+        );
+        let raiz = super::raiz_do_projeto();
+        for relativo in super::arquivos_do_build(&raiz).unwrap() {
+            if relativo.starts_with(".github/") {
+                let texto = std::fs::read_to_string(raiz.join(&relativo)).unwrap();
+                assert_eq!(
+                    super::variaveis_do_cargo_na_ci(&relativo, &texto),
+                    Vec::<String>::new(),
+                    "{relativo}"
+                );
+            }
+        }
+    }
 }
 
 fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
@@ -12936,6 +14836,9 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
         if da_suite_no_projeto(&relativo) {
             return Ok(());
         }
+        // A suíte só entra na compilação de teste: o módulo dela só na raiz
+        // do crate, com o atributo — ver [`modulo_da_suite_fora`].
+        fora.extend(modulo_da_suite_fora(&relativo, &texto));
         // O arquivo inteiro, e não a linha: o atributo partido em linhas
         // também traz outro arquivo.
         if let Some((linha, forma)) = onde_traz_outro_arquivo(&texto) {
@@ -13006,6 +14909,9 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
     // funções que a usam.
     fora.extend(conferir_os_carregadores(&raiz)?);
     fora.extend(conferir_o_fio_novo_do_lancamento(&raiz)?);
+    // E o corpo dos registros do log que as funções da carga invocam, o da
+    // lista — ver [`registros_do_log_fora`].
+    fora.extend(conferir_os_registros_do_log(&raiz)?);
     // O servidor de Roughtime de teste é só da suíte; e nenhuma decisão lê
     // o relógio civil nem o lógico.
     fora.extend(conferir_servidor_de_hora_so_na_suite(&raiz)?);
@@ -13050,8 +14956,10 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
              nome protegido ganha outro nome — pelo `as`, também o do `self` de uma lista do \
              `use`, por um `type`, como valor, por um `use` montado numa macro e, nos donos, \
              por um `type` montado numa —, nem passa pelos argumentos ou pelo corpo de uma \
-             macro, nem por um `use` do dono no nível de um módulo, nem por uma macro 2.0 ou \
-             um `${{…}}`; nenhum atributo montado por uma macro, fora do `doc`; e \
+             macro, também de nome cru, nem por um `use` do dono no nível de um módulo, nem por \
+             uma macro 2.0 ou um `${{…}}`; o corpo dos três registros do log, o da lista; \
+             nenhum atributo montado por uma macro, fora do `doc`, nem um `#` que não abre um \
+             atributo; a suíte só na compilação de teste, pelo módulo da raiz do crate; e \
              a hora só anda pelos tratadores de time.sync e time.confirm, depois do gate, com \
              o servidor de teste só na suíte e o da bancada de tempo escrito à parte; e as \
              chaves de assinatura só mudam pelos handlers delas, pela prova e pela revogação \
@@ -13649,7 +15557,10 @@ fn percorrer_fontes_e_ligacao(
 
 /// Se o arquivo, relativo a `kernel/src`, é da suíte: o `testes.rs` e os
 /// submódulos dele, em `testes/`. A suíte não é compilada sem `modo-teste`, e
-/// a conferência que a deixa de fora a deixa inteira.
+/// a conferência que a deixa de fora a deixa inteira — e, desde o lote A9, o
+/// `invariantes` confere que nenhum arquivo dela entra na compilação de
+/// produção: só a raiz do crate declara o módulo dela, com o atributo
+/// ([`modulo_da_suite_fora`]).
 fn da_suite(relativo: &str) -> bool {
     relativo == "testes.rs" || relativo.starts_with("testes/")
 }

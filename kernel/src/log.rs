@@ -385,15 +385,28 @@ pub fn total_emitidos() -> u64 {
 // meta-macro: gerar `macro_rules!` de dentro de `macro_rules!` exige a
 // sintaxe `$$`, que ainda não é estável. Repetição explícita é preferível a
 // depender de um recurso instável no caminho de log do kernel.
+//
+// E chamam o `format_args!` pelo caminho absoluto, `::core::format_args!`,
+// desde o lote A9: o nome sozinho se resolve onde o registro é invocado, e
+// um `macro_rules! format_args` — ou um `use … as format_args` — no arquivo
+// de quem registra trocaria o que o registro escreve ali. O `::` do começo
+// só olha os pacotes, e nenhum item do módulo o sombreia; e o `cargo xtask
+// invariantes` recusa o que daria o nome `core` a outro pacote — um
+// `extern crate … as core;` na raiz do crate, uma dependência renomeada.
+// Três delas — o `log_error!`, o `log_warn!` e o `log_info!` — são as que
+// as funções da carga de um programa podem invocar, e o `invariantes`
+// confere o corpo delas, token a token (`CORPO_DE_UM_REGISTRO`, no
+// `xtask`): um braço novo, ou outro nome no corpo, muda a lista de lá, e a
+// mudança é revisada.
 
 /// Registra um evento de erro: algo falhou e o kernel não pôde cumprir a ação.
 #[macro_export]
 macro_rules! log_error {
     ($sub:expr, $fmt:expr) => {
-        { let _ = $crate::log::registrar($crate::log::Level::Error, $sub, format_args!($fmt)); }
+        { let _ = $crate::log::registrar($crate::log::Level::Error, $sub, ::core::format_args!($fmt)); }
     };
     ($sub:expr, $fmt:expr, $($arg:tt)*) => {
-        { let _ = $crate::log::registrar($crate::log::Level::Error, $sub, format_args!($fmt, $($arg)*)); }
+        { let _ = $crate::log::registrar($crate::log::Level::Error, $sub, ::core::format_args!($fmt, $($arg)*)); }
     };
 }
 
@@ -401,10 +414,10 @@ macro_rules! log_error {
 #[macro_export]
 macro_rules! log_warn {
     ($sub:expr, $fmt:expr) => {
-        { let _ = $crate::log::registrar($crate::log::Level::Warn, $sub, format_args!($fmt)); }
+        { let _ = $crate::log::registrar($crate::log::Level::Warn, $sub, ::core::format_args!($fmt)); }
     };
     ($sub:expr, $fmt:expr, $($arg:tt)*) => {
-        { let _ = $crate::log::registrar($crate::log::Level::Warn, $sub, format_args!($fmt, $($arg)*)); }
+        { let _ = $crate::log::registrar($crate::log::Level::Warn, $sub, ::core::format_args!($fmt, $($arg)*)); }
     };
 }
 
@@ -412,10 +425,10 @@ macro_rules! log_warn {
 #[macro_export]
 macro_rules! log_info {
     ($sub:expr, $fmt:expr) => {
-        { let _ = $crate::log::registrar($crate::log::Level::Info, $sub, format_args!($fmt)); }
+        { let _ = $crate::log::registrar($crate::log::Level::Info, $sub, ::core::format_args!($fmt)); }
     };
     ($sub:expr, $fmt:expr, $($arg:tt)*) => {
-        { let _ = $crate::log::registrar($crate::log::Level::Info, $sub, format_args!($fmt, $($arg)*)); }
+        { let _ = $crate::log::registrar($crate::log::Level::Info, $sub, ::core::format_args!($fmt, $($arg)*)); }
     };
 }
 
@@ -423,10 +436,10 @@ macro_rules! log_info {
 #[macro_export]
 macro_rules! log_debug {
     ($sub:expr, $fmt:expr) => {
-        { let _ = $crate::log::registrar($crate::log::Level::Debug, $sub, format_args!($fmt)); }
+        { let _ = $crate::log::registrar($crate::log::Level::Debug, $sub, ::core::format_args!($fmt)); }
     };
     ($sub:expr, $fmt:expr, $($arg:tt)*) => {
-        { let _ = $crate::log::registrar($crate::log::Level::Debug, $sub, format_args!($fmt, $($arg)*)); }
+        { let _ = $crate::log::registrar($crate::log::Level::Debug, $sub, ::core::format_args!($fmt, $($arg)*)); }
     };
 }
 
@@ -434,9 +447,9 @@ macro_rules! log_debug {
 #[macro_export]
 macro_rules! log_trace {
     ($sub:expr, $fmt:expr) => {
-        { let _ = $crate::log::registrar($crate::log::Level::Trace, $sub, format_args!($fmt)); }
+        { let _ = $crate::log::registrar($crate::log::Level::Trace, $sub, ::core::format_args!($fmt)); }
     };
     ($sub:expr, $fmt:expr, $($arg:tt)*) => {
-        { let _ = $crate::log::registrar($crate::log::Level::Trace, $sub, format_args!($fmt, $($arg)*)); }
+        { let _ = $crate::log::registrar($crate::log::Level::Trace, $sub, ::core::format_args!($fmt, $($arg)*)); }
     };
 }

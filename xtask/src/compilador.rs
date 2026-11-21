@@ -18,11 +18,22 @@
 //!     `xtask` (o `xtask/build.rs` grava o commit dele), que não são os do
 //!     toolchain ativo;
 //!   - as variáveis com que o cargo troca ou embrulha o compilador
-//!     ([`VARIAVEIS_QUE_TROCAM`]), e as chaves `build.rustc`,
+//!     ([`VARIAVEIS_QUE_TROCAM`]: as três do cargo e as três
+//!     `CARGO_BUILD_RUSTC*` do config), e as chaves `build.rustc`,
 //!     `build.rustc-wrapper` e `build.rustc-workspace-wrapper` do config do
 //!     cargo — lido pelo próprio cargo em cada diretório de build, com todo
-//!     arquivo que vale ali, toda forma de escrever a chave e as variáveis
-//!     `CARGO_BUILD_*`.
+//!     arquivo que vale ali e toda forma de escrever a chave;
+//!   - desde o lote A9, o executor e os apelidos do cargo
+//!     ([`desvios_da_configuracao`], [`desvios_do_ambiente_do_cargo`]): um
+//!     `runner` em qualquer tabela `target` do config, ou um
+//!     `CARGO_TARGET_<alvo>_RUNNER`, e um `[alias]` que não é só o oficial
+//!     ([`APELIDO_DO_XTASK`]), ou um `CARGO_ALIAS_<nome>`. O `cargo xtask` é
+//!     o `cargo run` do `xtask`, e o `cargo run` passa o binário pelo
+//!     executor: um executor do repositório decidiria o que o `cargo xtask
+//!     invariantes` diz. Aqui se vê o executor que ainda chama o `xtask` de
+//!     verdade; o que não chama nunca roda esta conferência — esse a ação da
+//!     CI recusa antes de todo `cargo` ([`ACAO_DO_COMPILADOR`], o passo
+//!     [`PASSO_DO_EXECUTOR`]).
 //!
 //!   Um desvio recusa o comando, a menos que `DUKE_OUTRO_COMPILADOR=1`
 //!   declare a execução **não oficial**: aí ela roda com um aviso, e a
@@ -40,10 +51,11 @@
 //!   rustc com outro toolchain; os workflows oficiais só usam as ações de
 //!   [`ACOES_OFICIAIS`], não sobrepõem o toolchain e conferem o compilador
 //!   — a ação `.github/actions/compilador` — depois de cada checkout, antes
-//!   do cache e de qualquer `cargo`, com o canal em toda chave de cache; e o
-//!   canário, o único que sobrepõe — ele testa o candidato —, não roda nos
-//!   pushes, não usa o cache da CI, não publica proveniência e repete os
-//!   comandos do job de lints;
+//!   do cache e de qualquer `cargo`, com o canal em toda chave de cache; a
+//!   ação tem, desde o lote A9, o passo do executor, que confere o config do
+//!   cargo fora do cargo ([`conferir_a_acao`]); e o canário, o único que
+//!   sobrepõe — ele testa o candidato —, não roda nos pushes, não usa o cache
+//!   da CI, não publica proveniência e repete os comandos do job de lints;
 //! - **no `cargo xtask compilador`** ([`relatar`]): o canal, o toolchain
 //!   ativo, o `rustc -Vv` completo, o `cargo -V` e os desvios — o que todo
 //!   relatório de validação cita.
@@ -76,14 +88,52 @@ const DIRETORIOS_DOS_BUILDS: [&str; 6] = [
     "target/sdk-fora/projeto",
 ];
 
-/// As variáveis com que o cargo troca, ou embrulha, o compilador, lidas por
-/// ele fora do config. As `CARGO_BUILD_RUSTC*` são do config, e a consulta
-/// ao cargo as vê.
-const VARIAVEIS_QUE_TROCAM: [&str; 3] = ["RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"];
+/// As variáveis com que o cargo troca, ou embrulha, o compilador: as três
+/// que ele lê fora do config, e as três `CARGO_BUILD_RUSTC*`, que são as
+/// chaves de [`CHAVES_QUE_TROCAM`] escritas no ambiente. Estas o cargo soma
+/// na consulta de uma chave de valor (`build.rustc-wrapper`), e não na de
+/// uma tabela inteira, de que ele só as cita ([`config_inteiro`]): a
+/// conferência as lê aqui, pelo nome, e o config pela consulta (o item 1 do
+/// revisor do lote A8, conferido com o cargo do canal).
+const VARIAVEIS_QUE_TROCAM: [&str; 6] = [
+    "RUSTC",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "CARGO_BUILD_RUSTC",
+    "CARGO_BUILD_RUSTC_WRAPPER",
+    "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+];
 
 /// As chaves da tabela `[build]` do config do cargo que trocam, ou
 /// embrulham, o compilador.
 const CHAVES_QUE_TROCAM: [&str; 3] = ["rustc", "rustc-wrapper", "rustc-workspace-wrapper"];
+
+/// O apelido do `cargo xtask`, como o `.cargo/config.toml` da raiz o diz: o
+/// único `[alias]` do config do cargo, em todo diretório de build. Outro
+/// apelido — ou este com outro valor — decide o que o `cargo xtask` roda.
+pub(crate) const APELIDO_DO_XTASK: (&str, &str) = ("xtask", "run --quiet --package xtask --");
+
+/// O passo da ação do compilador ([`ACAO_DO_COMPILADOR`]) que confere o
+/// executor, o ligador e os apelidos do cargo fora do cargo — ver
+/// [`conferir_a_acao`].
+const PASSO_DO_EXECUTOR: &str = "executor";
+
+/// O que o passo do executor tem de conferir, pelo texto do script dele
+/// ([`conferir_a_acao`]): a consulta do config do cargo, o apelido, o
+/// executor e o ligador de cada tabela `target`, as chaves que trocam o
+/// compilador, as variáveis do ambiente e a raiz fechada. O que o script faz
+/// com cada um, o teste `a_acao_recusa_o_executor_o_ligador_e_o_apelido`
+/// confere rodando-o.
+const MARCAS_DO_EXECUTOR: [&str; 8] = [
+    "\"config\", \"get\"",
+    "\"alias\"",
+    "\"runner\"",
+    "\"linker\"",
+    "\"rustc-wrapper\"",
+    "\"CARGO_ALIAS_\"",
+    "\"CARGO_TARGET_\"",
+    "set(config) - {\"alias\"}",
+];
 
 /// O commit do rustc que compilou este `xtask`, gravado pelo `build.rs`.
 const COMPILADO_COM: &str = env!("XTASK_RUSTC_COMMIT");
@@ -263,6 +313,14 @@ fn observar() -> Compilador {
     }
 
     desvios.extend(desvios_das_variaveis(|nome| std::env::var(nome).ok()));
+    desvios.extend(desvios_do_ambiente_do_cargo(std::env::vars_os().map(
+        |(nome, valor)| {
+            (
+                nome.to_string_lossy().into_owned(),
+                valor.to_string_lossy().into_owned(),
+            )
+        },
+    )));
     for (rotulo, dir) in &diretorios {
         desvios.extend(desvios_do_config(dir, rotulo));
     }
@@ -479,25 +537,168 @@ fn desvios_das_variaveis(ler: impl Fn(&str) -> Option<String>) -> Vec<String> {
         .collect()
 }
 
-/// As chaves de [`CHAVES_QUE_TROCAM`] no config do cargo de `dir`, como o
-/// próprio cargo o lê ali: todos os arquivos que valem para o diretório —
-/// os de cima, o do `CARGO_HOME` —, as variáveis `CARGO_BUILD_*`, e toda
-/// forma de escrever a chave. A consulta é a do cargo nightly
-/// (`-Zunstable-options config get`); o canário diz se ela mudar.
+/// As variáveis do executor e dos apelidos do cargo em `variaveis` — o
+/// ambiente, nome e valor —, como desvios: um `CARGO_TARGET_<alvo>_RUNNER`
+/// e um `CARGO_ALIAS_<nome>`, que o cargo lê como o config e que a consulta
+/// de uma tabela inteira não soma ([`config_inteiro`]). As vazias não
+/// trocam nada.
+fn desvios_do_ambiente_do_cargo(
+    variaveis: impl IntoIterator<Item = (String, String)>,
+) -> Vec<String> {
+    let mut desvios: Vec<String> = variaveis
+        .into_iter()
+        .filter(|(_, valor)| !valor.is_empty())
+        .filter_map(|(nome, valor)| {
+            if nome.starts_with("CARGO_TARGET_") && nome.ends_with("_RUNNER") {
+                Some(format!(
+                    "a variável `{nome}={valor}` troca o executor do cargo — o que roda cada \
+                     binário, o do `cargo xtask` inclusive"
+                ))
+            } else if nome.starts_with("CARGO_ALIAS_") {
+                Some(format!(
+                    "a variável `{nome}={valor}` é um apelido do cargo — o `cargo xtask` roda o \
+                     que o apelido dele disser"
+                ))
+            } else {
+                None
+            }
+        })
+        .collect();
+    desvios.sort();
+    desvios
+}
+
+/// O config do cargo de `dir` que troca o compilador, o executor ou o
+/// apelido do `cargo xtask` ([`desvios_da_configuracao`]), como o próprio
+/// cargo o lê ali ([`config_inteiro`]): todos os arquivos que valem para o
+/// diretório — os de cima, o do `CARGO_HOME` — e toda forma de escrever cada
+/// chave. As variáveis do ambiente, que a consulta não soma, são de
+/// [`desvios_das_variaveis`] e de [`desvios_do_ambiente_do_cargo`]. A
+/// consulta é a do cargo nightly (`-Zunstable-options config get`); o
+/// canário diz se ela mudar.
 fn desvios_do_config(dir: &Path, rotulo: &str) -> Vec<String> {
-    match valor_do_config(dir, "build") {
-        Ok(Some(build)) => chaves_que_trocam(&build)
+    match config_inteiro(dir) {
+        Ok(config) => desvios_da_configuracao(&config)
             .into_iter()
-            .map(|chave| {
-                format!(
-                    "em `{rotulo}`, o config do cargo define `build.{chave}`: troca o compilador"
-                )
-            })
+            .map(|d| format!("em `{rotulo}`, {d}"))
             .collect(),
-        // Sem a tabela `[build]` em lugar nenhum.
-        Ok(None) => Vec::new(),
         Err(e) => vec![format!("em `{rotulo}`, {e}")],
     }
+}
+
+/// O que `config` — o config inteiro do cargo, em JSON, como
+/// [`config_inteiro`] o devolve — tem que troca o compilador, o executor ou
+/// o apelido do `cargo xtask`: as chaves de [`CHAVES_QUE_TROCAM`] na tabela
+/// `[build]`; desde o lote A9, um `runner` em qualquer tabela `target` — a de
+/// um alvo, a de um `cfg(…)` —; e um `[alias]` que não é só o
+/// [`APELIDO_DO_XTASK`], com o valor dele: um apelido a mais, um a menos, ou
+/// o do `xtask` com outro valor ou escrito como lista.
+///
+/// # O executor e o apelido, desde o lote A9
+///
+/// O `cargo xtask` é o `cargo run --package xtask`, e o `cargo run` passa o
+/// binário pelo executor do alvo do hospedeiro: um `[target.'cfg(unix)']
+/// runner = "ferramentas/rodar"` no config da raiz, com um script que
+/// responde `invariantes` com sucesso e roda o `xtask` de verdade para o
+/// resto, fazia o passo das invariantes da CI passar sem guarda nenhuma — e
+/// o `cargo test -p xtask` também (o A8 do adversário do lote A8). O
+/// apelido é o mesmo ponto (o I3 dele). Aqui se vê o executor que ainda
+/// chama o `xtask`; o que nunca o chama, a ação da CI o recusa antes de todo
+/// `cargo` ([`PASSO_DO_EXECUTOR`]). O ligador do hospedeiro, que roda ao
+/// ligar o `xtask`, também: aqui ele não entra — o config de quem compila
+/// pode escolher o seu —, e o do config do kernel é recusado pelo
+/// `invariantes` (`config_do_kernel_fora`, no `main.rs`).
+fn desvios_da_configuracao(config: &str) -> Vec<String> {
+    let config = Json(config.trim().as_bytes());
+    let mut desvios = Vec::new();
+    if let Some(build) = config.member("build") {
+        for chave in chaves_que_trocam(build.raw_str().unwrap_or("")) {
+            desvios.push(format!(
+                "o config do cargo define `build.{chave}`: troca o compilador"
+            ));
+        }
+    }
+    if let Some(alvos) = config.member("target") {
+        let mut nomes = Vec::new();
+        alvos.para_cada_chave(|alvo| nomes.push(alvo));
+        for alvo in nomes {
+            if alvos
+                .member(alvo)
+                .and_then(|tabela| tabela.member("runner"))
+                .is_some()
+            {
+                desvios.push(format!(
+                    "o config do cargo define `target.{}.runner`: o executor roda no lugar de \
+                     cada binário que o cargo roda — o do `cargo xtask` inclusive —, e decidiria o \
+                     que o `cargo xtask invariantes` diz",
+                    chave_legivel(alvo)
+                ));
+            }
+        }
+    }
+    let (nome, valor) = APELIDO_DO_XTASK;
+    let oficial = config.member("alias").is_some_and(|apelidos| {
+        let mut nomes = Vec::new();
+        apelidos.para_cada_chave(|n| nomes.push(n));
+        nomes == [nome] && apelidos.member(nome).and_then(|v| v.as_str()) == Some(valor)
+    });
+    if !oficial {
+        desvios.push(format!(
+            "o `[alias]` do config do cargo é {}, e não só o oficial (`{nome} = \"{valor}\"`): um \
+             apelido decide o que o `cargo {nome}` roda",
+            config
+                .member("alias")
+                .and_then(|a| a.raw_str())
+                .unwrap_or("(nenhum)")
+        ));
+    }
+    desvios
+}
+
+/// Uma chave do JSON do cargo como o config a escreve, com os escapes
+/// resolvidos — a de um `cfg(…)` tem aspas —; a crua, se não se resolver.
+fn chave_legivel(chave: &str) -> String {
+    let mut destino = [0u8; 512];
+    Json(format!("\"{chave}\"").as_bytes())
+        .desescapar_em(&mut destino)
+        .map_or_else(|| chave.to_string(), str::to_string)
+}
+
+/// O config inteiro do cargo de `dir`, em JSON, como o próprio cargo o lê
+/// ali — todos os arquivos que valem para o diretório, com a extensão e sem
+/// ela, os de cima e o do `CARGO_HOME`, com os escapes do TOML resolvidos;
+/// `{}` sem config nenhum. As variáveis `CARGO_*` não entram: a consulta de
+/// uma tabela, ou do config inteiro, só as cita, num aviso, e só a de uma
+/// chave de valor as soma (ver [`valor_do_config`]). A consulta é a do cargo
+/// nightly (`-Zunstable-options config get`); o canário diz se ela mudar.
+/// Falha fechada: uma resposta que não se entende é um erro.
+fn config_inteiro(dir: &Path) -> Result<String, String> {
+    let saida = Command::new(env!("CARGO"))
+        .args([
+            "-Zunstable-options",
+            "config",
+            "get",
+            "--format",
+            "json-value",
+        ])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("o cargo não rodou: {e}"))?;
+    let texto = String::from_utf8_lossy(&saida.stdout).trim().to_string();
+    if saida.status.success() && texto.starts_with('{') {
+        return Ok(texto);
+    }
+    let erro = String::from_utf8_lossy(&saida.stderr);
+    // A linha do erro, e não a de um aviso antes dela.
+    let linha = erro
+        .lines()
+        .find(|l| l.starts_with("error"))
+        .or_else(|| erro.lines().next())
+        .unwrap_or("")
+        .trim();
+    Err(format!(
+        "o cargo não respondeu à consulta do config inteiro: {linha}"
+    ))
 }
 
 /// O valor de `chave` no config do cargo de `dir`, em JSON, como o próprio
@@ -737,14 +938,22 @@ pub(crate) fn conferir_o_canal() -> Result<ExitCode, String> {
     if let (Some(ci), Some(canario)) = (texto_de(CI), texto_de(CANARIO)) {
         fora.extend(o_canario_repete_os_lints(ci, canario));
     }
+    match texto_de(ACAO_DO_COMPILADOR) {
+        Some(acao) => fora.extend(conferir_a_acao(acao)),
+        None => fora.push(format!(
+            "{ACAO_DO_COMPILADOR}: a ação que confere o compilador não foi achada"
+        )),
+    }
 
     if fora.is_empty() {
         println!(
             "[xtask] o compilador: o canal {}, com data, nos dois rust-toolchain.toml e no \
-             CLAUDE.md; nenhum outro, nenhuma troca no config do cargo nem no xtask; os workflows \
-             oficiais só com as ações permitidas, conferindo o compilador depois de cada checkout, \
-             com o canal na chave de todo cache; e o canário, o único que sobrepõe, fora dos \
-             pushes, sem o cache da CI e com os comandos do job de lints",
+             CLAUDE.md; nenhum outro, nenhuma troca no config do cargo nem no xtask — nem um \
+             executor, nem um apelido além do oficial —; os workflows oficiais só com as ações \
+             permitidas, conferindo o compilador depois de cada checkout, com o canal na chave \
+             de todo cache, e a ação do compilador com o passo do executor, fora do cargo; e o \
+             canário, o único que sobrepõe, fora dos pushes, sem o cache da CI e com os comandos \
+             do job de lints",
             canal.as_deref().unwrap_or("")
         );
         Ok(ExitCode::SUCCESS)
@@ -795,14 +1004,7 @@ fn chamadas_com_outro_toolchain(arquivo: &str, fonte: &str) -> Vec<String> {
     proibidos.extend(
         VARIAVEIS_QUE_TROCAM
             .iter()
-            .chain(&[
-                "CARGO_BUILD_RUSTC",
-                "CARGO_BUILD_RUSTC_WRAPPER",
-                "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
-                "RUSTUP_TOOLCHAIN",
-                "RUSTUP_HOME",
-                "CARGO_HOME",
-            ])
+            .chain(&["RUSTUP_TOOLCHAIN", "RUSTUP_HOME", "CARGO_HOME"])
             .map(|v| format!(".env(\"{v}\"")),
     );
     fonte
@@ -1036,6 +1238,146 @@ fn chaves_de_cache<'a>(linhas: &[Linha<'a>]) -> Vec<&'a str> {
         }
     }
     chaves
+}
+
+/// A ação do compilador — `texto`, o [`ACAO_DO_COMPILADOR`] — tem o passo
+/// do executor: o passo `id: executor` ([`PASSO_DO_EXECUTOR`]), depois do
+/// `id: conferir` — que confere o canal e instala o toolchain —, em Python
+/// (`shell: python3 -I {0}`), com o script que confere cada uma das
+/// [`MARCAS_DO_EXECUTOR`]; e a ação não escreve no ambiente dos passos
+/// seguintes — o `GITHUB_ENV`, o `GITHUB_PATH` —, que nenhuma regra dos
+/// workflows lê nela.
+///
+/// # Por quê, desde o lote A9
+///
+/// O executor do config do cargo decide o que o `cargo xtask` roda — e o
+/// `cargo test -p xtask` —, e o que nunca chama o `xtask` de verdade nunca
+/// roda conferência nenhuma de dentro dele (o A8 do adversário do lote A8):
+/// a conferência dele mora fora do cargo, na ação, antes de todo `cargo` da
+/// CI. Aqui, que ela continua lá — como [`conferir_os_workflows`] confere que
+/// os workflows chamam a ação. O teste
+/// `a_acao_recusa_o_executor_o_ligador_e_o_apelido` roda o script.
+fn conferir_a_acao(texto: &str) -> Vec<String> {
+    let mut fora = Vec::new();
+    let linhas = linhas_de_codigo(texto);
+    let posicao = |id: &str| {
+        linhas
+            .iter()
+            .position(|l| chave_e_valor(l.texto) == Some(("id", id)))
+    };
+    match (posicao("conferir"), posicao(PASSO_DO_EXECUTOR)) {
+        (Some(conferir), Some(executor)) if conferir < executor => {}
+        (_, None) => fora.push(format!(
+            "{ACAO_DO_COMPILADOR}: sem o passo `id: {PASSO_DO_EXECUTOR}`, que confere o executor, \
+             o ligador e o apelido do cargo fora do cargo"
+        )),
+        _ => fora.push(format!(
+            "{ACAO_DO_COMPILADOR}: o passo `id: {PASSO_DO_EXECUTOR}` vem antes do `id: conferir`, \
+             que instala o toolchain que ele consulta"
+        )),
+    }
+    match passo_da_acao(texto, PASSO_DO_EXECUTOR) {
+        Some((shell, script)) => {
+            if shell != "python3 -I {0}" {
+                fora.push(format!(
+                    "{ACAO_DO_COMPILADOR}: o passo `{PASSO_DO_EXECUTOR}` roda em `{shell}`, e não \
+                     em `python3 -I {{0}}`"
+                ));
+            }
+            let codigo: Vec<&str> = script
+                .lines()
+                .filter(|l| !l.trim_start().starts_with('#'))
+                .collect();
+            for marca in MARCAS_DO_EXECUTOR {
+                if !codigo.iter().any(|l| l.contains(marca)) {
+                    fora.push(format!(
+                        "{ACAO_DO_COMPILADOR}: o passo `{PASSO_DO_EXECUTOR}` não confere `{marca}`"
+                    ));
+                }
+            }
+            // Todo diretório de build do `xtask`: um novo entra nos dois.
+            for dir in DIRETORIOS_DOS_BUILDS {
+                let entre_aspas = format!("\"{dir}\"");
+                if !codigo.iter().any(|l| l.contains(&entre_aspas)) {
+                    fora.push(format!(
+                        "{ACAO_DO_COMPILADOR}: o passo `{PASSO_DO_EXECUTOR}` não confere o config \
+                         de `{dir}/`, um diretório de build do `xtask`"
+                    ));
+                }
+            }
+        }
+        // Sem o passo, a mensagem de cima basta.
+        None if posicao(PASSO_DO_EXECUTOR).is_some() => fora.push(format!(
+            "{ACAO_DO_COMPILADOR}: o passo `{PASSO_DO_EXECUTOR}` sem `shell:` e `run:` que se leiam"
+        )),
+        None => {}
+    }
+    for l in &linhas {
+        if l.texto.contains("GITHUB_ENV") || l.texto.contains("GITHUB_PATH") {
+            fora.push(format!(
+                "{ACAO_DO_COMPILADOR}: `{}` — a ação do compilador não escreve no ambiente dos \
+                 passos seguintes",
+                l.texto
+            ));
+        }
+    }
+    fora
+}
+
+/// O passo `id` de uma ação composta — `acao`, o texto do `action.yml` —: o
+/// `shell:` e o script do `run: |`, sem o recuo dele. O passo vai do item de
+/// lista que o contém — a linha com o `- ` no recuo dos passos — ao item
+/// seguinte, ou ao que tiver recuo menor; o script, das linhas mais recuadas
+/// que o `run:`, as vazias inclusive.
+fn passo_da_acao(acao: &str, id: &str) -> Option<(String, String)> {
+    let linhas: Vec<&str> = acao.lines().collect();
+    let recuo = |l: &str| l.len() - l.trim_start().len();
+    let do_id = linhas.iter().position(|l| {
+        let t = l.trim();
+        chave_e_valor(t) == Some(("id", id))
+    })?;
+    // O item do passo: o `- ` no id, ou na linha de cima mais próxima com
+    // recuo menor.
+    let comeco = (0..=do_id)
+        .rev()
+        .find(|&i| linhas[i].trim_start().starts_with("- "))?;
+    let recuo_do_item = recuo(linhas[comeco]);
+    let fim = (comeco + 1..linhas.len())
+        .find(|&i| {
+            let l = linhas[i];
+            !l.trim().is_empty()
+                && (recuo(l) < recuo_do_item
+                    || (recuo(l) == recuo_do_item && l.trim_start().starts_with("- ")))
+        })
+        .unwrap_or(linhas.len());
+    let passo = &linhas[comeco..fim];
+    let valor_de = |chave: &str| {
+        passo
+            .iter()
+            .find_map(|l| chave_e_valor(l.trim()).filter(|(c, _)| *c == chave))
+            .map(|(_, v)| v.to_string())
+    };
+    let shell = valor_de("shell")?;
+    let run = passo.iter().position(|l| {
+        chave_e_valor(l.trim()).is_some_and(|(c, v)| c == "run" && (v == "|" || v == "|-"))
+    })?;
+    let recuo_do_run = recuo(passo[run]);
+    let corpo: Vec<&str> = passo[run + 1..]
+        .iter()
+        .copied()
+        .take_while(|l| l.trim().is_empty() || recuo(l) > recuo_do_run)
+        .collect();
+    let menor = corpo
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| recuo(l))
+        .min()?;
+    let script = corpo
+        .iter()
+        .map(|l| l.get(menor..).unwrap_or("").trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some((shell, format!("{script}\n")))
 }
 
 /// Os gatilhos de push do canário — ele roda no agendamento e no disparo
@@ -1313,6 +1655,322 @@ mod testes {
             assert_eq!(d.len(), 1, "{nome}");
             assert!(d[0].contains(nome), "{d:?}");
         }
+        // As do config escritas no ambiente: a consulta da tabela `[build]`
+        // não as soma — o cargo só as cita —, e a conferência as lê pelo
+        // nome (o item 1 do revisor do lote A8).
+        for nome in [
+            "CARGO_BUILD_RUSTC",
+            "CARGO_BUILD_RUSTC_WRAPPER",
+            "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+        ] {
+            assert!(VARIAVEIS_QUE_TROCAM.contains(&nome), "{nome}");
+        }
+    }
+
+    /// O executor e os apelidos do cargo (o A8 e o I3 do adversário do lote
+    /// A8, no lote A9): no ambiente, o `CARGO_TARGET_<alvo>_RUNNER` de
+    /// qualquer alvo e qualquer `CARGO_ALIAS_<nome>` são desvios — os vazios,
+    /// o `CARGO_TARGET_DIR` e o `CARGO_TERM_COLOR`, não —; no config, lido
+    /// pelo cargo, o `runner` de um `cfg(…)` e o do hospedeiro, também numa
+    /// lista, e o `[alias]` que não é só o oficial — um a mais, o do `xtask`
+    /// trocado ou escrito como lista, nenhum. O ligador não é desvio do
+    /// começo: o config de quem compila pode escolher o do hospedeiro, e o
+    /// do config do kernel é do `invariantes`.
+    #[test]
+    fn o_executor_e_o_apelido_sao_desvios() {
+        let ambiente = |pares: &[(&str, &str)]| {
+            desvios_do_ambiente_do_cargo(
+                pares
+                    .iter()
+                    .map(|(n, v)| ((*n).to_string(), (*v).to_string())),
+            )
+        };
+        assert_eq!(
+            ambiente(&[
+                ("CARGO_TERM_COLOR", "always"),
+                ("CARGO_TARGET_DIR", "/x"),
+                ("CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER", "cc"),
+                ("CARGO_ALIAS_X", ""),
+            ]),
+            Vec::<String>::new()
+        );
+        for (nome, forma) in [
+            (
+                "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER",
+                "troca o executor",
+            ),
+            (
+                "CARGO_TARGET_X86_64_UNKNOWN_NONE_RUNNER",
+                "troca o executor",
+            ),
+            ("CARGO_ALIAS_XTASK", "é um apelido"),
+            ("CARGO_ALIAS_B", "é um apelido"),
+        ] {
+            let d = ambiente(&[(nome, "ferramentas/rodar")]);
+            assert!(
+                d.len() == 1 && d[0].contains(nome) && d[0].contains(forma),
+                "{nome}: {d:?}"
+            );
+        }
+        let (apelido, valor) = APELIDO_DO_XTASK;
+        let oficial = format!("[alias]\n{apelido} = \"{valor}\"\n");
+        for (nome, texto, esperado) in [
+            (
+                "executor-cfg",
+                format!("{oficial}[target.'cfg(unix)']\nrunner = \"ferramentas/rodar\"\n"),
+                "`target.cfg(unix).runner`",
+            ),
+            (
+                "executor-hospedeiro",
+                format!(
+                    "{oficial}[target.x86_64-unknown-linux-gnu]\nrunner = [\"ferramentas/rodar\", \"-x\"]\n"
+                ),
+                "`target.x86_64-unknown-linux-gnu.runner`",
+            ),
+            (
+                "apelido-a-mais",
+                format!("{oficial}b = \"build\"\n"),
+                "\"b\":\"build\"",
+            ),
+            (
+                "apelido-trocado",
+                format!("[alias]\n{apelido} = \"run --package outro --\"\n"),
+                "o `[alias]` do config do cargo é {\"xtask\":\"run --package outro --\"}",
+            ),
+            (
+                "apelido-em-lista",
+                format!(
+                    "[alias]\n{apelido} = [\"run\", \"--quiet\", \"--package\", \"xtask\", \"--\"]\n"
+                ),
+                "e não só o oficial",
+            ),
+            (
+                "sem-apelido",
+                String::from("[build]\njobs = 2\n"),
+                "o `[alias]` do config do cargo é (nenhum)",
+            ),
+        ] {
+            let dir = com_config_cru(nome, &texto);
+            let desvios = desvios_do_config(&dir, nome);
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(
+                desvios.len() == 1
+                    && desvios[0].starts_with(&format!("em `{nome}`, "))
+                    && desvios[0].contains(esperado),
+                "{nome}: {desvios:?}"
+            );
+        }
+        // O oficial, também com a chave entre aspas, e o ligador do
+        // hospedeiro passam.
+        for (nome, texto) in [
+            ("oficial", oficial.clone()),
+            (
+                "oficial-com-aspas",
+                format!("[alias]\n\"{apelido}\" = \"{valor}\"\n"),
+            ),
+            (
+                "ligador",
+                format!("{oficial}[target.x86_64-unknown-linux-gnu]\nlinker = \"cc\"\n"),
+            ),
+        ] {
+            let dir = com_config_cru(nome, &texto);
+            let desvios = desvios_do_config(&dir, nome);
+            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(desvios, Vec::<String>::new(), "{nome}");
+        }
+    }
+
+    /// A ação do compilador tem o passo do executor (no lote A9): depois do
+    /// `id: conferir`, em Python, conferindo cada marca e cada diretório de
+    /// build, e sem escrever no ambiente dos passos seguintes. A de verdade
+    /// passa; sem o passo, com ele antes, noutro `shell`, sem uma marca, sem
+    /// um diretório ou escrevendo no `GITHUB_ENV`, reprova.
+    #[test]
+    fn a_acao_tem_o_passo_do_executor() {
+        let acao = include_str!("../../.github/actions/compilador/action.yml");
+        assert_eq!(conferir_a_acao(acao), Vec::<String>::new());
+        let (shell, script) = passo_da_acao(acao, PASSO_DO_EXECUTOR).expect("o passo");
+        assert_eq!(shell, "python3 -I {0}");
+        assert!(script.starts_with("import json\n"), "{script}");
+        let cabeca = "    - id: executor\n";
+        assert_eq!(acao.matches(cabeca).count(), 1);
+        let (antes, depois) = acao.split_at(acao.find(cabeca).unwrap());
+        let mut casos: Vec<(&str, String)> = vec![
+            ("sem o passo", antes.to_string()),
+            (
+                "noutro shell",
+                acao.replacen("shell: python3 -I {0}", "shell: bash", 1),
+            ),
+            (
+                "sem o executor",
+                acao.replace("(\"runner\", \"linker\")", "(\"linker\",)"),
+            ),
+            (
+                "sem a raiz fechada",
+                acao.replace("set(config) - {\"alias\"}", "set()"),
+            ),
+            (
+                "sem o kernel",
+                acao.replacen("            \"kernel\",\n", "", 1),
+            ),
+            (
+                "escrevendo no ambiente",
+                acao.replacen(
+                    "echo \"canal=$canal\" >> \"$GITHUB_OUTPUT\"",
+                    "echo \"canal=$canal\" >> \"$GITHUB_OUTPUT\"\n        echo \"X=1\" >> \"$GITHUB_ENV\"",
+                    1,
+                ),
+            ),
+        ];
+        // O passo antes do `id: conferir`.
+        let conferir = "    - id: conferir\n";
+        let (topo, passos) = antes.split_at(antes.find(conferir).unwrap());
+        casos.push(("antes do conferir", format!("{topo}{depois}\n{passos}")));
+        for (rotulo, texto) in casos {
+            assert_ne!(texto, acao, "{rotulo}");
+            assert!(!conferir_a_acao(&texto).is_empty(), "{rotulo}");
+        }
+    }
+
+    /// O passo do executor da ação, rodado como a CI o roda — o script do
+    /// `run:`, em Python, na raiz de uma árvore à parte, com o cargo do canal
+    /// e um `CARGO_HOME` vazio (o A8 do adversário do lote A8, no lote A9). A
+    /// árvore com o config do repositório passa. Reprovam, cada um com a
+    /// mensagem dele: o executor na raiz; um apelido a mais; o ligador do
+    /// hospedeiro no config do kernel; o embrulho do compilador no do kernel;
+    /// o `[env]` na raiz, que só tem o apelido; e, no ambiente, o apelido, o
+    /// executor e o ligador.
+    #[test]
+    fn a_acao_recusa_o_executor_o_ligador_e_o_apelido() {
+        let acao = include_str!("../../.github/actions/compilador/action.yml");
+        let (_, script) = passo_da_acao(acao, PASSO_DO_EXECUTOR).expect("o passo");
+        let base = std::env::temp_dir().join(format!("xtask-acao-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("a base");
+        let arquivo = base.join("executor.py");
+        std::fs::write(&arquivo, &script).expect("o script");
+        let projeto = super::super::raiz_do_projeto();
+        let ler = |relativo: &str| std::fs::read_to_string(projeto.join(relativo)).expect(relativo);
+        let da_raiz = ler(".cargo/config.toml");
+        let do_kernel = ler("kernel/.cargo/config.toml");
+        // O cargo do canal primeiro no PATH, sem o proxy do rustup.
+        let caminho = format!(
+            "{}:{}",
+            Path::new(env!("CARGO")).parent().expect("bin").display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let rodar = |nome: &str, raiz: &str, kernel: &str, ambiente: &[(&str, &str)]| {
+            let arvore = base.join(nome);
+            for pasta in [".cargo", "kernel/.cargo", "casa"] {
+                std::fs::create_dir_all(arvore.join(pasta)).expect("a pasta");
+            }
+            std::fs::write(arvore.join(".cargo/config.toml"), raiz).expect("a raiz");
+            std::fs::write(arvore.join("kernel/.cargo/config.toml"), kernel).expect("o kernel");
+            let saida = Command::new("python3")
+                .arg("-I")
+                .arg(&arquivo)
+                .current_dir(&arvore)
+                .env_clear()
+                .env("PATH", &caminho)
+                .env("CARGO_HOME", arvore.join("casa"))
+                .envs(ambiente.iter().copied())
+                .output()
+                .expect("o python3");
+            (
+                saida.status.success(),
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&saida.stdout),
+                    String::from_utf8_lossy(&saida.stderr)
+                ),
+            )
+        };
+        let (passou, saida) = rodar("limpa", &da_raiz, &do_kernel, &[]);
+        assert!(passou, "{saida}");
+        assert!(saida.contains("só o apelido oficial"), "{saida}");
+        let com_o_kernel = |texto: &str| format!("{do_kernel}\n{texto}");
+        // O nome, o config da raiz, o do kernel, o ambiente e o que o passo
+        // diz.
+        type Caso = (
+            &'static str,
+            String,
+            String,
+            &'static [(&'static str, &'static str)],
+            &'static str,
+        );
+        let casos: [Caso; 8] = [
+            (
+                "executor",
+                format!("{da_raiz}\n[target.'cfg(unix)']\nrunner = \"ferramentas/rodar\"\n"),
+                do_kernel.clone(),
+                &[],
+                "em ./, o config do cargo define target.cfg(unix).runner",
+            ),
+            (
+                "apelido",
+                format!("{da_raiz}b = \"build\"\n"),
+                do_kernel.clone(),
+                &[],
+                "em ./, o [alias] do config do cargo é {",
+            ),
+            (
+                "ligador",
+                da_raiz.clone(),
+                com_o_kernel("[target.x86_64-unknown-linux-gnu]\nlinker = \"ferramentas/ligar\"\n"),
+                &[],
+                "em kernel/, o config do cargo define target.x86_64-unknown-linux-gnu.linker",
+            ),
+            (
+                "embrulho",
+                da_raiz.clone(),
+                do_kernel.replacen("[build]\n", "[build]\nrustc-wrapper = \"embrulho\"\n", 1),
+                &[],
+                "em kernel/, o config do cargo define build.rustc-wrapper",
+            ),
+            (
+                "env-na-raiz",
+                format!("{da_raiz}\n[env]\nDUKE_DE_FORA = \"1\"\n"),
+                do_kernel.clone(),
+                &[],
+                "na raiz, onde o xtask se compila e roda, o config do cargo tem ['env']",
+            ),
+            (
+                "apelido-no-ambiente",
+                da_raiz.clone(),
+                do_kernel.clone(),
+                &[("CARGO_ALIAS_XTASK", "run --package outro --")],
+                "a variável CARGO_ALIAS_XTASK está definida",
+            ),
+            (
+                "executor-no-ambiente",
+                da_raiz.clone(),
+                do_kernel.clone(),
+                &[(
+                    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER",
+                    "ferramentas/rodar",
+                )],
+                "a variável CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER está definida",
+            ),
+            (
+                "ligador-no-ambiente",
+                da_raiz.clone(),
+                do_kernel.clone(),
+                &[(
+                    "CARGO_TARGET_X86_64_UNKNOWN_NONE_LINKER",
+                    "ferramentas/ligar",
+                )],
+                "a variável CARGO_TARGET_X86_64_UNKNOWN_NONE_LINKER está definida",
+            ),
+        ];
+        let mut cegos = Vec::new();
+        for (nome, raiz, kernel, ambiente, esperado) in casos {
+            let (passou, saida) = rodar(nome, &raiz, &kernel, ambiente);
+            if passou || !saida.contains(&format!("::error::{esperado}")) {
+                cegos.push(format!("{nome}: {saida}"));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(cegos.is_empty(), "{cegos:#?}");
     }
 
     #[test]
@@ -1329,8 +1987,19 @@ mod testes {
         assert!(chaves_que_trocam("{\"rustc-wrapper\":\"\"}").is_empty());
     }
 
-    /// Um diretório temporário com um `.cargo/config.toml` de `texto`.
+    /// Um diretório temporário com um `.cargo/config.toml` de `texto` e o
+    /// apelido oficial do `xtask`, como o da raiz do repositório o dá a todo
+    /// diretório de build.
     fn com_config(nome: &str, texto: &str) -> PathBuf {
+        let (apelido, valor) = APELIDO_DO_XTASK;
+        com_config_cru(
+            nome,
+            &format!("{texto}\n[alias]\n{apelido} = \"{valor}\"\n"),
+        )
+    }
+
+    /// Um diretório temporário com um `.cargo/config.toml` de `texto`, e só.
+    fn com_config_cru(nome: &str, texto: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("xtask-compilador-{}-{nome}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

@@ -22,6 +22,31 @@
 # Ela confere o ambiente do job uma vez; um passo seguinte que o mudasse é
 # o que a regra dos workflows do `cargo xtask invariantes` recusa, e todo
 # `cargo xtask` confere de novo.
+#
+# E, desde o lote A9, o passo do executor, em Python, logo depois: o que o
+# config do cargo faz rodar no lugar do que o toolchain rodaria, lido fora
+# do cargo — pela consulta do próprio cargo (`config get`), que lê todo
+# arquivo de config que vale em cada diretório de build, em toda forma, e
+# não roda nada:
+#
+# - em todo diretório de build, o `[alias]` é só o oficial, o do `xtask`;
+#   nenhuma tabela `target` tem executor (`runner`) nem ligador (`linker`);
+#   e a `[build]` não troca o compilador;
+# - na raiz, onde o `xtask` se compila e roda, o config é só o apelido
+#   oficial: os rustflags do hospedeiro escolhem o ligador também
+#   (`-C linker=`), e o `[env]` muda o ambiente do `xtask`;
+# - e nenhum `CARGO_ALIAS_*`, `CARGO_TARGET_*_RUNNER` ou
+#   `CARGO_TARGET_*_LINKER` no ambiente do job.
+#
+# Por quê: o `cargo xtask` é o `cargo run` do `xtask`, e o `cargo run` passa
+# o binário pelo executor. Um executor do repositório que respondesse
+# `invariantes` com sucesso faria o passo das invariantes passar sem guarda
+# nenhuma, e o mesmo com o `cargo test -p xtask` (o A8 do adversário do
+# lote A8); um apelido é o mesmo ponto; e o ligador da raiz roda ao ligar o
+# próprio `xtask`. Uma guarda de dentro do `xtask` não vê o executor que
+# nunca o chama: ela mora aqui, antes de todo `cargo`. O `xtask` vê o que
+# ainda o chama, no começo de todo comando, e o `cargo xtask invariantes`
+# confere que este passo está aqui (`xtask/src/compilador.rs`).
 name: O compilador oficial
 description: Instala e confere o compilador do rust-toolchain.toml, imprime a versão e devolve o canal para a chave do cache.
 outputs:
@@ -66,3 +91,84 @@ runs:
         fi
         echo "o compilador oficial: $ativo"
         echo "canal=$canal" >> "$GITHUB_OUTPUT"
+
+    - id: executor
+      shell: python3 -I {0}
+      run: |
+        import json
+        import os
+        import subprocess
+        import sys
+
+        # O apelido oficial, e os diretórios de build: os do `xtask`
+        # (`DIRETORIOS_DOS_BUILDS`, em `xtask/src/compilador.rs`).
+        APELIDO = {"xtask": "run --quiet --package xtask --"}
+        DIRETORIOS = (
+            "",
+            "kernel",
+            "programas",
+            "iniciador",
+            "sdk/modelo",
+            "target/sdk-fora/projeto",
+        )
+        TROCAM = ("rustc", "rustc-wrapper", "rustc-workspace-wrapper")
+
+        erros = []
+        for nome in sorted(os.environ):
+            if not os.environ[nome]:
+                continue
+            if nome.startswith("CARGO_ALIAS_") or (
+                nome.startswith("CARGO_TARGET_") and nome.endswith(("_RUNNER", "_LINKER"))
+            ):
+                erros.append(
+                    f"a variável {nome} está definida: troca o que o cargo roda no lugar do "
+                    "toolchain, ou o que o `cargo xtask` roda"
+                )
+        for diretorio in DIRETORIOS:
+            lugar = diretorio or "."
+            if not os.path.isdir(lugar):
+                continue
+            rotulo = f"{lugar}/"
+            consulta = subprocess.run(
+                ["cargo", "-Zunstable-options", "config", "get", "--format", "json-value"],
+                cwd=lugar,
+                capture_output=True,
+                text=True,
+            )
+            try:
+                config = json.loads(consulta.stdout) if consulta.returncode == 0 else None
+            except ValueError:
+                config = None
+            if not isinstance(config, dict):
+                linha = (consulta.stderr.strip().splitlines() or [""])[0]
+                erros.append(f"em {rotulo}, o cargo não respondeu à consulta do config: {linha}")
+                continue
+            if config.get("alias") != APELIDO:
+                erros.append(
+                    f"em {rotulo}, o [alias] do config do cargo é {json.dumps(config.get('alias'))}, "
+                    "e não só o oficial: um apelido decide o que o `cargo xtask` roda"
+                )
+            for alvo, tabela in sorted(config.get("target", {}).items()):
+                for chave in ("runner", "linker"):
+                    if chave in tabela:
+                        erros.append(
+                            f"em {rotulo}, o config do cargo define target.{alvo}.{chave}: um "
+                            "programa no lugar do que o toolchain rodaria"
+                        )
+            for chave in TROCAM:
+                if chave in config.get("build", {}):
+                    erros.append(
+                        f"em {rotulo}, o config do cargo define build.{chave}: troca o compilador"
+                    )
+            a_mais = sorted(set(config) - {"alias"})
+            if not diretorio and a_mais:
+                erros.append(
+                    f"na raiz, onde o xtask se compila e roda, o config do cargo tem {a_mais}, além "
+                    "do apelido oficial: os rustflags e o ligador do hospedeiro, o [env] e o resto "
+                    "mudam o xtask antes de ele conferir qualquer coisa"
+                )
+        for erro in erros:
+            print(f"::error::{erro}")
+        if erros:
+            sys.exit(1)
+        print("o executor, o ligador e o apelido do cargo: só o apelido oficial, em todo diretório de build")
