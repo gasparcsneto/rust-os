@@ -16558,6 +16558,25 @@ job foi o dos fluxos entre dispositivos (mesma arquitetura), que esperou
 50,0 minutos na fila e rodou 34,0; o maior, a persistência do x86, parte
 2/3, com 76,0.
 
+A CI 530 (`f77c674`, o lote A9 e o parágrafo da CI 529) passou verde, 48 de
+48, na primeira tentativa, em 85,3 minutos e 1311 de máquina. O passo novo
+da ação do compilador, o `executor`, rodou no runner de verdade em todos os
+jobs, antes de todo `cargo` que compila, e passou: a imagem do runner não
+tem config do cargo. O holdover da bancada de tempo, na parte 3/3: o x86 a
+-305 ppm (2057 s em 2057) e o ARM a -96 ppm (2056 s em 2056), os dois dentro
+da guarda. O último job foi o dos fluxos entre dispositivos (x86_64 e
+aarch64), que esperou 44,5 minutos na fila e rodou 34,3; o maior, a
+persistência do x86, parte 2/3, com 76,0.
+
+A CI 531 (`20dee2c`, o lote ICACHE) passou verde, 48 de 48, na primeira
+tentativa, em 115,8 minutos e 1349 de máquina — os runners divididos com as
+CIs 530 e 532, que rodaram ao mesmo tempo. Os casos que medem tempo
+passaram com o `tlbi` de volta nas páginas do kernel. O holdover da bancada
+de tempo, na parte 3/3: o x86 a -289 ppm (2057 s em 2057) e o ARM a -43 ppm
+(2056 s em 2056), os dois dentro da guarda. O último job foi a cópia de
+segurança do x86, que esperou 59,7 minutos na fila e rodou 24,7; o maior, a
+persistência do x86, parte 1/3, com 62,3.
+
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na
 508 e 58 na 509 —, e o que sobra até o piso é a ordem da fila, que não se
