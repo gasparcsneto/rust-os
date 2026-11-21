@@ -158,9 +158,13 @@ pontos onde acontece — não num canal paralelo:
   A7) —, sem macro de fora da lista do `xtask`, que escreveria ali o `impl`
   ou o `#[no_mangle]` sem a palavra, e sem montador nem ligador nos
   arquivos da carga, que dariam a uma entrada de dentro um símbolo que
-  qualquer arquivo declara (o lote A8). O que as guardas de texto do
-  `xtask` não fecham — quem escreve no kernel para contorná-las de
-  propósito — fica com a revisão ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)).
+  qualquer arquivo declara (o lote A8) — e as macros da lista com o corpo
+  que o `xtask` confere, token a token, chamando o `core` e o `alloc` de
+  verdade, e o `cargo xtask` que roda as guardas na CI o de verdade: a
+  ação que confere o compilador recusa, antes de todo `cargo`, um executor
+  ou um apelido do cargo que o trocassem (o lote A9). O que as guardas de
+  texto do `xtask` não fecham — quem escreve no kernel para contorná-las
+  de propósito — fica com a revisão ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)).
   E as recusas das perguntas sobre quem
   pede — o journal recusado, quem pede encerrado ou contido, o editor, o
   papel, a cota,

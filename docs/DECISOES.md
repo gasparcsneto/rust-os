@@ -1813,7 +1813,7 @@ como [C].
 | Id | O que se faz | O estado |
 |---|---|---|
 | [A1-4](#a1-4) | a recusa da cota diz quantos dos contados são mortos que esperam o coletor | feito, no `ee4ea45` |
-| [F4](#f4) | o `exec` decide de novo no ponto sem volta | feito, no `869dc08`, e o resto que o adversário do lote achou, no `97ea728`; o que o adversário da integração achou, no lote A3 do #448; o desfecho da imagem que não se carrega e o das recusas sobre quem pede, e o erro do `exec` da imagem que não se confere, no lote A4; o que o adversário do lote A4 achou, no lote A5; o que o adversário e o revisor do lote A5 acharam, no lote A6; o que o adversário e o revisor do lote A6 acharam, no lote A7; e o que o adversário do lote A7 achou, com o fecho das guardas de texto por inventário, no lote A8 |
+| [F4](#f4) | o `exec` decide de novo no ponto sem volta | feito, no `869dc08`, e o resto que o adversário do lote achou, no `97ea728`; o que o adversário da integração achou, no lote A3 do #448; o desfecho da imagem que não se carrega e o das recusas sobre quem pede, e o erro do `exec` da imagem que não se confere, no lote A4; o que o adversário do lote A4 achou, no lote A5; o que o adversário e o revisor do lote A5 acharam, no lote A6; o que o adversário e o revisor do lote A6 acharam, no lote A7; e o que o adversário do lote A7 achou, com o fecho das guardas de texto por inventário, no lote A8; e o que o adversário e o revisor do lote A8 acharam — as fontes que o inventário não fechava —, no lote A9 |
 | [I7](#i7) | o comando que existe, num console sem ninguém, gravado sem o resumo dos parâmetros | feito, no lote B do #448; a troca da própria senha com algo na linha, no lote B2 |
 | [A9-RESUMO](#a9-resumo) | o resumo de 16 dígitos na descrição de um programa | feito, no lote B do #448; o que o adversário do lote achou — o número da regra do firewall que se perde no corte, e o par misturado de duas descrições inteiras — no lote B2 |
 | [DN-4](#dn-4) | o handoff como o próximo marco da fase 15 | decidido pelo roteiro |
@@ -2064,8 +2064,10 @@ pendência #298.
     `extern` nele nem no `codigo.rs`; num dono, todo `use` no nível de um
     módulo que passa por um nome protegido, com `pub` ou sem; e o kernel
     só com os recursos instáveis da lista, sem macro 2.0, sem `${…}` e
-    sem `crate-attr` no config do cargo, no `xtask` e na CI — a macro 2.0
-    e o `${concat}` levavam ou montavam o nome protegido sem a palavra;
+    sem `crate-attr` no config do cargo, no `xtask` e na CI — pelo texto,
+    até o lote A8, que o confere pela lista dos rustflags que o cargo lê;
+    a macro 2.0 e o `${concat}` levavam ou montavam o nome protegido sem a
+    palavra;
   - no NSF, o nascimento pelo `fork` também só se lê num `ALLOW`. O
     registro não muda: muda a leitura;
   - a guarda do `DesfechoDoLancamento` contra o código que permite vale
@@ -2115,7 +2117,8 @@ pendência #298.
     caminho, cujo nome nenhum arquivo do kernel redefine nem traz de fora;
     e nos arquivos da carga, nem montador nem ligador — uma macro de fora
     escrevia ali o `impl` ou o `#[no_mangle]`, e o `.globl` de um `asm!`
-    dava um símbolo a uma entrada de dentro;
+    daria um símbolo a uma entrada de dentro (o `asm!` de linha passou no
+    `cargo check`, que não monta nem liga);
   - fora do módulo `usuario`, nenhum carregador nos tokens de uma macro;
     e o atributo com `$` fora do `doc` se acusa, porque o `cfg_attr` monta
     o `path` também;
@@ -2124,9 +2127,10 @@ pendência #298.
     repositório, o kernel sem `build.rs`, e os pacotes do repositório sem
     `build.rs`, macro exportada, recurso instável nem `include`;
   - o config do cargo como o cargo o lê: os rustflags de cada alvo, os da
-    lista, e nenhuma tabela que mude o que o cargo passa ao `rustc` do
-    kernel; o `Cargo.toml` do kernel sem `cargo-features`, `rustflags` nem
-    escape; e nenhum `RUSTFLAGS` na CI;
+    lista, sem ligador, `build.rustflags`, `[unstable]`, `[env]` nem
+    rustflags de perfil — o resto das tabelas, até o lote A9 —; o
+    `Cargo.toml` do kernel sem `cargo-features`, `rustflags` nem escape; e
+    nenhum `RUSTFLAGS` na CI;
   - o embrulho da suíte do desfecho é nome protegido, e a guarda do
     desfecho tem um caso também dentro de um comando.
 
@@ -2136,6 +2140,59 @@ pendência #298.
   e a cota por sessão") —, continua com a desmontagem, para um lote
   seguinte. Um caso novo na suíte, dezesseis testes novos no hospedeiro e um
   ajustado, e as mutações do lote, todas reprovadas.
+
+  O lote A9, [B], fez os achados do adversário do lote A8 — o alto, os sete
+  médios, os quatro baixos e o I2 dos informativos — e os do revisor dele,
+  sem autoridade, regra, registro ou semântica de auditoria novos. O
+  inventário das guardas de texto não fechava: faltavam fontes — o executor
+  do `cargo xtask`, a raiz do crate, o módulo da suíte, o `[source]`, o
+  ligador do hospedeiro, a feature padrão, o ambiente da CI, a linha de
+  comando do `xtask` —, e formas passavam pela guarda de uma fonte listada —
+  a macro de nome cru, o que as macros da lista expandem, o `#$a`, a marca
+  de direção. Cada guarda nova fecha a fonte, e não a forma do ataque:
+  - o executor e o apelido do cargo, fora do cargo: o `cargo xtask` é o
+    `cargo run` do `xtask`, e um executor no config da raiz que
+    respondesse `invariantes` com sucesso fazia o passo das invariantes da
+    CI passar sem guarda nenhuma. A ação que confere o compilador ganhou o
+    passo do executor, antes de todo `cargo` da CI — pela consulta do
+    próprio cargo, o `[alias]` só o oficial e nenhum executor nem ligador em
+    todo diretório de build, a raiz só com o apelido, e nenhum
+    `CARGO_ALIAS_*`, `CARGO_TARGET_*_RUNNER` nem `_LINKER` no ambiente —; o
+    `xtask` vê, no começo de todo comando, o executor e o apelido que ainda
+    o chamam; e as `CARGO_BUILD_RUSTC*` do ambiente, que a consulta da
+    tabela `[build]` não soma, entraram entre as variáveis que trocam o
+    compilador;
+  - a macro de nome cru de uma palavra-chave é uma invocação; os três
+    registros do log chamam o `::core::format_args!`, que nenhum item do
+    módulo sombreia, e têm o corpo da lista do `xtask`, token a token; o
+    `core` e o `alloc` que as macros da lista chamam são os de verdade —
+    nenhum `as core` nem `as alloc`, que na raiz do crate trocariam o
+    pacote, e nenhuma dependência do kernel renomeada —; e o `#` que não
+    abre um atributo é um atributo montado por uma macro;
+  - a raiz do crate pelo grafo do cargo — o binário do kernel em
+    `kernel/src/main.rs`, a biblioteca de cada pacote do repositório no
+    `src/` dele —, as features do kernel numa lista fechada, sem uma
+    padrão, e a suíte só na compilação de teste, pelo módulo da raiz do
+    crate;
+  - o config do cargo do kernel com a tabela `target` só nas dos dois
+    alvos dele — o ligador do hospedeiro e o de um `cfg(…)`, que o cargo do
+    canal lê, rodavam na compilação do kernel —, sem `[source]`, `[patch]`,
+    `[host]` nem `[profile]`; a CI só com as variáveis do cargo de uma
+    lista; o `xtask` só com o ambiente de uma lista nos processos que roda,
+    sem `--config`, `-Z`, `cargo rustc` nem `cargo rustdoc`; e a marca de
+    direção como espaço, como o `rustc` a lê;
+  - o caso do desfecho dentro de um comando confere que o gancho rodou
+    dentro dele: um `ERROR` pelo caminho que só grava num comando, que sai
+    como a execução do `user.run` do caso.
+
+  Fica o que o inventário diz em cada linha, e o código do repositório que
+  roda no job dos lints antes do passo das invariantes — os testes do
+  hospedeiro, os `build.rs` —, que pode mudar a árvore que ele lê, como pode
+  mudar o próprio `xtask`: fica com a revisão
+  ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)). Um caso
+  reforçado na suíte, vinte e dois testes novos no hospedeiro — treze do
+  adversário, quatro deles adaptados à guarda que fecha a fonte — e três
+  reforçados, e as mutações do lote, todas reprovadas.
 
 ### I7
 
