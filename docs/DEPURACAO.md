@@ -299,6 +299,28 @@ ou desligando a máquina por um caminho que não seja o canal de resultado
 apareceu o sucesso do ARM valendo `0`, o mesmo código de qualquer saída limpa
 do QEMU.
 
+### Quando a sonda mede outra coisa
+
+Uma sonda de tempo reprova por um número, e o número sozinho não diz para
+onde o tempo foi. A da rede, na fumaça, mede se o agente de uma porta é
+respondido enquanto a serial espera; na CI 527 reprovou com 2292 ms, e a
+causa não estava no que ela mede. Duas regras saíram dali:
+
+- **A janela contém só o que se mede.** O cronômetro começava na resposta
+  do aperto, e o kernel termina o aperto depois dela — a auditoria e uma
+  linha de log —; e um programa da sonda anterior, que ninguém esperava,
+  escrevia no log ao mesmo tempo, porque a espera por ele casava uma linha
+  igual, mais antiga. Uma espera pelo log lê só o que entrou no anel depois
+  do pedido (o `total_emitted` lido antes), e uma medida começa depois de
+  um pedido já respondido.
+- **O pulso de cada núcleo é a régua do tempo mascarado.** Um núcleo com as
+  interrupções mascaradas não conta tique, e o relógio anda pelos outros
+  (`tempo::avancar`): os tiques que o núcleo dos dispositivos contou a menos
+  entre dois `system.info` são o tempo em que ele não atendeu nada. Foi a
+  conta que mostrou, sem instrumentar o kernel, que cada linha de log com o
+  console cheio o mascarava por centenas de milissegundos — e que, com o
+  console limpo e as mesmas linhas, não.
+
 ### Quando a lente não acha nada
 
 Acontece, e o resultado é legítimo — desde que a varredura fique registrada,
