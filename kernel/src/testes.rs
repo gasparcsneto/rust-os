@@ -33289,9 +33289,16 @@ fn paginacao_a_entrada_nova_privada_publica_e_a_compartilhada_invalida() -> Resu
 /// vazia também cobriria a falta. Medido no aarch64: sem o `tlbi` da
 /// remoção, a leitura vê o conteúdo velho, e só este caso reprova.
 ///
-/// No x86 o caso roda também, e não discrimina a remoção: lá o mapeamento
-/// novo faz o `invlpg` do endereço (o do `map_to`), que derruba a tradução
-/// velha mesmo sem o da remoção — medido, a mutação que o tira passa.
+/// # No x86, o remapeamento sem o `invlpg`
+///
+/// Lá o `mapear_frame` faz o `invlpg` do endereço no fim (o do `map_to`), e
+/// ele derrubava a tradução velha mesmo sem o da remoção: com o
+/// remapeamento de sempre, a remoção sem o `invlpg` dela passava neste caso
+/// (o E1 do revisor do lote ICACHE) — e fora dele, num `desmapear_e_liberar`,
+/// deixava na TLB deste núcleo uma tradução para um frame que já voltou ao
+/// alocador. O caso remapeia lá sem o `invlpg`
+/// (`mapear_frame_sem_invalidar_de_teste`), o que uma entrada que era não
+/// presente dispensa: só o da remoção derruba a tradução velha.
 ///
 /// # Um outro núcleo na janela
 ///
@@ -33306,6 +33313,34 @@ fn memoria_remapear_uma_pagina_privada_neste_nucleo_nao_le_o_frame_antigo() -> R
     const PAGINA: u64 = crate::usuario::BASE;
     const VIZINHA: u64 = crate::usuario::BASE + TAMANHO_PAGINA;
     const ANTIGO: u64 = 0xA5A5_0000_A5A5_0001;
+
+    /// Mapeia `pagina` de novo, sobre um frame zerado, sem invalidar o
+    /// endereço: no aarch64, o de sempre — a entrada nova privada só
+    /// publica —; no x86, sem o `invlpg` do `mapear_frame`.
+    #[cfg(target_arch = "aarch64")]
+    fn remapear(pagina: u64) -> Result<(), &'static str> {
+        crate::paginacao::mapear_novo(pagina, Permissoes::DADOS_USUARIO).map(|_| ())
+    }
+    /// Ver o do aarch64, acima.
+    #[cfg(target_arch = "x86_64")]
+    fn remapear(pagina: u64) -> Result<(), &'static str> {
+        let frame = crate::frames::alocar().ok_or("sem frame para o remapeamento")?;
+        // SAFETY: o frame acabou de sair do alocador, e só nós o temos; ele é
+        // zerado pelo mapa da memória física, e então mapeado — o contrato de
+        // `mapear_frame`.
+        let r = unsafe {
+            core::ptr::write_bytes(arch::acesso_fisico(frame), 0, TAMANHO_PAGINA as usize);
+            crate::arch::x86_64::paginacao::mapear_frame_sem_invalidar_de_teste(
+                pagina,
+                frame,
+                Permissoes::DADOS_USUARIO,
+            )
+        };
+        if r.is_err() {
+            crate::frames::liberar(frame);
+        }
+        r
+    }
 
     let privada = arch::ENTRADA_PRIVADA as usize;
     let kernel = arch::espaco_do_kernel();
@@ -33332,8 +33367,8 @@ fn memoria_remapear_uma_pagina_privada_neste_nucleo_nao_le_o_frame_antigo() -> R
                     // O frame sai sem voltar ao alocador: fica com o conteúdo
                     // velho, que é o que uma tradução velha mostraria.
                     let antigo = arch::desmapear(PAGINA)?;
-                    let lido = crate::paginacao::mapear_novo(PAGINA, Permissoes::DADOS_USUARIO)
-                        .map(|_| core::ptr::read_volatile(PAGINA as *const u64));
+                    let lido =
+                        remapear(PAGINA).map(|()| core::ptr::read_volatile(PAGINA as *const u64));
                     let limpa = antes.is_some() && tlbi_difundidos_de_fora(&par) == antes;
                     crate::frames::liberar(antigo);
                     lido.map(|lido| (lido, limpa))

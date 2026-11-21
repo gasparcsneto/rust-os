@@ -281,6 +281,46 @@ pub unsafe fn mapear_frame(
     fisico: u64,
     permissoes: Permissoes,
 ) -> Result<(), &'static str> {
+    // SAFETY: o contrato é o desta função, e passa adiante.
+    unsafe { mapear_frame_com(virtual_, fisico, permissoes, true) }
+}
+
+/// Só para a suíte: [`mapear_frame`] sem o `invlpg` do endereço.
+///
+/// O `invlpg` do fim do `mapear_frame` derruba qualquer tradução do endereço
+/// que a TLB deste núcleo ainda tivesse, e com isso cobre a falta de uma
+/// remoção que não a tivesse derrubado: o caso `memoria: remapear uma pagina
+/// privada neste nucleo nao le o frame antigo` passava no x86 com a remoção
+/// sem o `invlpg` dela (o E1 do revisor do lote ICACHE). Remapeando por
+/// aqui, só o `invlpg` da remoção derruba a tradução velha: a entrada era
+/// não presente, e nenhuma TLB guarda tradução de uma entrada não presente
+/// (o manual da Intel, citado sem conferir na fonte, dispensa a invalidação
+/// nessa troca).
+///
+/// # Safety
+///
+/// O contrato de [`mapear_frame`].
+#[cfg(feature = "modo-teste")]
+pub unsafe fn mapear_frame_sem_invalidar_de_teste(
+    virtual_: u64,
+    fisico: u64,
+    permissoes: Permissoes,
+) -> Result<(), &'static str> {
+    // SAFETY: o contrato é o desta função, e passa adiante.
+    unsafe { mapear_frame_com(virtual_, fisico, permissoes, false) }
+}
+
+/// [`mapear_frame`], com o `invlpg` do endereço no fim só se `invalidar`.
+///
+/// # Safety
+///
+/// O contrato de [`mapear_frame`].
+unsafe fn mapear_frame_com(
+    virtual_: u64,
+    fisico: u64,
+    permissoes: Permissoes,
+    invalidar: bool,
+) -> Result<(), &'static str> {
     validar_alinhamento(virtual_, fisico)?;
     if !canonico(virtual_) {
         return Err("endereco virtual nao canonico");
@@ -337,8 +377,16 @@ pub unsafe fn mapear_frame(
 
         match resultado {
             Ok(flush) => {
-                // Sem isto a TLB continuaria servindo a ausência de tradução.
-                flush.flush();
+                // O `invlpg` do endereço. A entrada era não presente, e não
+                // havia tradução dela na TLB; o que ele derruba é uma
+                // tradução velha do mesmo endereço, que uma remoção sem o
+                // `invlpg` dela tivesse deixado — e por isso o caso da
+                // remoção remapeia sem ele.
+                if invalidar {
+                    flush.flush();
+                } else {
+                    flush.ignore();
+                }
                 Ok(())
             }
             Err(MapToError::PageAlreadyMapped(_)) => Err("endereco virtual ja mapeado"),
