@@ -107,10 +107,9 @@ pub use atual::{desligar_a_maquina, meios_da_energia, reiniciar_a_maquina};
 /// máquina avisa o aperto, ou por que ela não avisa.
 pub use atual::botao::ligar as ligar_o_botao;
 
-/// Só para a suíte: o par de conversões de permissão de cada backend, e as
-/// linhas que a sincronia do cache de instruções percorre nele.
+/// Só para a suíte: o par de conversões de permissão de cada backend.
 #[cfg(feature = "modo-teste")]
-pub use atual::{linhas_da_sincronia_de_teste, permissoes_ida_e_volta};
+pub use atual::permissoes_ida_e_volta;
 
 /// Acesso ao barramento PCI, que difere em mecanismo entre as duas
 /// arquiteturas: portas de I/O no x86, ECAM no ARM.
@@ -252,12 +251,14 @@ impl Permissoes {
 }
 
 /// O que [`sincronizar_instrucoes`] fez: as linhas de cache que limpou e
-/// que invalidou. Zero onde a arquitetura não precisa — o x86, e um ARM que
-/// anuncie o `IDC` e o `DIC`.
+/// que invalidou, e a faixa que elas cobrem. Zero onde a arquitetura não
+/// precisa — o x86, e um ARM que anuncie o `IDC` e o `DIC`.
 ///
 /// Fora da suíte, ninguém lê: é a conta que o caso `memoria: a carga
 /// sincroniza o cache de instrucoes do codigo` confere, porque o emulador
-/// não mostra o que a manutenção evita.
+/// não mostra o que a manutenção evita — nem a falta dela, nem a feita no
+/// lugar errado: lá a manutenção por endereço numa página sem tradução
+/// passa sem falha (medido pelo adversário do lote ICACHE).
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Sincronia {
@@ -265,6 +266,12 @@ pub struct Sincronia {
     pub limpas: u64,
     /// `ic ivau`: linhas dos caches de instruções invalidadas.
     pub invalidadas: u64,
+    /// O começo da faixa que a manutenção percorreu: o da primeira linha que
+    /// ela tocou, nas duas passadas. Com [`Sincronia::fim`], uma faixa vazia
+    /// quando ela não tocou nenhuma.
+    pub inicio: u64,
+    /// O fim da faixa que a manutenção percorreu: o da última linha.
+    pub fim: u64,
 }
 
 /// Uma página de usuário, como o percurso das tabelas a encontra.

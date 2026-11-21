@@ -1317,15 +1317,6 @@ fn linhas_da_sincronia() -> (Option<u64>, Option<u64>) {
     )
 }
 
-/// Só para a suíte: as linhas de [`linhas_da_sincronia`], com zero na que o
-/// processador dispensa — a conta do caso `memoria: a carga sincroniza o
-/// cache de instrucoes do codigo`.
-#[cfg(feature = "modo-teste")]
-pub fn linhas_da_sincronia_de_teste() -> (u64, u64) {
-    let (dados, instrucoes) = linhas_da_sincronia();
-    (dados.unwrap_or(0), instrucoes.unwrap_or(0))
-}
-
 /// Torna o que o kernel escreveu em `[inicio, inicio + bytes)` — endereços
 /// do espaço ativo — visível às buscas de instrução de todos os núcleos.
 ///
@@ -1387,28 +1378,42 @@ pub unsafe fn sincronizar_instrucoes(inicio: u64, bytes: u64) -> crate::arch::Si
     unsafe {
         match dados {
             Some(linha) => {
-                let mut endereco = inicio & !(linha - 1);
+                let primeira = inicio & !(linha - 1);
+                let mut endereco = primeira;
                 while endereco < fim {
                     asm!("dc cvau, {}", in(reg) endereco, options(nostack, preserves_flags));
                     feito.limpas += 1;
                     endereco += linha;
                 }
                 asm!("dsb ish", options(nostack, preserves_flags));
+                percorreu(&mut feito, primeira, endereco);
             }
             None => asm!("dsb ishst", options(nostack, preserves_flags)),
         }
         if let Some(linha) = instrucoes {
-            let mut endereco = inicio & !(linha - 1);
+            let primeira = inicio & !(linha - 1);
+            let mut endereco = primeira;
             while endereco < fim {
                 asm!("ic ivau, {}", in(reg) endereco, options(nostack, preserves_flags));
                 feito.invalidadas += 1;
                 endereco += linha;
             }
             asm!("dsb ish", options(nostack, preserves_flags));
+            percorreu(&mut feito, primeira, endereco);
         }
         asm!("isb", options(nostack, preserves_flags));
     }
     feito
+}
+
+/// Junta `[de, ate)` — as linhas que uma passada de [`sincronizar_instrucoes`]
+/// tocou — à faixa de `feito`.
+fn percorreu(feito: &mut crate::arch::Sincronia, de: u64, ate: u64) {
+    if feito.fim <= feito.inicio {
+        (feito.inicio, feito.fim) = (de, ate);
+    } else {
+        (feito.inicio, feito.fim) = (feito.inicio.min(de), feito.fim.max(ate));
+    }
 }
 
 // ===========================================================================

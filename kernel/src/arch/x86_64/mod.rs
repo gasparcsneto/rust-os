@@ -1247,10 +1247,9 @@ fn exigir_protecao_de_escrita() {
 /// Só para a suíte: tira a marca de compartilhada de uma página.
 #[cfg(feature = "modo-teste")]
 pub use paginacao::desmarcar_compartilhada_de_teste;
-/// Só para a suíte: o par de conversões de permissão deste backend, e as
-/// linhas que a sincronia do cache de instruções percorre — nenhuma aqui.
+/// Só para a suíte: o par de conversões de permissão deste backend.
 #[cfg(feature = "modo-teste")]
-pub use paginacao::{linhas_da_sincronia_de_teste, permissoes_ida_e_volta};
+pub use paginacao::permissoes_ida_e_volta;
 
 pub use paginacao::{
     acesso_fisico, copia_na_escrita_em, criar_espaco, desmapear, destravar_paginacao,

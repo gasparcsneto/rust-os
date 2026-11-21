@@ -155,9 +155,9 @@ pub fn mapear_faixa_preenchendo(
 }
 
 /// Só para a suíte: o que a carga de um fio fez pelo cache de instruções —
-/// quantas páginas executáveis [`mapear_faixa_preenchendo`] sincronizou, e
-/// quantas linhas de cache a sincronia limpou e invalidou
-/// ([`arch::Sincronia`]).
+/// quantas páginas executáveis [`mapear_faixa_preenchendo`] sincronizou,
+/// quantas linhas de cache a sincronia limpou e invalidou, e a faixa que
+/// elas cobriram ([`arch::Sincronia`]).
 ///
 /// Por fio, e não para a máquina: a carga de outro processo, noutro núcleo,
 /// ao mesmo tempo, não entra na conta do caso que vigia.
@@ -170,12 +170,32 @@ pub mod sincronia_de_teste {
     static PAGINAS: AtomicU64 = AtomicU64::new(0);
     static LIMPAS: AtomicU64 = AtomicU64::new(0);
     static INVALIDADAS: AtomicU64 = AtomicU64::new(0);
+    /// O menor começo e o maior fim das faixas que as sincronias do fio
+    /// percorreram — `u64::MAX` e zero enquanto nenhuma percorreu nada.
+    static INICIO: AtomicU64 = AtomicU64::new(u64::MAX);
+    static FIM: AtomicU64 = AtomicU64::new(0);
+
+    /// O que as sincronias do fio vigiado fizeram — ver [`contas`].
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Contas {
+        /// As páginas executáveis sincronizadas.
+        pub paginas: u64,
+        /// As linhas do cache de dados limpas.
+        pub limpas: u64,
+        /// As linhas dos caches de instruções invalidadas.
+        pub invalidadas: u64,
+        /// Do menor começo ao maior fim das faixas que a manutenção
+        /// percorreu; `None` se ela não percorreu nenhuma.
+        pub faixa: Option<(u64, u64)>,
+    }
 
     /// Vigia as cargas do fio `fio`, a partir de zero.
     pub fn vigiar(fio: u64) {
         PAGINAS.store(0, Ordering::Release);
         LIMPAS.store(0, Ordering::Release);
         INVALIDADAS.store(0, Ordering::Release);
+        INICIO.store(u64::MAX, Ordering::Release);
+        FIM.store(0, Ordering::Release);
         VIGIADO.store(fio + 1, Ordering::Release);
     }
 
@@ -184,13 +204,15 @@ pub mod sincronia_de_teste {
         VIGIADO.store(0, Ordering::Release);
     }
 
-    /// `(páginas, linhas limpas, linhas invalidadas)` do fio vigiado.
-    pub fn contas() -> (u64, u64, u64) {
-        (
-            PAGINAS.load(Ordering::Acquire),
-            LIMPAS.load(Ordering::Acquire),
-            INVALIDADAS.load(Ordering::Acquire),
-        )
+    /// O que as sincronias do fio vigiado fizeram.
+    pub fn contas() -> Contas {
+        let (inicio, fim) = (INICIO.load(Ordering::Acquire), FIM.load(Ordering::Acquire));
+        Contas {
+            paginas: PAGINAS.load(Ordering::Acquire),
+            limpas: LIMPAS.load(Ordering::Acquire),
+            invalidadas: INVALIDADAS.load(Ordering::Acquire),
+            faixa: (fim > inicio).then_some((inicio, fim)),
+        }
     }
 
     /// Chamada por [`super::mapear_faixa_preenchendo`] depois de cada
@@ -203,6 +225,10 @@ pub mod sincronia_de_teste {
             PAGINAS.fetch_add(paginas, Ordering::AcqRel);
             LIMPAS.fetch_add(feito.limpas, Ordering::AcqRel);
             INVALIDADAS.fetch_add(feito.invalidadas, Ordering::AcqRel);
+            if feito.fim > feito.inicio {
+                INICIO.fetch_min(feito.inicio, Ordering::AcqRel);
+                FIM.fetch_max(feito.fim, Ordering::AcqRel);
+            }
         }
     }
 }

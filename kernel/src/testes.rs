@@ -32826,21 +32826,34 @@ fn memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel() -> Resultado 
 /// em seguida, e no ARM o cache de instruções não acompanha as escritas:
 /// ele pode guardar, do frame que o alocador acabou de devolver, o código
 /// do processo que o teve antes — e o processo novo executaria o código do
-/// outro, com a autoridade dele. A carga agora sincroniza cada página
+/// outro, com a autoridade do novo. A carga agora sincroniza cada página
 /// executável (`arch::sincronizar_instrucoes`): `dc cvau` e `ic ivau` em
 /// cada linha, com as barreiras.
 ///
 /// # Por que pela conta, e não pelo efeito
 ///
-/// Porque o emulador não mostra o defeito: o QEMU sem aceleração mantém o
-/// código traduzido coerente com a memória, e lá o `dc cvau` e o `ic ivau`
-/// não fazem nada. O caso confere a manutenção pelo número de operações:
-/// um fio do kernel carrega o exemplo, e as páginas sincronizadas — as do
-/// fio, e não as da máquina (`paginacao::sincronia_de_teste`) — têm de ser
-/// as do segmento de código, e só elas, com uma limpeza e uma invalidação
-/// por linha de cada uma, no tamanho de linha do `CTR_EL0`. No x86 as
-/// páginas são as mesmas, e as linhas, nenhuma: lá o cache de instruções é
-/// coerente.
+/// Porque o emulador não mostra o defeito: tirada a manutenção, só este caso
+/// reprova — o QEMU sem aceleração mantém o código traduzido coerente com a
+/// memória. O caso confere a manutenção pelo número de operações: um fio do
+/// kernel carrega o exemplo, e as páginas sincronizadas — as do fio, e não
+/// as da máquina (`paginacao::sincronia_de_teste`) — têm de ser as do
+/// segmento de código, e só elas, com uma limpeza e uma invalidação por
+/// linha de cada uma, no tamanho de linha do `CTR_EL0`, sobre a faixa das
+/// páginas de código. No x86 as páginas são as mesmas, e as linhas, nenhuma:
+/// lá o cache de instruções é coerente.
+///
+/// # O esperado sai do caso, e não da carga
+///
+/// As linhas e os bits que o caso espera saem do `CTR_EL0` que ele mesmo lê,
+/// em cada núcleo ligado (`linhas_esperadas_da_sincronia`), e não do
+/// cálculo que a carga usa: tirado da mesma função, o esperado mudava junto
+/// com ela, e o caso passava com a manutenção tirada inteira — com o `IDC` e
+/// o `DIC` lidos ao contrário, o A72 não fazia manutenção nenhuma, e o caso
+/// esperava zero (o achado 1 do adversário do lote ICACHE). E a faixa que a
+/// manutenção percorreu (`arch::Sincronia`) tem de ser a das
+/// páginas de código: no emulador, a manutenção por endereço numa página
+/// sem tradução passa sem falha, e uma sincronia uma página adiante, numa
+/// página ainda não mapeada, passava com as contas certas (o achado 2).
 fn memoria_a_carga_sincroniza_o_cache_de_instrucoes_do_codigo() -> Resultado {
     use crate::arch::TAMANHO_PAGINA;
     use crate::paginacao::sincronia_de_teste as sincronia;
@@ -32864,7 +32877,7 @@ fn memoria_a_carga_sincroniza_o_cache_de_instrucoes_do_codigo() -> Resultado {
     // As páginas de cada segmento, como a carga as conta — da página do
     // destino à que cobre o fim, pelo menos uma —, e as linhas que a
     // sincronia percorre nas de código.
-    let (linha_de_dados, linha_de_instrucoes) = crate::arch::linhas_da_sincronia_de_teste();
+    let (linha_de_dados, linha_de_instrucoes) = linhas_esperadas_da_sincronia()?;
     let linhas = |inicio: u64, fim: u64, linha: u64| {
         if linha == 0 {
             0
@@ -32874,6 +32887,7 @@ fn memoria_a_carga_sincroniza_o_cache_de_instrucoes_do_codigo() -> Resultado {
     };
     let elf = crate::usuario::elf::validar(crate::usuario::exemplo::bytes())?;
     let (mut de_codigo, mut de_dados, mut limpas, mut invalidadas) = (0u64, 0u64, 0u64, 0u64);
+    let mut faixa_do_codigo: Option<(u64, u64)> = None;
     for segmento in elf.segmentos() {
         let inicio = segmento.destino & !(TAMANHO_PAGINA - 1);
         let fim = (segmento.destino + segmento.bytes_na_memoria as u64)
@@ -32885,6 +32899,10 @@ fn memoria_a_carga_sincroniza_o_cache_de_instrucoes_do_codigo() -> Resultado {
             de_codigo += paginas;
             limpas += linhas(inicio, fim, linha_de_dados);
             invalidadas += linhas(inicio, fim, linha_de_instrucoes);
+            faixa_do_codigo = Some(match faixa_do_codigo {
+                None => (inicio, fim),
+                Some((de, ate)) => (de.min(inicio), ate.max(fim)),
+            });
         } else {
             de_dados += paginas;
         }
@@ -32894,6 +32912,13 @@ fn memoria_a_carga_sincroniza_o_cache_de_instrucoes_do_codigo() -> Resultado {
     if de_codigo == 0 || de_dados == 0 {
         return Err("o exemplo nao tem segmento de codigo e de dados: o caso nao mediria nada");
     }
+    // A faixa que a manutenção percorre: a das páginas de código — as
+    // linhas não passam da página —, e nenhuma se não há linha a percorrer.
+    let faixa_esperada = if linha_de_dados == 0 && linha_de_instrucoes == 0 {
+        None
+    } else {
+        faixa_do_codigo
+    };
 
     FASE.store(0, SeqCst);
     CARREGOU.store(0, SeqCst);
@@ -32901,7 +32926,7 @@ fn memoria_a_carga_sincroniza_o_cache_de_instrucoes_do_codigo() -> Resultado {
     sincronia::vigiar(fio.numero());
     FASE.store(1, SeqCst);
     let terminou = esperar_cedendo(|| CARREGOU.load(SeqCst) != 0, 300);
-    let (paginas, limpas_vistas, invalidadas_vistas) = sincronia::contas();
+    let vistas = sincronia::contas();
     sincronia::esquecer();
     terminou.map_err(|_| "o fio do caso nao terminou a carga")?;
     if CARREGOU.load(SeqCst) != 1 {
@@ -32913,21 +32938,124 @@ fn memoria_a_carga_sincroniza_o_cache_de_instrucoes_do_codigo() -> Resultado {
         "carga do exemplo: {} pagina(s) de codigo e {} de dados; sincronizadas {}, com {} limpeza(s) e {} invalidacao(oes) de linha, esperadas {} e {} (linhas de {} e {} bytes)",
         de_codigo,
         de_dados,
-        paginas,
-        limpas_vistas,
-        invalidadas_vistas,
+        vistas.paginas,
+        vistas.limpas,
+        vistas.invalidadas,
         limpas,
         invalidadas,
         linha_de_dados,
         linha_de_instrucoes
     );
-    if paginas != de_codigo {
+    let (de, ate) = vistas.faixa.unwrap_or((0, 0));
+    let (de_esperado, ate_esperado) = faixa_esperada.unwrap_or((0, 0));
+    crate::log_info!(
+        "teste",
+        "faixa sincronizada {:#x}..{:#x}, esperada {:#x}..{:#x} (0x0..0x0: nenhuma)",
+        de,
+        ate,
+        de_esperado,
+        ate_esperado
+    );
+    if vistas.paginas != de_codigo {
         return Err("a carga nao sincronizou exatamente as paginas de codigo");
     }
-    if (limpas_vistas, invalidadas_vistas) != (limpas, invalidadas) {
-        return Err("a sincronia nao limpou e invalidou cada linha das paginas de codigo");
+    if (vistas.limpas, vistas.invalidadas) != (limpas, invalidadas) {
+        return Err(
+            "a sincronia nao limpou e invalidou cada linha das paginas de codigo, no tamanho do CTR_EL0",
+        );
+    }
+    if vistas.faixa != faixa_esperada {
+        return Err("a sincronia nao percorreu a faixa das paginas de codigo, e so ela");
     }
     Ok(())
+}
+
+/// As linhas, em bytes, que a sincronia do cache de instruções tem de
+/// percorrer — a do cache de dados e a do de instruções, zero na que o
+/// processador dispensa —, pelo `CTR_EL0` que o caso lê, e não pelo cálculo
+/// da carga — ver `memoria: a carga sincroniza o cache de instrucoes do
+/// codigo`.
+///
+/// No aarch64, lido em cada núcleo ligado: o processo que um núcleo carrega
+/// roda em qualquer outro, e a manutenção tem de servir a todos — a menor
+/// linha de todos, e a parte dispensada só se todos a dispensam. Os campos,
+/// pela definição da arquitetura (as posições citadas sem conferir no
+/// manual; a rodada as sustenta pelo efeito — no A72 do emulador, linhas de
+/// 64 bytes, 64 por página): o `IminLine` nos bits 0 a 3 e o `DminLine` nos
+/// 16 a 19, o log2 da linha em palavras de 4 bytes; o `IDC` no bit 28 e o
+/// `DIC` no 29. No x86, nenhuma: lá o cache de instruções é coerente com as
+/// escritas.
+fn linhas_esperadas_da_sincronia() -> Result<(u64, u64), &'static str> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        Ok((0, 0))
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let lidos = ctr_el0_de_cada_nucleo()?;
+        for &(nucleo, ctr) in &lidos {
+            crate::log_info!("teste", "CTR_EL0 do nucleo {}: {:#x}", nucleo, ctr);
+        }
+        let menor = |desde: u64| {
+            lidos
+                .iter()
+                .map(|&(_, ctr)| 4u64 << ((ctr >> desde) & 0xF))
+                .min()
+                .unwrap_or(0)
+        };
+        let em_todos = |bit: u64| lidos.iter().all(|&(_, ctr)| ctr & (1 << bit) != 0);
+        let dados = if em_todos(28) { 0 } else { menor(16) };
+        let instrucoes = if em_todos(29) { 0 } else { menor(0) };
+        Ok((dados, instrucoes))
+    }
+}
+
+/// O `CTR_EL0` de cada núcleo ligado, como `(núcleo, valor)`: o deste
+/// núcleo, lido aqui, e o de cada outro, por um fio fixo nele.
+#[cfg(target_arch = "aarch64")]
+fn ctr_el0_de_cada_nucleo() -> Result<alloc::vec::Vec<(usize, u64)>, &'static str> {
+    static LIDO: AtomicU64 = AtomicU64::new(0);
+    static ONDE: AtomicU64 = AtomicU64::new(0);
+    static PRONTO: AtomicBool = AtomicBool::new(false);
+
+    fn ler() -> u64 {
+        let ctr: u64;
+        // SAFETY: leitura de um registrador de identificação, sem efeito; o
+        // EL1 sempre o alcança.
+        unsafe {
+            core::arch::asm!(
+                "mrs {}, ctr_el0",
+                out(reg) ctr,
+                options(nomem, nostack, preserves_flags)
+            )
+        };
+        ctr
+    }
+
+    extern "C" fn leitor(_argumento: u64) -> ! {
+        // Mascarado: o núcleo e a leitura são do mesmo núcleo.
+        let (onde, ctr) = crate::arch::sem_interrupcoes(|| (crate::arch::nucleo_atual(), ler()));
+        LIDO.store(ctr, SeqCst);
+        ONDE.store(onde as u64, SeqCst);
+        PRONTO.store(true, SeqCst);
+        crate::fios::terminar()
+    }
+
+    let (aqui, ctr) = crate::arch::sem_interrupcoes(|| (crate::arch::nucleo_atual(), ler()));
+    let mut lidos = alloc::vec![(aqui, ctr)];
+    let ligados = crate::nucleos::mascara_dos_ligados();
+    for nucleo in (0..crate::nucleos::MAX_NUCLEOS).filter(|&n| n != aqui && ligados & (1 << n) != 0)
+    {
+        PRONTO.store(false, SeqCst);
+        crate::fios::criar_no_nucleo("teste-ctr-el0", leitor, 0, nucleo)?;
+        esperar_ate(|| PRONTO.load(SeqCst), 300)
+            .map_err(|_| "um nucleo nao leu o proprio CTR_EL0 a tempo")?;
+        if ONDE.load(SeqCst) != nucleo as u64 {
+            return Err("o fio que le o CTR_EL0 nao rodou no nucleo pedido");
+        }
+        lidos.push((nucleo, LIDO.load(SeqCst)));
+    }
+    Ok(lidos)
 }
 
 /// A regra da entrada nova no aarch64 (o item B do lote ICACHE): a entrada

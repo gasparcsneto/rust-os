@@ -452,10 +452,9 @@ pub fn init_paginacao() {
     unsafe { mmu::init() };
 }
 
-/// Só para a suíte: o par de conversões de permissão deste backend, e as
-/// linhas que a sincronia do cache de instruções percorre.
+/// Só para a suíte: o par de conversões de permissão deste backend.
 #[cfg(feature = "modo-teste")]
-pub use mmu::{linhas_da_sincronia_de_teste, permissoes_ida_e_volta};
+pub use mmu::permissoes_ida_e_volta;
 
 pub use mmu::{
     acesso_fisico, copia_na_escrita_em, criar_espaco, desmapear, destravar_paginacao,

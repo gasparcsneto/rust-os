@@ -514,13 +514,6 @@ pub unsafe fn sincronizar_instrucoes(_inicio: u64, _bytes: u64) -> crate::arch::
     crate::arch::Sincronia::default()
 }
 
-/// Só para a suíte: as linhas que [`sincronizar_instrucoes`] percorre —
-/// nenhuma, no x86.
-#[cfg(feature = "modo-teste")]
-pub fn linhas_da_sincronia_de_teste() -> (u64, u64) {
-    (0, 0)
-}
-
 // ===========================================================================
 // Espaços de endereços
 // ===========================================================================
