@@ -2034,12 +2034,15 @@ const SONDA_SAI: u64 = 3;
 static SONDA: AtomicU64 = AtomicU64::new(SONDA_ESPERA);
 /// O titular da cota que a sonda pergunta, como `Autoridade::Pessoa`.
 static SONDA_SESSAO: AtomicU64 = AtomicU64::new(0);
-/// O que a sonda viu na última rodada: o núcleo do coletor antes do pedido,
-/// mais um — zero, nenhum —; os cutucões dele antes e depois; os do sistema
-/// antes e depois; e se o pedido foi recusado como devia.
-static SONDA_NUCLEO: AtomicU64 = AtomicU64::new(0);
-static SONDA_NO_NUCLEO: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+/// O que a sonda viu na última rodada: os cutucões de cada núcleo antes e
+/// depois do pedido; os do sistema antes e depois; o fio da sonda; e se o
+/// pedido foi recusado como devia. O núcleo do coletor é o que o chamado
+/// anotou (`fios::chamado_anotado_de_teste`), e não um lido antes do
+/// pedido: entre os dois, o coletor podia ceder a vez e mudar de núcleo.
+static SONDA_POR_NUCLEO: [[AtomicU64; crate::nucleos::MAX_NUCLEOS]; 2] =
+    [const { [const { AtomicU64::new(0) }; crate::nucleos::MAX_NUCLEOS] }; 2];
 static SONDA_NO_TOTAL: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+static SONDA_FIO: AtomicU64 = AtomicU64::new(0);
 static SONDA_RECUSOU: AtomicBool = AtomicBool::new(false);
 
 /// A sonda do cutucão: presa a um núcleo que não é o do coletor, faz o
@@ -2051,11 +2054,14 @@ extern "C" fn sonda_do_cutucao(_argumento: u64) -> ! {
         match SONDA.load(SeqCst) {
             SONDA_SAI => break,
             pedido @ (SONDA_NASCE | SONDA_COTA) => {
-                let nucleo = crate::fios::nucleo_do_coletor_de_teste();
-                let no_nucleo = || nucleo.map_or(0, |c| crate::nucleos::cutucoes_de(c).0);
-                SONDA_NUCLEO.store(nucleo.map_or(0, |c| c as u64 + 1), SeqCst);
-                SONDA_NO_NUCLEO[0].store(no_nucleo(), SeqCst);
-                SONDA_NO_TOTAL[0].store(crate::nucleos::cutucoes(), SeqCst);
+                let cada_nucleo = |quando: usize| {
+                    for (i, n) in SONDA_POR_NUCLEO[quando].iter().enumerate() {
+                        n.store(crate::nucleos::cutucoes_de(i).0, SeqCst);
+                    }
+                    SONDA_NO_TOTAL[quando].store(crate::nucleos::cutucoes(), SeqCst);
+                };
+                SONDA_FIO.store(crate::fios::id_atual(), SeqCst);
+                cada_nucleo(0);
                 let recusou = if pedido == SONDA_NASCE {
                     matches!(
                         crate::fios::criar("teste-cutucao", fio_curto, 0),
@@ -2067,8 +2073,7 @@ extern "C" fn sonda_do_cutucao(_argumento: u64) -> ! {
                     };
                     crate::fios::cota_cheia(titular, 2).is_some_and(|o| o.mortos_por_recolher == 2)
                 };
-                SONDA_NO_NUCLEO[1].store(no_nucleo(), SeqCst);
-                SONDA_NO_TOTAL[1].store(crate::nucleos::cutucoes(), SeqCst);
+                cada_nucleo(1);
                 SONDA_RECUSOU.store(recusou, SeqCst);
                 SONDA.store(SONDA_ESPERA, SeqCst);
             }
@@ -2080,32 +2085,46 @@ extern "C" fn sonda_do_cutucao(_argumento: u64) -> ! {
 
 /// Uma rodada da sonda: o chamado esquecido — o coletor segurado não o
 /// atende, e o de antes não cutucaria de novo —, o `pedido`, e o cutucão
-/// conferido: o núcleo em que o coletor estava recebeu um a mais — ou, com
-/// ele esperando a vez, algum núcleo ocioso recebeu.
+/// conferido: o núcleo em que o coletor estava no chamado recebeu um a mais
+/// — ou, com ele esperando a vez, algum núcleo ocioso recebeu.
+///
+/// O núcleo é o que o próprio chamado anotou, com a trava do escalonador
+/// na mão (`fios::chamado_anotado_de_teste`). A sonda o lia antes do
+/// pedido, e o coletor, que cede a vez quando há outro pronto no núcleo
+/// dele, podia mudar de núcleo — ou ficar esperando a vez — entre a
+/// leitura e o chamado: o cutucão ia, certo, aonde ele estava no chamado, e
+/// o caso reprovava. Foi o que a CI 528 viu no ARM, na máquina da
+/// virtio-gpu: o coletor lido no núcleo 2, nenhum cutucão nele, um no
+/// sistema.
 fn rodada_da_sonda(pedido: u64, qual: &str) -> Resultado {
     crate::fios::esquecer_o_chamado_de_teste();
     SONDA_RECUSOU.store(false, SeqCst);
     SONDA.store(pedido, SeqCst);
     esperar_ate(|| SONDA.load(SeqCst) == SONDA_ESPERA, 300)
         .map_err(|_| "a sonda do cutucao nao fez o pedido")?;
-    let nucleo = SONDA_NUCLEO.load(SeqCst);
-    let no_nucleo = SONDA_NO_NUCLEO[1].load(SeqCst) - SONDA_NO_NUCLEO[0].load(SeqCst);
+    let chamado = crate::fios::chamado_anotado_de_teste();
+    let no_nucleo =
+        |c: usize| SONDA_POR_NUCLEO[1][c].load(SeqCst) - SONDA_POR_NUCLEO[0][c].load(SeqCst);
     let no_total = SONDA_NO_TOTAL[1].load(SeqCst) - SONDA_NO_TOTAL[0].load(SeqCst);
+    let nucleo = chamado.and_then(|(_, n)| n);
     crate::log_info!(
         "teste",
-        "zumbis: {}: o coletor no nucleo {:?}; cutucoes nele {}, no sistema {}",
+        "zumbis: {}: o coletor no nucleo {:?} no chamado; cutucoes nele {:?}, no sistema {}",
         qual,
-        nucleo.checked_sub(1),
-        no_nucleo,
+        nucleo,
+        nucleo.map(no_nucleo),
         no_total
     );
     if !SONDA_RECUSOU.load(SeqCst) {
         return Err("o pedido da sonda nao foi recusado com os mortos por recolher");
     }
-    let cutucou = if nucleo != 0 {
-        no_nucleo >= 1
-    } else {
-        no_total >= 1
+    let cutucou = match chamado {
+        Some((fio, _)) if fio != SONDA_FIO.load(SeqCst) => {
+            return Err("o chamado anotado nao e o do pedido da sonda");
+        }
+        Some((_, Some(c))) => no_nucleo(c) >= 1,
+        Some((_, None)) => no_total >= 1,
+        None => false,
     };
     if !cutucou {
         return Err("o chamado do coletor nao cutucou o nucleo dele");

@@ -1603,20 +1603,38 @@ pub fn acordar_o_coletor_de_teste() {
 #[cfg(feature = "modo-teste")]
 pub fn esquecer_o_chamado_de_teste() {
     COLETOR_CHAMADO.store(false, Ordering::SeqCst);
+    CHAMADO_ANOTADO.store(NENHUM_CHAMADO_ANOTADO, Ordering::SeqCst);
 }
 
-/// Só para a suíte: o núcleo em que o [`coletor`] está — rodando, ou
-/// dormindo à espera do tique —, ou `None`, se ele espera a vez.
+/// Só na suíte: o último chamado que saiu para cutucar o [`coletor`] — o
+/// fio que chamou, nos bits de cima, e o núcleo em que o coletor estava,
+/// mais um, no byte de baixo (zero: esperando a vez) —, anotado pelo
+/// próprio chamado (`Escalonador::chamar_o_coletor`), com a trava do
+/// escalonador na mão. [`NENHUM_CHAMADO_ANOTADO`] desde
+/// [`esquecer_o_chamado_de_teste`].
 #[cfg(feature = "modo-teste")]
-pub fn nucleo_do_coletor_de_teste() -> Option<usize> {
-    let id = ID_DO_COLETOR.load(Ordering::Acquire);
-    com_escalonador(|e| {
-        e.fios
-            .iter()
-            .flatten()
-            .find(|f| f.id.numero() == id)
-            .and_then(|f| f.na_cpu)
-    })
+static CHAMADO_ANOTADO: AtomicU64 = AtomicU64::new(NENHUM_CHAMADO_ANOTADO);
+
+#[cfg(feature = "modo-teste")]
+const NENHUM_CHAMADO_ANOTADO: u64 = u64::MAX;
+
+/// Só para a suíte: o último chamado que saiu para cutucar o [`coletor`]:
+/// o fio que chamou, e o núcleo em que o coletor estava — `Some(n)`,
+/// dormindo à espera do tique ou rodando em `n`; `None`, esperando a vez,
+/// e então o cutucão vai aos núcleos ociosos. `None` por fora: nenhum
+/// chamado cutucou desde [`esquecer_o_chamado_de_teste`].
+///
+/// É o que o chamado leu na tabela, com a trava na mão. Lido de fora,
+/// antes do pedido, como a suíte lia, o coletor podia ceder a vez e mudar
+/// de núcleo entre a leitura e o chamado — e o cutucão, certo, ia ao núcleo
+/// em que ele estava no chamado: o caso do cutucão reprovou assim no ARM,
+/// na CI 528.
+#[cfg(feature = "modo-teste")]
+pub fn chamado_anotado_de_teste() -> Option<(u64, Option<usize>)> {
+    match CHAMADO_ANOTADO.load(Ordering::SeqCst) {
+        NENHUM_CHAMADO_ANOTADO => None,
+        v => Some((v >> 8, (v & 0xff).checked_sub(1).map(|n| n as usize))),
+    }
 }
 
 /// Só para a suíte: quantas vezes um nascimento sem vaga, ou uma recusa da
@@ -2705,6 +2723,11 @@ impl Escalonador {
         let id = ID_DO_COLETOR.load(Ordering::Acquire);
         for fio in self.fios.iter().flatten() {
             if fio.id.numero() == id {
+                #[cfg(feature = "modo-teste")]
+                CHAMADO_ANOTADO.store(
+                    (id_atual_sem_trava() << 8) | fio.na_cpu.map_or(0, |n| n as u64 + 1),
+                    Ordering::SeqCst,
+                );
                 return match fio.na_cpu {
                     Some(cpu) => crate::nucleos::bit(cpu),
                     None => self.nucleos_ociosos(),
