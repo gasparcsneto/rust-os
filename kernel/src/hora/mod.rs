@@ -160,6 +160,41 @@ pub fn esperas_da_vez_de_teste() -> u64 {
     ESPERAS_DA_VEZ.load(Ordering::Acquire)
 }
 
+/// Só na suíte: entre a leitura do lógico e a do civil que se comparam —
+/// no `system.info` e no fechamento de uma rodada —, espera o segundo do
+/// civil virar. Ver [`segundo_entre_as_leituras_de_teste`].
+#[cfg(feature = "modo-teste")]
+static SEGUNDO_ENTRE_AS_LEITURAS: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Só para a suíte: liga ou desliga a espera do segundo do civil entre as
+/// duas leituras que dão a marca `adiantado` — o pior caso da corrida
+/// entre elas, a toda leitura. Lido o lógico antes do civil, o segundo que
+/// vira no meio deixa o lógico atrás do retrato, e não à frente.
+#[cfg(feature = "modo-teste")]
+pub fn segundo_entre_as_leituras_de_teste(ligado: bool) {
+    SEGUNDO_ENTRE_AS_LEITURAS.store(ligado, Ordering::SeqCst);
+}
+
+/// A espera de [`SEGUNDO_ENTRE_AS_LEITURAS`], ligada: até o segundo do
+/// civil virar, cedendo, por no máximo três segundos do relógio do kernel.
+/// Sem nenhuma trava na mão — a vez da hora, sim.
+#[cfg(feature = "modo-teste")]
+fn entre_as_leituras_de_teste() {
+    if !SEGUNDO_ENTRE_AS_LEITURAS.load(Ordering::SeqCst) {
+        return;
+    }
+    let Some(segundo) = civil::ler().map(|l| l.meio_ms / 1000) else {
+        return;
+    };
+    let limite = crate::tempo::uptime_ms().saturating_add(3_000);
+    while civil::ler().is_some_and(|l| l.meio_ms / 1000 == segundo)
+        && crate::tempo::uptime_ms() < limite
+    {
+        crate::fios::ceder();
+    }
+}
+
 /// Se o fio deste núcleo tem a vez da hora, sem tomar trava nenhuma: a
 /// conferência da ordem das travas pergunta de dentro de cada `lock`.
 #[cfg(feature = "modo-teste")]
@@ -567,6 +602,8 @@ fn aplicar(f: &rodada::Fechamento) -> Result<Option<civil::Mudanca>, &'static st
         }
         mudanca
     });
+    #[cfg(feature = "modo-teste")]
+    entre_as_leituras_de_teste();
     let logico_depois = crate::persistencia::agora();
     auditar_o_fechamento(f, mudanca.as_ref(), (logico_antes, logico_depois));
     Ok(mudanca)
@@ -650,6 +687,14 @@ fn marcas(l: &Leitura, logico_s: u64) -> (bool, bool, bool) {
 /// O registro do desfecho de uma rodada: o civil, o lógico, o estado e as
 /// marcas no recurso; o quórum, o desvio, a incerteza e o efeito no
 /// detalhe.
+///
+/// A marca `adiantado` sai do lógico de **antes** da rodada (`logico.0`),
+/// lido antes do civil dela: ele só passa do civil de depois se o civil
+/// voltou — no salto para trás desta rodada, ou antes dela, com o lógico
+/// ainda no piso. O de depois é lido depois do civil, e um segundo do civil
+/// que virasse entre os dois o punha à frente sem salto nenhum: o registro
+/// diria `adiantado`, e o NSF, que lê a marca do fechamento, veria o lógico
+/// parado.
 fn auditar_o_fechamento(f: &rodada::Fechamento, m: Option<&civil::Mudanca>, logico: (u64, u64)) {
     let Some(m) = m else {
         crate::autorizacao::auditar_execucao(
@@ -659,7 +704,7 @@ fn auditar_o_fechamento(f: &rodada::Fechamento, m: Option<&civil::Mudanca>, logi
         );
         return;
     };
-    let (pendente, divergente, adiantado) = marcas(&m.depois, logico.1);
+    let (pendente, divergente, adiantado) = marcas(&m.depois, logico.0);
     let recurso = alloc::format!(
         "civil {}>{} logico {}>{} {}>{}{}{}{}",
         m.antes.meio_ms,
@@ -771,20 +816,24 @@ pub fn confirmar(rodada: u64) -> Result<String, (Codigo, String)> {
 /// antes do fechamento e as contagens de depois: a rodada honesta que tirou
 /// o salto pendente contada como a última, `nada`, com o pendente ainda
 /// ali. Foi o que a bancada de tempo do ARM viu (a CI 432).
+///
+/// O lógico é lido antes do retrato. O lógico lê o civil de novo, e um
+/// segundo do civil que virasse entre as duas leituras o punha um segundo
+/// à frente do civil do retrato: a marca `adiantado`, sem salto nenhum. Foi
+/// o que a fumaça da hora autenticada do x86 viu, em release, na CI 528.
+/// Lido antes, ele só passa do civil do retrato se o civil voltou, e o
+/// segundo que vira no meio o deixa atrás, a um segundo, e não à frente.
 pub fn escrever(w: &mut JsonWriter) -> fmt::Result {
     // O RTC antes, fora das travas: o retrato não espera o CMOS.
     civil::reler_o_rtc();
     let registro = crate::identidade::fontes_de_hora();
     let (leitura, resumo, logico, (abertos_do_servico, abertos_dos_outros), rodadas_abertas) = VEZ
         .com(|t| {
+            let logico = crate::persistencia::agora();
+            #[cfg(feature = "modo-teste")]
+            entre_as_leituras_de_teste();
             let (leitura, resumo) = com_resumo(|r| (civil::retrato(), *r));
-            (
-                leitura,
-                resumo,
-                crate::persistencia::agora(),
-                t.abertos(),
-                t.rodadas_abertas(),
-            )
+            (leitura, resumo, logico, t.abertos(), t.rodadas_abertas())
         });
     w.begin_object()?;
     match leitura {

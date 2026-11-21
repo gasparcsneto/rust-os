@@ -42501,6 +42501,10 @@ static CASOS: &[Caso] = &[
         f: hora_o_system_info_num_retrato_so,
     },
     Caso {
+        nome: "hora: o segundo que vira entre as leituras nao marca adiantado",
+        f: hora_o_adiantado_nao_e_o_segundo_entre_as_leituras,
+    },
+    Caso {
         nome: "hora: nenhum caminho fora do gate",
         f: hora_nenhum_caminho_fora_do_gate,
     },
@@ -77486,6 +77490,84 @@ fn hora_o_system_info_num_retrato_so() -> Resultado {
     crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
     QUEM_FECHA.store(u64::MAX, SeqCst);
     VAI.store(true, SeqCst);
+    r
+}
+
+/// A marca `adiantado` diz o lógico à frente do civil — depois de um salto
+/// para trás —, e não o segundo do civil que vira entre a leitura de um e a
+/// do outro. A suíte espera o segundo virar entre as duas leituras
+/// (`hora::segundo_entre_as_leituras_de_teste`): o pior caso da corrida,
+/// a toda leitura. Com o civil já além do piso, o `system.info` não diz
+/// `adiantado`, não diz o lógico à frente (`ahead_ms` zero), e o lógico
+/// dele fica no segundo do civil ou a um atrás; e o registro do fechamento
+/// de uma rodada honesta não diz `adiantado` — é a marca que o NSF lê para
+/// ver o lógico parado. Lido o lógico depois do civil, como era, o segundo
+/// que virava no meio o punha à frente: a fumaça da hora autenticada do x86
+/// viu `adiantado` assim, em release, na CI 528, depois de uma rodada
+/// gradual, que nunca volta o civil.
+fn hora_o_adiantado_nao_e_o_segundo_entre_as_leituras() -> Resultado {
+    use crate::rede::bancada_hora as bancada;
+    // O `time` de um `system.info`, conferido: sem `adiantado`, sem o
+    // lógico à frente, e o lógico no segundo do civil ou a um atrás.
+    let confere = |t: &str| -> Resultado {
+        let j = Json(t.as_bytes());
+        let mut adiantado = false;
+        if let Some(marcas) = j.member("marks") {
+            let mut i = 0;
+            while let Some(m) = marcas.item(i) {
+                adiantado |= m.as_str() == Some("adiantado");
+                i += 1;
+            }
+        }
+        let numero = |campo: &str| j.member(campo).and_then(|v| v.as_u64());
+        let (Some(civil_ms), Some(logico), Some(a_frente)) =
+            (numero("civil_ms"), numero("logical"), numero("ahead_ms"))
+        else {
+            crate::log_error!("teste", "{}", t);
+            return Err("o time do system.info sem o civil, o logico ou o ahead_ms");
+        };
+        let civil_s = civil_ms / 1000;
+        if adiantado || a_frente != 0 || logico > civil_s || logico + 1 < civil_s {
+            crate::log_error!("teste", "{}", t);
+            return Err("o system.info disse o logico a frente do civil sem o civil voltar");
+        }
+        Ok(())
+    };
+    let r = com_a_bancada_de_hora(2, 86_400, 60, || {
+        crate::hora::civil::reiniciar_de_teste(parametros_curtos());
+        for i in 0..3 {
+            bancada::raio_de_teste(i, 1);
+        }
+        fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
+        // Nenhum adiantado de verdade: o civil além do piso que outro caso
+        // tenha deixado.
+        esperar_cedendo(
+            || crate::hora::civil_s().unwrap_or(0) >= crate::persistencia::piso(),
+            1_500,
+        )
+        .map_err(|_| "o civil nao alcancou o piso do logico")?;
+        crate::hora::segundo_entre_as_leituras_de_teste(true);
+        let r = (|| -> Resultado {
+            for _ in 0..2 {
+                confere(&tempo_no_system_info()?)?;
+            }
+            let antes = ultimo_desfecho().map(|(n, _)| n);
+            fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
+            let (n, e) = ultimo_desfecho().ok_or("a rodada nao gravou o desfecho")?;
+            if Some(n) == antes {
+                return Err("a rodada honesta nao gravou um desfecho novo");
+            }
+            if e.recurso.contains(" adiantado") {
+                crate::log_error!("teste", "{:?}", e);
+                return Err("o fechamento de uma rodada gradual gravou o logico adiantado");
+            }
+            confere(&tempo_no_system_info()?)
+        })();
+        crate::hora::segundo_entre_as_leituras_de_teste(false);
+        r
+    });
+    crate::hora::segundo_entre_as_leituras_de_teste(false);
+    crate::identidade::esquecer_registrados();
     r
 }
 
