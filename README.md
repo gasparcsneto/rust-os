@@ -16577,6 +16577,30 @@ de tempo, na parte 3/3: o x86 a -289 ppm (2057 s em 2057) e o ARM a -43 ppm
 segurança do x86, que esperou 59,7 minutos na fila e rodou 24,7; o maior, a
 persistência do x86, parte 1/3, com 62,3.
 
+A CI 532 (`029ca26`, o lote FUMAÇA-USB e o `docs/DEPURACAO.md`) passou 47 de
+48 na primeira tentativa, em 123,0 minutos e 1128 de máquina — esperou os
+runners das CIs 530 e 531. A fumaça do teclado USB do x86, a da CI 527, e o
+caso novo da tela passaram. Reprovou a parte 3/3 da suíte do ARM, 356 de
+357: "pareamento: o terminal de verdade engole fora da coordenacao FALHOU --
+um caractere que o teclado nao produz sem shift". O caso nem chegou a
+digitar: o shift do teclado, que é global, estava apertado desde `usb: o
+relatorio hid vira teclas`, que terminava com o shift do relatório e não o
+soltava. As partes são intercaladas — o caso `i` é da parte `k` de `n`
+quando `i % n == k - 1` —, e o caso novo da tela, no meio da tabela,
+deslocou os índices de todos os de depois: o do pareamento passou a rodar
+na parte do HID, sem um caso no meio que esvaziasse o teclado. O defeito é
+antigo, de isolamento entre casos, e a falha, determinística: não se rodou
+de novo. A correção fecha a classe: o executor confere o shift que cada
+caso devolve (`estado_da_suite_devolvido`, como o coletor e o journal desde
+a CI 509), o caso do HID solta o shift e confere a minúscula, e um caso no
+fim da tabela é o controle da conferência. As mutações: a conferência sem o
+shift, ou o executor sem soltá-lo, reprovam o caso de controle; o HID sem
+soltar reprova o próprio caso do HID, e o do pareamento passa. O holdover
+da bancada de tempo, na parte 3/3: o x86 a -133 ppm (2056 s em 2056) e o
+ARM a -3 ppm (2056 s em 2056), os dois dentro da guarda. O último job foi o
+dos fluxos entre dispositivos (x86_64 e aarch64), que esperou 48,2 minutos
+na fila e rodou 29,6; o maior, a atualização do ARM, com 49,9.
+
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na
 508 e 58 na 509 —, e o que sobra até o piso é a ordem da fila, que não se
