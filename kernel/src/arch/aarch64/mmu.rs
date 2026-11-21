@@ -872,18 +872,18 @@ pub unsafe fn mapear_frame(
 /// # Por que a compartilhada leva o `tlbi`, se não há o que invalidar
 ///
 /// Porque ele ordena os percursos de tabela dos **outros** núcleos. Sem o
-/// FEAT_ETS, a arquitetura deixa um núcleo traduzir um acesso antes de uma
-/// leitura que vem antes dele no programa: um núcleo que espera um aviso —
-/// "a página está mapeada" — e então lê a página, num endereço que ele já
-/// conhecia, pode tê-la traduzido antes de ver o aviso, com a entrada ainda
-/// inválida, e tomar uma falha de tradução que já não existe. No EL1 ela é
-/// fatal (`vetores.rs`). É a janela que o commit do Linux "arm64: mm: Ignore
-/// spurious translation faults taken from the kernel" descreve, com três
-/// saídas: o `tlbi` difundido no caminho do mapeamento, um `dsb; isb` em
-/// quem lê depois do aviso, ou tratar a falta espúria. O Linux escolheu a
-/// terceira; aqui é a primeira, só onde a janela existe: o `tlbi … is` deste
-/// núcleo, completado pelo `dsb ish` antes do aviso, alcança também o
-/// percurso que o outro tenha adiantado.
+/// FEAT_ETS (citado sem conferir no manual), a arquitetura deixa um núcleo
+/// traduzir um acesso antes de uma leitura que vem antes dele no programa: um
+/// núcleo que espera um aviso — "a página está mapeada" — e então lê a página,
+/// num endereço que ele já conhecia, pode tê-la traduzido antes de ver o aviso,
+/// com a entrada ainda inválida, e tomar uma falha de tradução que já não
+/// existe. No EL1 ela é fatal (`vetores.rs`). É a janela que o commit do Linux
+/// "arm64: mm: Ignore spurious translation faults taken from the kernel"
+/// descreve, com três saídas: o `tlbi` difundido no caminho do mapeamento, um
+/// `dsb; isb` em quem lê depois do aviso, ou tratar a falta espúria. O Linux
+/// escolheu a terceira; aqui é a primeira, só onde a janela existe: o
+/// `tlbi … is` deste núcleo, completado pelo `dsb ish` antes do aviso, alcança
+/// também o percurso que o outro tenha adiantado.
 ///
 /// # Por que a privada dispensa
 ///
@@ -897,8 +897,8 @@ pub unsafe fn mapear_frame(
 ///
 /// # O custo
 ///
-/// Todo o ganho da entrada nova sem `tlbi` — a carga de uma imagem e o
-/// `mapear` de um processo — é na entrada privada, e fica. A compartilhada
+/// Todo o ganho medido da entrada nova sem `tlbi` — a carga de uma imagem e
+/// o `mapear` de um processo — é na entrada privada, e fica. A compartilhada
 /// paga um `tlbi … is` por página: as pilhas dos fios, a memória das
 /// superfícies e do Argon2, o MMIO; no emulador com quatro núcleos, de 19 a
 /// 42 µs cada.
@@ -1262,8 +1262,8 @@ unsafe fn publicar() {
 /// A entrada velha pode estar na TLB de qualquer núcleo, e só o `tlbi` a
 /// tira: é o caso da remoção ([`desmapear`]) e o da troca de permissão ou
 /// de marca ([`com_descritor_da_folha`]). Uma entrada que era inválida só
-/// passa por aqui na faixa compartilhada, pelo percurso dos outros núcleos
-/// — ver [`publicar`] e [`privada_de_um_processo`].
+/// passa por aqui na entrada compartilhada (ver [`privada_de_um_processo`]),
+/// pelo percurso dos outros núcleos — ver [`publicar`].
 ///
 /// # Safety
 /// Deve ser chamada logo após escrever um descritor.
@@ -1387,18 +1387,19 @@ fn linhas_da_sincronia() -> (Option<u64>, Option<u64>) {
 /// # Por que é preciso
 ///
 /// A carga de um programa escreve o código dele pelo cache de dados
-/// ([`crate::paginacao::mapear_faixa_preenchendo`]), e a busca de
-/// instruções tem um cache próprio, que no ARM não acompanha as escritas. O
-/// alocador entrega primeiro o frame que acabou de voltar, e o cache de
-/// instruções pode guardar, desse frame, o código do processo que o teve
-/// antes: o processo novo executaria o código do outro, com a autoridade
-/// dele. Um processador que anuncie o `IDC` e o `DIC` no `CTR_EL0` mantém a
-/// coerência sozinho; o Cortex-A72, o processador que a CI emula, não
-/// anuncia nenhum dos dois.
+/// ([`crate::paginacao::mapear_faixa_preenchendo`]), e a busca de instruções
+/// tem um cache próprio, que no ARM não acompanha as escritas. O alocador volta
+/// a procurar pelo frame que acabou de voltar, e costuma entregá-lo em seguida,
+/// e o cache de instruções pode guardar, desse frame, o código do processo que
+/// o teve antes: o processo novo executaria o código do outro, com a autoridade
+/// do novo. Um processador que anuncie o `IDC` e o `DIC` no `CTR_EL0` mantém a
+/// coerência sozinho; o Cortex-A72, o processador que a CI emula, não anuncia
+/// nenhum dos dois.
 ///
 /// # A sequência
 ///
-/// A do manual da arquitetura para o código escrito por dados:
+/// A do manual da arquitetura para o código escrito por dados (citada sem
+/// conferir na fonte):
 ///
 /// - `dc cvau` em cada linha — limpa o cache de dados até o ponto de
 ///   unificação, onde a busca de instruções lê —, e `dsb ish`, que a
@@ -1412,17 +1413,30 @@ fn linhas_da_sincronia() -> (Option<u64>, Option<u64>) {
 /// As linhas saem do `CTR_EL0` — as menores de todos os núcleos, ver
 /// [`CTR_DE_TODOS`]. A manutenção é pelos endereços do processo: a busca
 /// dele é por eles, e num cache de instruções indexado pelo endereço
-/// virtual é a linha de lá que importa; num indexado pelo físico, como o do
-/// A72, qualquer endereço do frame serve.
+/// virtual é a linha de lá que importa; num indexado pelo físico — o `L1Ip`
+/// do `CTR_EL0` diz qual é o do núcleo —, qualquer endereço do frame serve.
 ///
 /// # O que o emulador mostra
 ///
 /// Nada: o QEMU sem aceleração mantém o código traduzido coerente com a
-/// memória — uma escrita numa página de código descarta a tradução —, e o
-/// `dc cvau` e o `ic ivau` não fazem nada lá. Tirar esta manutenção deixa a
-/// suíte passar; é a conta das operações — o que esta função devolve, que
-/// o caso `memoria: a carga sincroniza o cache de instrucoes do codigo`
-/// confere — que a reprova.
+/// memória (o mecanismo, citado sem conferir na fonte do QEMU). Tirar esta
+/// manutenção deixou passar, nas rodadas do lote ICACHE, a parte da
+/// paginação inteira, menos o caso `memoria: a carga sincroniza o cache de
+/// instrucoes do codigo`, que confere a conta das operações — o que esta
+/// função devolve, contra o `CTR_EL0` que o próprio caso lê, e a faixa que
+/// ela percorreu.
+///
+/// # Se o fio muda de núcleo no meio
+///
+/// A carga roda com as interrupções ligadas, e o fio pode migrar no meio do
+/// `dc cvau` ou do `ic ivau`: o `dsb ish` do núcleo em que ele retoma não
+/// espera a manutenção que o anterior emitiu. Quem a completa é o `dsb ish`
+/// de [`trocar_espaco`] no núcleo que o fio deixa — o seguinte ali é o
+/// ocioso ou um fio do kernel, com a raiz do kernel, ou outro processo, e a
+/// raiz muda sempre —, e a troca só solta o fio para outro núcleo depois
+/// dele (o informativo 6 do adversário do lote ICACHE). Uma troca que um dia
+/// dispense a troca de raiz, ou a invalidação dela — um ASID —, precisa
+/// manter esse `dsb ish`.
 ///
 /// # Safety
 ///
@@ -1552,7 +1566,10 @@ pub unsafe fn trocar_espaco(raiz: u64) {
     // SAFETY: delegada ao chamador. Diferente do x86, trocar a raiz aqui
     // **não** descarta a TLB sozinho: sem ASID, traduções do espaço anterior
     // continuariam valendo para os mesmos endereços virtuais — que é
-    // exatamente o que dois processos no mesmo endereço produzem.
+    // exatamente o que dois processos no mesmo endereço produzem. E o `dsb
+    // ish` completa a manutenção de cache que um fio deixou em curso aqui
+    // antes de migrar — ver "Se o fio muda de núcleo no meio", em
+    // [`sincronizar_instrucoes`].
     unsafe {
         TTBR0_EL1.set_baddr(raiz);
         asm!("dsb ish", "isb", options(nostack));

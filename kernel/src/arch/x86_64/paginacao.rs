@@ -473,13 +473,20 @@ pub fn desmapear(virtual_: u64) -> Result<u64, &'static str> {
                     // por um percurso daqui, até o próximo `invlpg` ou `CR3`
                     // (o item C do adversário do trabalho arm-tlbi). O `invlpg`
                     // descarta, além da tradução do endereço, as entradas dos
-                    // caches de estrutura do PCID atual — todas, no manual da
-                    // Intel; as que traduzem o endereço, no da AMD, que são as
-                    // das tabelas que esta limpeza soltou: elas estão no
-                    // caminho dele. Os outros núcleos não precisam: a raiz
-                    // deste espaço só está ativa aqui, e quem a teve antes já
-                    // recarregou o `CR3`, que descarta os caches de estrutura
-                    // também.
+                    // caches de estrutura — no manual da Intel, todas as do
+                    // PCID atual; o que este código precisa são as que
+                    // traduzem o endereço, as das tabelas que esta limpeza
+                    // soltou, e é o que se espera também do da AMD (os dois
+                    // citados sem conferir na fonte). Os outros núcleos não
+                    // precisam quando a raiz é a de um processo: ela só está
+                    // ativa aqui, e quem a teve antes já recarregou o `CR3`,
+                    // que descarta os caches de estrutura também. A faixa
+                    // privada é a do usuário de qualquer raiz, também a do
+                    // kernel, ativa nos fios do kernel de todos os núcleos;
+                    // nenhum caminho de produção mapeia nela — só casos da
+                    // suíte, que não a leem de outro núcleo — (o informativo
+                    // 5 do adversário do lote ICACHE), e o ARM separa os dois
+                    // casos (`privada_de_um_processo`, lá).
                     //
                     // E as tabelas só voltam ao alocador depois dele, como no
                     // ARM (`desmapear` de lá): soltas das entradas pela
@@ -547,12 +554,13 @@ pub fn acesso_fisico(fisico: u64) -> *mut u8 {
 ///
 /// O cache de instruções do x86 é coerente com as escritas, pelo endereço
 /// físico e em todo núcleo: uma escrita invalida a linha que o guardava. O
-/// que o manual da Intel pede a quem escreve código que **outro** núcleo vai
-/// executar é uma instrução serializante nesse núcleo antes do código novo,
-/// pelo que ele já tivesse buscado — e o processo entra num núcleo pela troca
-/// de espaço, cujo `mov cr3` serializa, ou fica no núcleo que acabou de
-/// escrever o código, que confere as próprias escritas contra o que já
-/// buscou. O ARM é que precisa — ver o `sincronizar_instrucoes` de lá.
+/// que o manual da Intel pede (citado sem conferir na fonte) a quem escreve
+/// código que **outro** núcleo vai executar é uma instrução serializante
+/// nesse núcleo antes do código novo, pelo que ele já tivesse buscado — e o
+/// processo ou fica no núcleo que acabou de escrever o código, que confere
+/// as próprias escritas contra o que já buscou, ou entra noutro pela troca
+/// de espaço, cujo `mov cr3` serializa. O ARM é que precisa — ver o
+/// `sincronizar_instrucoes` de lá.
 ///
 /// # Safety
 ///

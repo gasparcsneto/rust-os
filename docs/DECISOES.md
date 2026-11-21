@@ -2100,41 +2100,6 @@ pendência #298.
   0,17–0,21 s ([README](../README.md#vários-núcleos), "A entrada nova não
   pede `tlbi`").
 
-  O lote ICACHE, [B], fechou os achados do adversário do trabalho arm-tlbi,
-  sem autoridade, regra, registro, identidade ou persistência novos:
-  - a carga de código no aarch64 sincroniza o cache de instruções antes de
-    uma página escrita pelo kernel ficar executável — `dc cvau` e `ic ivau`
-    em cada linha, com as linhas do `CTR_EL0` (as menores de todos os
-    núcleos) e as barreiras, e sem a parte que o `IDC` ou o `DIC` dispensam
-    (`arch::sincronizar_instrucoes`; no x86, nada). Num processador que não
-    anuncia os dois — o Cortex-A72 que a CI emula —, um processo podia
-    executar, de um frame recém-devolvido, o código do dono anterior, com a
-    autoridade do novo. A carga é o único caminho por onde o kernel escreve
-    código: o `fork` divide os frames, e a cópia na escrita nunca copia uma
-    página executável — só marca as graváveis, e o `elf::validar` recusa o
-    segmento gravável e executável. O QEMU sem aceleração mantém o código
-    coerente sozinho, e o caso confere a manutenção pela conta das
-    operações;
-  - o `mapear_frame` volta ao `tlbi` difundido na entrada compartilhada —
-    as regiões do kernel e a raiz do kernel —, contra a falta de tradução
-    espúria de um núcleo sem o FEAT_ETS que lê uma página do kernel logo
-    depois de um aviso (fatal no EL1), e mantém o `publicar` na entrada
-    privada de um processo, onde está o ganho do trabalho arm-tlbi. Medido
-    de novo, antes e depois, pelo mesmo instrumento: a carga da imagem no
-    teto com quatro núcleos, de 335 a 876 ms antes e de 616 a 818 depois, e
-    o `mapear` cheio, de 141 a 210 ms e de 138 a 194 — o ganho fica;
-  - as tabelas esvaziadas voltam ao alocador depois da invalidação: no ARM,
-    depois do `vmalle1is`, na remoção e na desmontagem do espaço; no x86,
-    depois de um `invlpg` que vem depois da limpeza;
-  - o caso da marca da cópia na escrita conta as resoluções e as cópias do
-    próprio espaço, e não as da máquina; e a remoção numa página privada,
-    no mesmo núcleo, ganhou caso (o A1 do adversário).
-
-  O que nenhum caso mostra no emulador — o cache de instruções, a falta
-  espúria e a cache dos níveis intermediários — fica no "O que fica de
-  fora" de [Vários núcleos](../README.md#vários-núcleos), com as entradas de
-  topo das regiões do kernel, conferidas sem defeito (o item G).
-
   O lote A8, [B], fez os achados do adversário do lote A7 — os sete baixos
   e os três informativos — e fechou as guardas de texto do `xtask` por
   inventário, sem autoridade, regra, registro ou semântica de auditoria
@@ -2228,6 +2193,71 @@ pendência #298.
   reforçado na suíte, vinte e dois testes novos no hospedeiro — treze do
   adversário, quatro deles adaptados à guarda que fecha a fonte — e três
   reforçados, e as mutações do lote, todas reprovadas.
+
+  Depois do lote A9, o lote ICACHE, [B], fez os achados do adversário do
+  trabalho arm-tlbi — menos um ponto fraco do caso da marca, que ficou para
+  o lote ICACHE-2: um `tlbi` difundido de um terceiro núcleo, entre as duas
+  escritas do outro, mascararia a M5 —, sem autoridade, regra, registro,
+  identidade ou persistência novos:
+  - a carga de código no aarch64 sincroniza o cache de instruções antes de
+    uma página escrita pelo kernel ficar executável — `dc cvau` e `ic ivau`
+    em cada linha, com as linhas do `CTR_EL0` (as menores de todos os
+    núcleos) e as barreiras, e sem a parte que o `IDC` ou o `DIC` dispensam
+    (`arch::sincronizar_instrucoes`; no x86, nada). Num processador que não
+    anuncia os dois — o Cortex-A72 que a CI emula —, um processo podia
+    executar, de um frame recém-devolvido, o código do dono anterior, com a
+    autoridade do novo. A carga é o único caminho por onde o kernel escreve
+    código: o `fork` divide os frames, e a cópia na escrita nunca copia uma
+    página executável — só marca as graváveis, e o `elf::validar` recusa o
+    segmento gravável e executável. O emulador não mostra a falta —
+    tirada a manutenção, só o caso da conta reprova; o QEMU sem aceleração
+    mantém o código traduzido coerente com a memória —, e o caso confere a
+    manutenção pela conta das operações;
+  - o `mapear_frame` volta ao `tlbi` difundido na entrada compartilhada —
+    as regiões do kernel e a raiz do kernel —, contra a falta de tradução
+    espúria de um núcleo sem o FEAT_ETS (citado sem conferir no manual) que
+    lê uma página do kernel logo depois de um aviso (fatal no EL1), e mantém
+    o `publicar` na entrada privada de um processo, onde está o ganho medido
+    do trabalho arm-tlbi. Medido de novo, antes e depois, pelo mesmo
+    instrumento — no emulador, em release; outro que o de cima, e não
+    comparável a ele um a um —: a carga da imagem no teto com quatro
+    núcleos, de 335 a 876 ms antes e de 616 a 818 depois, e o `mapear`
+    cheio, de 141 a 210 ms e de 138 a 194 — o ganho fica;
+  - as tabelas esvaziadas voltam ao alocador depois da invalidação: no ARM,
+    depois do `vmalle1is`, na remoção e na desmontagem do espaço; no x86,
+    depois de um `invlpg` que vem depois da limpeza;
+  - o caso da marca da cópia na escrita conta as resoluções e as cópias do
+    próprio espaço, e não as da máquina; e a remoção numa página privada,
+    no mesmo núcleo, ganhou caso (o A1 do adversário).
+
+  O que nenhum caso mostra no emulador — o cache de instruções, a falta
+  espúria e a cache dos níveis intermediários — fica no "O que fica de
+  fora" de [Vários núcleos](../README.md#vários-núcleos), com as entradas de
+  topo das regiões do kernel, conferidas sem defeito (o item G).
+
+  O lote ICACHE-2, [B], fez os achados do adversário e do revisor do lote
+  ICACHE, sem autoridade, regra, registro, identidade ou persistência
+  novos:
+  - o caso da carga tira o que espera do `CTR_EL0` que ele mesmo lê em
+    cada núcleo ligado, e não da função que a carga usa — com o `IDC` e o
+    `DIC` lidos ao contrário nela, o A72 não fazia manutenção nenhuma, e o
+    caso esperava zero —, e confere a faixa que a sincronia percorreu, que
+    o emulador não mostra nem como falha;
+  - as metades do caso da marca, e o caso da remoção no aarch64, repetem a
+    rodada em que um núcleo de fora do par difundiu um `tlbi` na janela, até
+    uma limpa, e reprovam sem nenhuma; e o caso da remoção, no x86,
+    remapeia sem o `invlpg` que cobria a remoção sem o dela;
+  - no x86, a tabela de página nova chega zerada ao pacote `x86_64`, que a
+    liga antes de zerá-la — de antes do lote ICACHE: entre a ligação e o
+    zerar, um percurso de tabela leria o que o frame tinha, uma tabela
+    velha com as entradas presentes —; um caso novo confere, com um frame
+    sujo encomendado ao alocador, que nenhuma tabela nova chega suja a quem
+    a liga, nas duas arquiteturas;
+  - o texto: a mutação do x86 que passava não era equivalente, e as
+    citações que vieram de memória — o manual da Arm, o FEAT_ETS, os
+    manuais da Intel e da AMD, o QEMU — estão marcadas como tais
+    ([README](../README.md#vários-núcleos), "Os casos do lote ICACHE veem o
+    que dizem conferir" e "A tabela nova chega zerada a quem a liga").
 
 ### I7
 

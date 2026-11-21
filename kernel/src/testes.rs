@@ -32921,13 +32921,14 @@ fn memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel() -> Resultado 
 ///
 /// # O que estava faltando
 ///
-/// A carga escreve cada segmento pelo cache de dados e o mapeia executável
-/// em seguida, e no ARM o cache de instruções não acompanha as escritas:
-/// ele pode guardar, do frame que o alocador acabou de devolver, o código
-/// do processo que o teve antes — e o processo novo executaria o código do
-/// outro, com a autoridade do novo. A carga agora sincroniza cada página
-/// executável (`arch::sincronizar_instrucoes`): `dc cvau` e `ic ivau` em
-/// cada linha, com as barreiras.
+/// A carga escreve cada segmento pelo cache de dados e o mapeia executável em
+/// seguida, e no ARM o cache de instruções não acompanha as escritas: ele pode
+/// guardar, de um frame que voltou ao alocador e saiu de novo — o alocador
+/// volta a procurar pelo frame que acabou de voltar, e costuma entregá-lo em
+/// seguida —, o código do processo que o teve antes; e o processo novo
+/// executaria o código do outro, com a autoridade do novo. A carga agora
+/// sincroniza cada página executável (`arch::sincronizar_instrucoes`):
+/// `dc cvau` e `ic ivau` em cada linha, com as barreiras.
 ///
 /// # Por que pela conta, e não pelo efeito
 ///
@@ -33166,14 +33167,21 @@ fn ctr_el0_de_cada_nucleo() -> Result<alloc::vec::Vec<(usize, u64)>, &'static st
 /// # Por que pela conta
 ///
 /// O que o `tlbi` da compartilhada fecha não se vê no emulador: um núcleo
-/// sem o FEAT_ETS que leia uma página do kernel recém-mapeada logo depois de
-/// um aviso pode tê-la traduzido antes do aviso, e tomar uma falta de
-/// tradução espúria, fatal no EL1 — ver `mmu::privada_de_um_processo`. O
-/// caso confere a regra pelos `tlbi` que este núcleo fez a cada mapeamento,
-/// com as interrupções mascaradas — nada mais roda aqui entre as duas
-/// leituras —, nos dois sentidos: sem o da compartilhada, reprova; com o da
-/// privada de volta, que custava à carga de uma imagem quatro vezes o tempo
-/// com quatro núcleos, também.
+/// sem o FEAT_ETS (citado sem conferir no manual) que leia uma página do
+/// kernel recém-mapeada logo depois de um aviso pode tê-la traduzido antes
+/// do aviso, e tomar uma falta de tradução espúria, fatal no EL1 — ver
+/// `mmu::privada_de_um_processo`. O caso confere a regra pelos `tlbi` que
+/// este núcleo fez a cada mapeamento, com as interrupções mascaradas — nada
+/// mais roda aqui entre as duas leituras —, nos dois sentidos: sem o da
+/// compartilhada, reprova; com o da privada de volta — que, no trabalho
+/// arm-tlbi, levava a carga da imagem no teto, com quatro núcleos, a
+/// 1,77–1,92 s, contra 0,51–0,78 sem ele —, também.
+///
+/// Ele conta os `tlbi` deste núcleo, e não o endereço nem o alcance deles:
+/// um `tlbi` do endereço errado, ou só deste núcleo, passaria por ele — a
+/// M5, o `tlbi` só local, é pega pelos casos que conferem o efeito noutro
+/// núcleo —; é o limite da conta, num emulador que não mostra o efeito (o
+/// informativo 7 do adversário do lote ICACHE).
 #[cfg(target_arch = "aarch64")]
 fn paginacao_a_entrada_nova_privada_publica_e_a_compartilhada_invalida() -> Resultado {
     use crate::arch::aarch64::mmu::tlbi_deste_nucleo_de_teste as tlbi;

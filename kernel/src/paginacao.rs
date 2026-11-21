@@ -120,8 +120,10 @@ pub fn mapear_faixa_preenchendo(
     // mesmo frame, o código do processo que o teve antes — ver
     // `arch::sincronizar_instrucoes`. Aqui, e não no `exec` ou no `fork`,
     // porque é o caminho por onde passa todo código que o kernel escreve: a
-    // carga do lançamento e a da troca de imagem são o mesmo
-    // `programa::carregar`. O `fork` não escreve código — o filho divide os
+    // carga do lançamento (`programa::carregar`) e a da troca de imagem (os
+    // passos dele — `preparar`, `trocar` e `Trocada::mapear` —, que o
+    // `executar` chama um a um) mapeiam os segmentos pelo mesmo
+    // `Trocada::mapear`. O `fork` não escreve código — o filho divide os
     // frames do pai, já sincronizados —, e a cópia na escrita nunca copia
     // uma página executável: só marca as graváveis, e nenhuma página do
     // usuário é gravável e executável ao mesmo tempo (`elf::validar` recusa o
