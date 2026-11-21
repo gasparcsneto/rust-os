@@ -2746,6 +2746,174 @@ fn medir_o_desenho(tela: &crate::tela::Tela) -> Resultado {
     Ok(())
 }
 
+/// O custo de apresentar, medido a cada rodada contra a cópia de memória dos
+/// mesmos bytes.
+///
+/// # O que ele recusa
+///
+/// O caminho rápido de [`crate::tela::Tela::copiar_linha`] — o BGR de quatro
+/// bytes por pixel, o das duas máquinas da suíte — voltando a escrever pixel
+/// a pixel. A apresentação roda no núcleo dos dispositivos com as
+/// interrupções mascaradas, e enquanto ela dura ele não colhe as portas do
+/// canal, não roda o executor e não acorda as esperas do relógio. Pixel a
+/// pixel, no kernel de depuração, cada escrita volátil era uma chamada de
+/// função, e uma tela inteira custava dezenas de vezes a cópia — a cada
+/// linha de log que rolava o console cheio. A CI 527 reprovou a fumaça do
+/// teclado USB por isso.
+///
+/// # Como ele mede
+///
+/// Como o do desenho, [`tela_desenhar_nao_regrediu_em_ordem_de_grandeza`]:
+/// uma razão, e não um teto em milissegundos, para a máquina entrar nos dois
+/// lados da conta e sair dela. De um lado, a tela física inteira pelo
+/// `copiar_linha` de verdade, linha a linha, como o adaptador linear a
+/// apresenta; do outro, a mesma cópia por `copy_nonoverlapping`, para o
+/// mesmo framebuffer, em blocos alternados. Pelo contador de ciclos, e não
+/// pelo relógio: uma tela copiada leva poucos milissegundos, e o relógio
+/// anda de dez em dez.
+///
+/// No núcleo dos dispositivos, que é onde a apresentação roda: no
+/// emulador, copiar para o framebuffer de outro núcleo custa cem vezes mais
+/// — ver `Compositor::apresentar_pendente` —, e a medida seria dessa
+/// diferença, e não do caminho.
+///
+/// # Por que só em depuração
+///
+/// Porque é lá que o defeito mora. Em release o laço de escritas voláteis
+/// vira um laço reto de escritas de 32 bits, tão rápido quanto a cópia, e a
+/// razão não separa os dois: é registrada, e não julgada.
+fn tela_apresentar_nao_regrediu_em_ordem_de_grandeza() -> Resultado {
+    let Some(fisica) = crate::tela::tela_fisica() else {
+        return Ok(());
+    };
+    // Num `virtio-gpu` quem apresenta é o dispositivo: o quadro já é a
+    // memória da tela, e nada passa por `copiar_linha`.
+    if crate::tela::precisa_descarregar() {
+        crate::log_info!("tela", "a apresentacao e do virtio-gpu: nada a medir");
+        return Ok(());
+    }
+    if fisica.formato != crate::tela::Formato::Bgr || fisica.bytes_por_pixel != 4 {
+        crate::log_info!(
+            "tela",
+            "o framebuffer nao e o do caminho rapido: nada a medir"
+        );
+        return Ok(());
+    }
+    if !crate::nucleos::e_o_dos_dispositivos() {
+        return Err(
+            "a medida da apresentacao e no nucleo dos dispositivos, e o caso roda em outro",
+        );
+    }
+    let resultado = medir_a_apresentacao(&fisica);
+    // A medida deixa o padrão dela no framebuffer, por baixo do compositor;
+    // recompor a tela inteira devolve o que as camadas mostram. Pela trava,
+    // que outro núcleo pode ter na mão por um instante.
+    let inteira = crate::grafico::Dano::novo(0, 0, fisica.largura, fisica.altura);
+    let recomposta = girar_ate(|| crate::grafico::compor(inteira), 1_000_000);
+    resultado?;
+    if !recomposta {
+        return Err("a tela nao foi recomposta depois da medida");
+    }
+    Ok(())
+}
+
+/// A medida de [`tela_apresentar_nao_regrediu_em_ordem_de_grandeza`]: copia
+/// para o framebuffer de `fisica`, inteiro, um padrão de memória comum, e não
+/// o devolve.
+fn medir_a_apresentacao(fisica: &crate::tela::Tela) -> Resultado {
+    // Blocos alternados, como no desenho. Em depuração, o caminho que
+    // regrediu leva uma fração de segundo por tela, e seis bastam; em
+    // release, o bastante para o tique e o resto da máquina pesarem igual
+    // nos dois lados.
+    const POR_BLOCO: u64 = if cfg!(debug_assertions) { 2 } else { 5 };
+    const BLOCOS: u64 = if cfg!(debug_assertions) { 3 } else { 4 };
+    const VOLTAS: u64 = POR_BLOCO * BLOCOS;
+    let (largura, altura) = (fisica.largura as usize, fisica.altura as usize);
+    let mut origem = crate::grafico::memoria::Memoria::nova((largura * altura * 4) as u64)?;
+    for (i, pixel) in origem.pixels_mut().iter_mut().enumerate() {
+        *pixel = (i as u32).wrapping_mul(0x9E37_79B9) & 0x00FF_FFFF;
+    }
+    let pixels = &origem.pixels()[..largura * altura];
+    let base = fisica.base_de_teste() as usize;
+    let linha_em_bytes = fisica.stride as usize * 4;
+
+    let apresentar = || {
+        for (y, linha) in pixels.chunks_exact(largura).enumerate() {
+            fisica.copiar_linha(0, y as u32, linha);
+        }
+    };
+    let referencia = || {
+        for (y, linha) in pixels.chunks_exact(largura).enumerate() {
+            // SAFETY: a tela registrada cobre `stride * altura * 4` bytes
+            // mapeados e graváveis a partir de `base`, e cada linha visível
+            // tem `largura` pixels de quatro bytes dentro dela, alinhados a
+            // 32 bits. A origem é memória deste caso, e não se sobrepõe.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    linha.as_ptr(),
+                    (base + y * linha_em_bytes) as *mut u32,
+                    largura,
+                )
+            };
+        }
+    };
+
+    // Uma volta de cada fora da conta: a primeira paga o que as seguintes não
+    // pagam.
+    apresentar();
+    referencia();
+    let (mut total, mut copia) = (0u64, 0u64);
+    for _ in 0..BLOCOS {
+        let antes = crate::arch::ciclos();
+        for _ in 0..POR_BLOCO {
+            apresentar();
+        }
+        total += crate::metricas::desde(antes);
+        let antes = crate::arch::ciclos();
+        for _ in 0..POR_BLOCO {
+            referencia();
+        }
+        copia += crate::metricas::desde(antes);
+    }
+    // Em centésimos: 100 é a apresentação tão rápida quanto a cópia.
+    let razao = total * 100 / copia.max(1);
+    crate::log_info!(
+        "tela",
+        "apresentar {}x{}: {} us por tela, {}% da copia ({} us)",
+        largura,
+        altura,
+        crate::metricas::nanos(total / VOLTAS) / 1000,
+        razao,
+        crate::metricas::nanos(copia / VOLTAS) / 1000
+    );
+
+    if cfg!(debug_assertions) {
+        // Medido, em depuração: a cópia de agora a 118% da referência no x86
+        // e a 99% no ARM; pixel a pixel, a 8183% e a 4336%. O triplo separa
+        // os dois com folga. Em release, pixel a pixel ficou a 135% e a 195%.
+        const TETO_PERCENTUAL: u64 = 300;
+        if razao > TETO_PERCENTUAL {
+            crate::log_error!(
+                "teste",
+                "apresentar a {}% da copia, teto {}%",
+                razao,
+                TETO_PERCENTUAL
+            );
+            return Err("apresentar na tela ficou uma ordem de grandeza mais lento");
+        }
+    }
+
+    // E a cópia escreveu de verdade — senão a medida mediu nada: o último
+    // pixel da tela é o do padrão.
+    let ultimo = pixels[largura * altura - 1];
+    let lido = fisica.ler_pixel(largura as u32 - 1, altura as u32 - 1);
+    if lido != Some(crate::tela::Cor::de_u32(ultimo)) {
+        crate::log_error!("teste", "lido {:?}, esperado {:06x}", lido, ultimo);
+        return Err("apresentar nao deixou na tela o que copiou");
+    }
+    Ok(())
+}
+
 /// Um cabeçalho de GPT absurdo vira recusa, e não pânico nem laço eterno.
 ///
 /// # Por que este caso existe
@@ -41312,6 +41480,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "tela: desenhar nao regrediu em ordem de grandeza",
         f: tela_desenhar_nao_regrediu_em_ordem_de_grandeza,
+    },
+    Caso {
+        nome: "tela: apresentar nao regrediu em ordem de grandeza",
+        f: tela_apresentar_nao_regrediu_em_ordem_de_grandeza,
     },
     Caso {
         nome: "usuario: o pai sabe que o filho foi morto",

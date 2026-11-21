@@ -823,10 +823,41 @@ impl Tela {
     ///
     /// # O caminho rápido
     ///
-    /// BGR de quatro bytes por pixel — as duas máquinas da suíte — é uma
-    /// escrita de 32 bits por pixel, sem conversão. Os outros formatos
-    /// convertem pixel a pixel. As escritas continuam voláteis pelo motivo
-    /// de sempre: quem lê este buffer não é este programa.
+    /// BGR de quatro bytes por pixel — as duas máquinas da suíte — é o
+    /// formato das superfícies, sem conversão: a linha vai numa cópia só. Os
+    /// outros formatos convertem pixel a pixel, com escritas voláteis.
+    ///
+    /// # Por que uma cópia, e não uma escrita volátil por pixel
+    ///
+    /// Porque era, e quem pagava era o núcleo dos dispositivos. A
+    /// apresentação roda nele com as interrupções mascaradas — de dentro de
+    /// uma escrita no console, do tique, do cutucão —, e enquanto ela dura
+    /// ele não colhe as portas do canal, não roda o executor e não acorda as
+    /// esperas do relógio. No kernel de depuração cada escrita volátil é uma
+    /// chamada de função, com as conferências dela: uma tela inteira levava
+    /// 126 ms no x86 (1280x800) e 135 ms no ARM (1280x720), e cada linha de
+    /// log que rolava o console cheio a levava de novo. A CI 527 reprovou a
+    /// fumaça do teclado USB por isso: o agente de uma porta esperou 2,3 s
+    /// pelo núcleo mascarado. A cópia é o `memcpy` do `compiler_builtins`,
+    /// que vem compilado e otimizado com o `core`, em qualquer perfil: 1,8 e
+    /// 2,3 ms em depuração; em release, de 1,5 para 1,1 ms no x86, e de 3,5
+    /// para 1,5 ms no ARM. Quem mede, a cada rodada da suíte, é `tela:
+    /// apresentar nao regrediu em ordem de grandeza`.
+    ///
+    /// # Por que ela basta, sem `volatile`
+    ///
+    /// O volátil existe para o compilador não tirar nem fundir escritas que
+    /// ele acha que ninguém lê. O destino aqui é memória que ele não conhece
+    /// — um endereço que veio de um inteiro —, e cada linha é escrita uma
+    /// vez: não há escrita que ele possa provar inútil. A ordem dentro da
+    /// linha não importa: o monitor varre o framebuffer por conta própria,
+    /// sem combinar nada com quem escreve.
+    ///
+    /// E ela respeita a memória de dispositivo do ARM — o BAR do
+    /// `bochs-display`, mapeado por [`crate::mmio::mapear`] —, onde um acesso
+    /// desalinhado é falha: o alvo `-softfloat` tem `strict-align`, e o
+    /// `memcpy` dele alinha o destino a oito bytes com escritas de um byte e
+    /// só então escreve palavras alinhadas. No x86, é `rep movsq`.
     pub fn copiar_linha(&self, x: u32, y: u32, pixels: &[u32]) {
         if y >= self.altura || x >= self.largura {
             return;
@@ -840,14 +871,15 @@ impl Tela {
         };
 
         if self.formato == Formato::Bgr && self.bytes_por_pixel == 4 {
-            let destino = inicio as *mut u32;
-            for (i, &pixel) in pixels.iter().enumerate() {
-                // SAFETY: `x + i` está abaixo da largura pelo corte acima, e
-                // `y` abaixo da altura; o registro garantiu a região mapeada e
-                // gravável. Quatro bytes por pixel e base alinhada a página
-                // deixam cada endereço alinhado a 32 bits.
-                unsafe { core::ptr::write_volatile(destino.add(i), pixel) };
-            }
+            // SAFETY: `x + pixels.len()` não passa da largura, pelo corte
+            // acima, e `y` está abaixo da altura; o registro garantiu a
+            // região mapeada e gravável. Quatro bytes por pixel e base
+            // alinhada a página deixam o destino alinhado a 32 bits. A origem
+            // é memória do kernel — o quadro do compositor, uma superfície —,
+            // e não se sobrepõe ao framebuffer.
+            unsafe {
+                core::ptr::copy_nonoverlapping(pixels.as_ptr(), inicio as *mut u32, pixels.len())
+            };
             return;
         }
 
