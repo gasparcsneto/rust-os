@@ -985,11 +985,9 @@ pub fn desmapear(virtual_: u64) -> Result<u64, &'static str> {
             // 511 entradas válidas, então jamais aparece vazia.
             if crate::arch::e_privado(virtual_) && tabela_vazia(l3) {
                 *l2.add(i2) = 0;
-                crate::frames::liberar(l3 as u64);
-
-                if tabela_vazia(l2) {
+                let l2_vazia = tabela_vazia(l2);
+                if l2_vazia {
                     *l1.add(i1) = 0;
-                    crate::frames::liberar(l2 as u64);
                 }
 
                 // Invalidação ampla, e não do endereço: o percorredor de
@@ -998,6 +996,22 @@ pub fn desmapear(virtual_: u64) -> Result<u64, &'static str> {
                 // tradução ainda esteja em cache é corrupção garantida assim
                 // que ele for reaproveitado.
                 invalidar_tudo();
+
+                // E só depois dela as tabelas voltam ao alocador. Antes, elas
+                // voltavam primeiro (o item F do adversário do trabalho
+                // arm-tlbi): entre a devolução e o `vmalle1is`, o frame já era
+                // de quem o pedisse — a cópia na escrita de outro núcleo o
+                // aloca fora desta trava e escreve nele —, e um percurso deste
+                // núcleo pela cache dos níveis intermediários ainda o lia como
+                // tabela. A janela fechava antes de qualquer uso — mascarada,
+                // com a trava na mão —, mas a ordem certa não a abre: a
+                // tabela solta das entradas, a TLB sem ela em todo núcleo, e
+                // só então o frame livre. A trava e a máscara continuam as
+                // mesmas, por cima das três coisas.
+                crate::frames::liberar(l3 as u64);
+                if l2_vazia {
+                    crate::frames::liberar(l2 as u64);
+                }
             }
 
             // Devolver o frame permite ao chamador liberá-lo. Sem isto, quem
@@ -1489,10 +1503,20 @@ pub unsafe fn destruir_espaco(raiz: u64, entrada_privada: usize) {
         // identicamente mapeada. Só descemos pela entrada do usuário: as
         // demais são do kernel e continuam em uso.
         unsafe {
-            // Dois níveis de tabela abaixo da raiz: L1 -> L2 -> L3 -> página.
-            liberar_subarvore(*topo.add(entrada_privada), 2);
+            // A entrada sai da raiz, a TLB a esquece em todo núcleo, e só
+            // então as tabelas e as páginas que ela alcançava voltam ao
+            // alocador — a ordem de [`desmapear`] (o item F do adversário do
+            // trabalho arm-tlbi). Aqui a raiz já não está ativa em núcleo
+            // nenhum, e cada troca de espaço descartou a TLB inteira de quem
+            // a teve: o `vmalle1is` é a reserva, e a ordem não depende de
+            // contar com isso. Desligada da raiz, a subárvore segue inteira
+            // na memória até `liberar_subarvore` a percorrer: os frames são
+            // deste espaço até voltarem.
+            let privada = *topo.add(entrada_privada);
             *topo.add(entrada_privada) = 0;
             invalidar_tudo();
+            // Dois níveis de tabela abaixo da raiz: L1 -> L2 -> L3 -> página.
+            liberar_subarvore(privada, 2);
         }
         crate::frames::liberar(raiz);
     })

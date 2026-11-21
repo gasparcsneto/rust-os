@@ -155,6 +155,57 @@ impl FrameDeallocator<Size4KiB> for AlocadorDeFrames {
     }
 }
 
+/// As tabelas que a limpeza de uma remoção esvaziou e soltou das entradas,
+/// guardadas até o `invlpg` que as tira dos caches de estrutura — ver
+/// [`desmapear`]. O `clean_up_addr_range` solta cada uma da entrada e a
+/// entrega aqui na mesma volta, e um frame devolvido nesse ponto voltaria ao
+/// alocador antes da invalidação.
+///
+/// Três vagas: a limpeza de uma página só desce os três níveis abaixo da
+/// raiz — a tabela de páginas, o diretório e o diretório de ponteiros —, e
+/// a raiz ela nunca solta.
+struct TabelasEsvaziadas {
+    frames: [u64; 3],
+    quantas: usize,
+}
+
+impl TabelasEsvaziadas {
+    const fn nenhuma() -> Self {
+        Self {
+            frames: [0; 3],
+            quantas: 0,
+        }
+    }
+
+    /// Devolve ao alocador as tabelas guardadas. Só depois do `invlpg`.
+    fn liberar(&mut self) {
+        for &frame in &self.frames[..self.quantas] {
+            crate::frames::liberar(frame);
+        }
+        self.quantas = 0;
+    }
+}
+
+// SAFETY: como o `AlocadorDeFrames`: só frames que saíram do alocador e cujo
+// último dono era uma tabela que a limpeza acabou de soltar. Eles voltam
+// depois, por `liberar`.
+impl FrameDeallocator<Size4KiB> for TabelasEsvaziadas {
+    unsafe fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
+        let fisico = frame.start_address().as_u64();
+        if let Some(vaga) = self.frames.get_mut(self.quantas) {
+            *vaga = fisico;
+            self.quantas += 1;
+        } else {
+            // Uma quarta tabela não vem de uma página só; se viesse, a ordem
+            // continua a mesma: a entrada dela já está solta, e o `CR3`
+            // recarregado descarta os caches de estrutura antes de o frame
+            // voltar.
+            x86_64::instructions::tlb::flush_all();
+            crate::frames::liberar(fisico);
+        }
+    }
+}
+
 fn flags_de(permissoes: Permissoes) -> PageTableFlags {
     let mut flags = PageTableFlags::PRESENT;
     if permissoes.escrita {
@@ -318,11 +369,37 @@ pub fn desmapear(virtual_: u64) -> Result<u64, &'static str> {
                 // têm contagem de referência — que é exatamente o que o
                 // contrato de `clean_up_addr_range` exige.
                 if crate::arch::e_privado(virtual_) {
+                    let mut esvaziadas = TabelasEsvaziadas::nenhuma();
                     unsafe {
                         mapeador.clean_up_addr_range(
                             Page::range_inclusive(pagina, pagina),
-                            &mut AlocadorDeFrames,
+                            &mut esvaziadas,
                         );
+                    }
+                    // O `invlpg` de antes da limpeza tirou a tradução da
+                    // página, mas as tabelas que a limpeza solta depois dele
+                    // ainda podiam estar nos caches de estrutura deste núcleo
+                    // — a entrada do diretório que apontava para a tabela de
+                    // páginas, e acima: um percurso especulativo entre o
+                    // `invlpg` e a limpeza as põe de volta. Liberadas assim, o
+                    // frame de uma delas voltava ao alocador ainda alcançável
+                    // por um percurso daqui, até o próximo `invlpg` ou `CR3`
+                    // (o item C do adversário do trabalho arm-tlbi). O `invlpg`
+                    // descarta, além da tradução do endereço, as entradas dos
+                    // caches de estrutura do PCID atual — todas, no manual da
+                    // Intel; as que traduzem o endereço, no da AMD, que são as
+                    // das tabelas que esta limpeza soltou: elas estão no
+                    // caminho dele. Os outros núcleos não precisam: a raiz
+                    // deste espaço só está ativa aqui, e quem a teve antes já
+                    // recarregou o `CR3`, que descarta os caches de estrutura
+                    // também.
+                    //
+                    // E as tabelas só voltam ao alocador depois dele, como no
+                    // ARM (`desmapear` de lá): soltas das entradas pela
+                    // limpeza, esquecidas pelo `invlpg`, e só então livres.
+                    if esvaziadas.quantas > 0 {
+                        x86_64::instructions::tlb::flush(VirtAddr::new(virtual_));
+                        esvaziadas.liberar();
                     }
                 }
 
