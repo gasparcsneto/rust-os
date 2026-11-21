@@ -282,6 +282,11 @@ pub unsafe fn init() {
 
     ATIVA.store(true, Ordering::Release);
 
+    // As linhas dos caches deste núcleo, para a carga de código — ver
+    // [`sincronizar_instrucoes`]. Os outros núcleos anotam as deles ao
+    // acordar.
+    anotar_os_caches_deste_nucleo();
+
     crate::log_info!(
         "mmu",
         "identidade ativa: 1 bloco de dispositivo, {} de RAM, {} acrescentado(s) pela tela",
@@ -1097,6 +1102,184 @@ unsafe fn invalidar(virtual_: u64) {
 /// resposta é outra, e é por isso que esta função existe.
 pub fn acesso_fisico(fisico: u64) -> *mut u8 {
     fisico as *mut u8
+}
+
+// ===========================================================================
+// O cache de instruções
+// ===========================================================================
+//
+// No ARM o cache de instruções não acompanha as escritas: o kernel escreve o
+// código de um processo pelo cache de dados, e a busca de instruções pode
+// achar no cache dela o que havia antes no mesmo frame — o código de outro
+// processo, que o alocador acabou de devolver. Ver [`sincronizar_instrucoes`].
+
+/// `CTR_EL0.IDC`: a limpeza do cache de dados até o ponto de unificação não
+/// é necessária para as instruções verem os dados.
+const CTR_IDC: u64 = 1 << 28;
+/// `CTR_EL0.DIC`: a invalidação do cache de instruções até o ponto de
+/// unificação não é necessária para as instruções verem os dados.
+const CTR_DIC: u64 = 1 << 29;
+/// Onde começa o `CTR_EL0.DminLine`, de quatro bits: o log2, em palavras de 4
+/// bytes, da menor linha dos caches de dados.
+const CTR_DMINLINE: u32 = 16;
+/// Onde começa o `CTR_EL0.IminLine`: o mesmo, dos caches de instruções.
+const CTR_IMINLINE: u32 = 0;
+
+/// A menor linha dos caches de dados de **todos** os núcleos, em bytes —
+/// `u64::MAX` enquanto nenhum anotou a sua —; ver [`CTR_DE_TODOS`].
+static LINHA_DE_DADOS: AtomicU64 = AtomicU64::new(u64::MAX);
+/// A menor linha dos caches de instruções de todos os núcleos, em bytes.
+static LINHA_DE_INSTRUCOES: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// O `IDC` e o `DIC` do `CTR_EL0` que **todos** os núcleos anunciam: cada
+/// um tira os bits que não tem.
+///
+/// # Por que o de todos, e não só o deste núcleo
+///
+/// Porque a manutenção por endereço anda de linha em linha, e o passo de um
+/// núcleo de linha maior pularia linhas no cache de um núcleo de linha menor
+/// — há processadores com núcleos de geometrias diferentes na mesma máquina
+/// —, e o processo que um núcleo carrega pode rodar em outro; e um núcleo
+/// que dispense a limpeza ou a invalidação não a dispensa pelos outros. Cada
+/// núcleo anota o seu ao acordar ([`anotar_os_caches_deste_nucleo`]), e quem
+/// sincroniza junta ainda o do núcleo em que está.
+static CTR_DE_TODOS: AtomicU64 = AtomicU64::new(CTR_IDC | CTR_DIC);
+
+/// O `CTR_EL0` deste núcleo. O EL0 não o lê — o `UCT` de [`SCTLR_DO_KERNEL`]
+/// está desligado —; o EL1, sempre.
+fn ctr_deste_nucleo() -> u64 {
+    let ctr: u64;
+    // SAFETY: leitura de um registrador de identificação, sem efeito.
+    unsafe { asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags)) };
+    ctr
+}
+
+/// A linha, em bytes, do campo de quatro bits de `ctr` que começa em
+/// `desde`: o log2 de quantas palavras de 4 bytes ela tem.
+fn linha_do_ctr(ctr: u64, desde: u32) -> u64 {
+    4 << ((ctr >> desde) & 0xF)
+}
+
+/// Junta o `CTR_EL0` deste núcleo ao de todos: as linhas menores e os bits
+/// que ele não tem. Cada núcleo a chama ao acordar, antes do primeiro
+/// processo dele: o primeiro em [`init`], os outros na entrada do `smp`.
+pub fn anotar_os_caches_deste_nucleo() {
+    let ctr = ctr_deste_nucleo();
+    LINHA_DE_DADOS.fetch_min(linha_do_ctr(ctr, CTR_DMINLINE), Ordering::AcqRel);
+    LINHA_DE_INSTRUCOES.fetch_min(linha_do_ctr(ctr, CTR_IMINLINE), Ordering::AcqRel);
+    CTR_DE_TODOS.fetch_and(ctr & (CTR_IDC | CTR_DIC), Ordering::AcqRel);
+}
+
+/// As linhas que [`sincronizar_instrucoes`] percorre agora, neste núcleo:
+/// a do cache de dados e a do de instruções, em bytes — `None` na que o
+/// `IDC` ou o `DIC` dispensa em todos.
+fn linhas_da_sincronia() -> (Option<u64>, Option<u64>) {
+    let ctr = ctr_deste_nucleo();
+    let todos = CTR_DE_TODOS.load(Ordering::Acquire) & ctr;
+    let dados = LINHA_DE_DADOS
+        .load(Ordering::Acquire)
+        .min(linha_do_ctr(ctr, CTR_DMINLINE));
+    let instrucoes = LINHA_DE_INSTRUCOES
+        .load(Ordering::Acquire)
+        .min(linha_do_ctr(ctr, CTR_IMINLINE));
+    (
+        (todos & CTR_IDC == 0).then_some(dados),
+        (todos & CTR_DIC == 0).then_some(instrucoes),
+    )
+}
+
+/// Só para a suíte: as linhas de [`linhas_da_sincronia`], com zero na que o
+/// processador dispensa — a conta do caso `memoria: a carga sincroniza o
+/// cache de instrucoes do codigo`.
+#[cfg(feature = "modo-teste")]
+pub fn linhas_da_sincronia_de_teste() -> (u64, u64) {
+    let (dados, instrucoes) = linhas_da_sincronia();
+    (dados.unwrap_or(0), instrucoes.unwrap_or(0))
+}
+
+/// Torna o que o kernel escreveu em `[inicio, inicio + bytes)` — endereços
+/// do espaço ativo — visível às buscas de instrução de todos os núcleos.
+///
+/// # Por que é preciso
+///
+/// A carga de um programa escreve o código dele pelo cache de dados
+/// ([`crate::paginacao::mapear_faixa_preenchendo`]), e a busca de
+/// instruções tem um cache próprio, que no ARM não acompanha as escritas. O
+/// alocador entrega primeiro o frame que acabou de voltar, e o cache de
+/// instruções pode guardar, desse frame, o código do processo que o teve
+/// antes: o processo novo executaria o código do outro, com a autoridade
+/// dele. Um processador que anuncie o `IDC` e o `DIC` no `CTR_EL0` mantém a
+/// coerência sozinho; o Cortex-A72, o processador que a CI emula, não
+/// anuncia nenhum dos dois.
+///
+/// # A sequência
+///
+/// A do manual da arquitetura para o código escrito por dados:
+///
+/// - `dc cvau` em cada linha — limpa o cache de dados até o ponto de
+///   unificação, onde a busca de instruções lê —, e `dsb ish`, que a
+///   completa em todo núcleo; com o `IDC`, só o `dsb ishst`, que completa as
+///   escritas;
+/// - `ic ivau` em cada linha — invalida a linha nos caches de instruções do
+///   domínio compartilhável interno —, e `dsb ish`; com o `DIC`, nada;
+/// - `isb` neste núcleo. Um outro núcleo que rode o processo entra nele por
+///   um `eret`, que sincroniza o contexto do mesmo jeito.
+///
+/// As linhas saem do `CTR_EL0` — as menores de todos os núcleos, ver
+/// [`CTR_DE_TODOS`]. A manutenção é pelos endereços do processo: a busca
+/// dele é por eles, e num cache de instruções indexado pelo endereço
+/// virtual é a linha de lá que importa; num indexado pelo físico, como o do
+/// A72, qualquer endereço do frame serve.
+///
+/// # O que o emulador mostra
+///
+/// Nada: o QEMU sem aceleração mantém o código traduzido coerente com a
+/// memória — uma escrita numa página de código descarta a tradução —, e o
+/// `dc cvau` e o `ic ivau` não fazem nada lá. Tirar esta manutenção deixa a
+/// suíte passar; é a conta das operações — o que esta função devolve, que
+/// o caso `memoria: a carga sincroniza o cache de instrucoes do codigo`
+/// confere — que a reprova.
+///
+/// # Safety
+///
+/// A faixa inteira precisa estar mapeada no espaço ativo, com leitura no
+/// EL1: a manutenção por endereço traduz cada endereço, e uma falha de
+/// tradução no EL1 é fatal.
+pub unsafe fn sincronizar_instrucoes(inicio: u64, bytes: u64) -> crate::arch::Sincronia {
+    let mut feito = crate::arch::Sincronia::default();
+    if bytes == 0 {
+        return feito;
+    }
+    let fim = inicio.saturating_add(bytes);
+    let (dados, instrucoes) = linhas_da_sincronia();
+    // SAFETY: manutenção de cache por endereço, sobre a faixa que o chamador
+    // garante mapeada, e barreiras. Nenhum `asm!` aqui é `nomem`: as
+    // escritas de quem chamou não podem passar para depois da limpeza.
+    unsafe {
+        match dados {
+            Some(linha) => {
+                let mut endereco = inicio & !(linha - 1);
+                while endereco < fim {
+                    asm!("dc cvau, {}", in(reg) endereco, options(nostack, preserves_flags));
+                    feito.limpas += 1;
+                    endereco += linha;
+                }
+                asm!("dsb ish", options(nostack, preserves_flags));
+            }
+            None => asm!("dsb ishst", options(nostack, preserves_flags)),
+        }
+        if let Some(linha) = instrucoes {
+            let mut endereco = inicio & !(linha - 1);
+            while endereco < fim {
+                asm!("ic ivau, {}", in(reg) endereco, options(nostack, preserves_flags));
+                feito.invalidadas += 1;
+                endereco += linha;
+            }
+            asm!("dsb ish", options(nostack, preserves_flags));
+        }
+        asm!("isb", options(nostack, preserves_flags));
+    }
+    feito
 }
 
 // ===========================================================================

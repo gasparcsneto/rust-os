@@ -383,6 +383,9 @@ extern "C" fn entrada_secundaria(indice: u64) -> ! {
     // dele.
     super::usuario::escrever_o_regime_deste_nucleo();
     super::usuario::fechar_os_contadores_neste_nucleo();
+    // E as linhas dos caches dele, antes de ele rodar um processo que outro
+    // núcleo carregou — ver `mmu::sincronizar_instrucoes`.
+    super::mmu::anotar_os_caches_deste_nucleo();
     // SAFETY: estamos no núcleo que acabou de acordar, mascarado, com a
     // tabela de vetores instalada pelo bloco de partida.
     unsafe { super::gic::ligar_neste_nucleo() };

@@ -378,6 +378,33 @@ pub fn acesso_fisico(fisico: u64) -> *mut u8 {
     (deslocamento + fisico) as *mut u8
 }
 
+/// Torna o que o kernel escreveu em `[inicio, inicio + bytes)` visível às
+/// buscas de instrução — no x86, nada a fazer.
+///
+/// O cache de instruções do x86 é coerente com as escritas, pelo endereço
+/// físico e em todo núcleo: uma escrita invalida a linha que o guardava. O
+/// que o manual da Intel pede a quem escreve código que **outro** núcleo vai
+/// executar é uma instrução serializante nesse núcleo antes do código novo,
+/// pelo que ele já tivesse buscado — e o processo entra num núcleo pela troca
+/// de espaço, cujo `mov cr3` serializa, ou fica no núcleo que acabou de
+/// escrever o código, que confere as próprias escritas contra o que já
+/// buscou. O ARM é que precisa — ver o `sincronizar_instrucoes` de lá.
+///
+/// # Safety
+///
+/// Nenhuma aqui. O contrato é o da fachada, que o ARM exige: a faixa mapeada
+/// no espaço ativo.
+pub unsafe fn sincronizar_instrucoes(_inicio: u64, _bytes: u64) -> crate::arch::Sincronia {
+    crate::arch::Sincronia::default()
+}
+
+/// Só para a suíte: as linhas que [`sincronizar_instrucoes`] percorre —
+/// nenhuma, no x86.
+#[cfg(feature = "modo-teste")]
+pub fn linhas_da_sincronia_de_teste() -> (u64, u64) {
+    (0, 0)
+}
+
 // ===========================================================================
 // Espaços de endereços
 // ===========================================================================

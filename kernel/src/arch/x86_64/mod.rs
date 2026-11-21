@@ -1247,15 +1247,16 @@ fn exigir_protecao_de_escrita() {
 /// Só para a suíte: tira a marca de compartilhada de uma página.
 #[cfg(feature = "modo-teste")]
 pub use paginacao::desmarcar_compartilhada_de_teste;
-/// Só para a suíte: o par de conversões de permissão deste backend.
+/// Só para a suíte: o par de conversões de permissão deste backend, e as
+/// linhas que a sincronia do cache de instruções percorre — nenhuma aqui.
 #[cfg(feature = "modo-teste")]
-pub use paginacao::permissoes_ida_e_volta;
+pub use paginacao::{linhas_da_sincronia_de_teste, permissoes_ida_e_volta};
 
 pub use paginacao::{
     acesso_fisico, copia_na_escrita_em, criar_espaco, desmapear, destravar_paginacao,
     destruir_espaco, espaco_atual, espaco_do_kernel, gravavel_pelo_usuario, mapear_frame,
-    marcar_compartilhada, marcar_copia_na_escrita, percorrer_paginas_do_usuario, traduzir,
-    trocar_espaco,
+    marcar_compartilhada, marcar_copia_na_escrita, percorrer_paginas_do_usuario,
+    sincronizar_instrucoes, traduzir, trocar_espaco,
 };
 
 /// O nome da falha que um estouro de pilha produz nesta arquitetura.

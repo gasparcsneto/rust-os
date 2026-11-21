@@ -114,6 +114,29 @@ pub fn mapear_faixa_preenchendo(
 
     preencher();
 
+    // O que `preencher` escreveu foi pelo cache de dados, e uma página que
+    // vai ser executável precisa dele visível às buscas de instrução **antes**
+    // de ficar executável: no ARM, o cache de instruções pode guardar, do
+    // mesmo frame, o código do processo que o teve antes — ver
+    // `arch::sincronizar_instrucoes`. Aqui, e não no `exec` ou no `fork`,
+    // porque é o caminho por onde passa todo código que o kernel escreve: a
+    // carga do lançamento e a da troca de imagem são o mesmo
+    // `programa::carregar`. O `fork` não escreve código — o filho divide os
+    // frames do pai, já sincronizados —, e a cópia na escrita nunca copia
+    // uma página executável: só marca as graváveis, e nenhuma página do
+    // usuário é gravável e executável ao mesmo tempo (`elf::validar` recusa o
+    // segmento que pede as duas, e o resto do kernel só mapeia dados sem
+    // execução).
+    if permissoes.executavel {
+        // SAFETY: as páginas da faixa acabaram de ser mapeadas no espaço
+        // ativo, graváveis — com leitura no anel zero —, e continuam.
+        let feito = unsafe { arch::sincronizar_instrucoes(inicio, paginas * TAMANHO_PAGINA) };
+        #[cfg(feature = "modo-teste")]
+        sincronia_de_teste::anotar(paginas, feito);
+        #[cfg(not(feature = "modo-teste"))]
+        let _ = feito;
+    }
+
     if permissoes == temporarias {
         return Ok(());
     }
@@ -129,6 +152,59 @@ pub fn mapear_faixa_preenchendo(
         unsafe { arch::mapear_frame(endereco, frame, permissoes)? };
     }
     Ok(())
+}
+
+/// Só para a suíte: o que a carga de um fio fez pelo cache de instruções —
+/// quantas páginas executáveis [`mapear_faixa_preenchendo`] sincronizou, e
+/// quantas linhas de cache a sincronia limpou e invalidou
+/// ([`arch::Sincronia`]).
+///
+/// Por fio, e não para a máquina: a carga de outro processo, noutro núcleo,
+/// ao mesmo tempo, não entra na conta do caso que vigia.
+#[cfg(feature = "modo-teste")]
+pub mod sincronia_de_teste {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    /// O fio vigiado, como `fio + 1`; zero, nenhum.
+    static VIGIADO: AtomicU64 = AtomicU64::new(0);
+    static PAGINAS: AtomicU64 = AtomicU64::new(0);
+    static LIMPAS: AtomicU64 = AtomicU64::new(0);
+    static INVALIDADAS: AtomicU64 = AtomicU64::new(0);
+
+    /// Vigia as cargas do fio `fio`, a partir de zero.
+    pub fn vigiar(fio: u64) {
+        PAGINAS.store(0, Ordering::Release);
+        LIMPAS.store(0, Ordering::Release);
+        INVALIDADAS.store(0, Ordering::Release);
+        VIGIADO.store(fio + 1, Ordering::Release);
+    }
+
+    /// Para de vigiar.
+    pub fn esquecer() {
+        VIGIADO.store(0, Ordering::Release);
+    }
+
+    /// `(páginas, linhas limpas, linhas invalidadas)` do fio vigiado.
+    pub fn contas() -> (u64, u64, u64) {
+        (
+            PAGINAS.load(Ordering::Acquire),
+            LIMPAS.load(Ordering::Acquire),
+            INVALIDADAS.load(Ordering::Acquire),
+        )
+    }
+
+    /// Chamada por [`super::mapear_faixa_preenchendo`] depois de cada
+    /// sincronia.
+    pub(super) fn anotar(paginas: u64, feito: crate::arch::Sincronia) {
+        // Mascarado: o fio não muda de núcleo entre achar o núcleo e ler o
+        // fio dele.
+        let fio = crate::arch::sem_interrupcoes(crate::fios::id_atual_sem_trava);
+        if VIGIADO.load(Ordering::Acquire) == fio + 1 {
+            PAGINAS.fetch_add(paginas, Ordering::AcqRel);
+            LIMPAS.fetch_add(feito.limpas, Ordering::AcqRel);
+            INVALIDADAS.fetch_add(feito.invalidadas, Ordering::AcqRel);
+        }
+    }
 }
 
 /// Desfaz o mapeamento e devolve o frame ao alocador.

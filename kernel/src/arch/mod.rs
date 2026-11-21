@@ -29,6 +29,8 @@
 //!   interrupção em vez de ser consultada em laço.
 //! - `reservar_faixas()`: faixas físicas que o alocador de frames deve evitar.
 //! - `init_paginacao()`, `mapear_frame()`, `desmapear()`, `traduzir()`: a MMU.
+//! - `sincronizar_instrucoes()`: o código que o kernel escreveu, visível às
+//!   buscas de instrução — no ARM, a manutenção do cache; no x86, nada.
 //! - `acesso_fisico()`: endereço virtual por onde se enxerga um físico.
 //! - `esperar_interrupcao()`: dorme até a próxima interrupção.
 //! - `dormir_parado()`: o mesmo, para um fio que não pode prosseguir e não
@@ -81,8 +83,8 @@ pub use atual::{
     init_interrupcoes, init_paginacao, init_pci, init_seriais, init_timer_definitivo, init_usuario,
     interrupcoes_habilitadas, mapear_frame, marcar_compartilhada, marcar_copia_na_escrita,
     mascarar_as_interrupcoes, nome, percorrer_paginas_do_usuario, preparar_contexto,
-    preparar_contexto_de_fork, redirecionar_para, reservar_faixas, sem_interrupcoes, traduzir,
-    trocar_espaco,
+    preparar_contexto_de_fork, redirecionar_para, reservar_faixas, sem_interrupcoes,
+    sincronizar_instrucoes, traduzir, trocar_espaco,
 };
 
 /// Vários núcleos — ver [`crate::nucleos`]. Cada backend responde do seu
@@ -105,9 +107,10 @@ pub use atual::{desligar_a_maquina, meios_da_energia, reiniciar_a_maquina};
 /// máquina avisa o aperto, ou por que ela não avisa.
 pub use atual::botao::ligar as ligar_o_botao;
 
-/// Só para a suíte: o par de conversões de permissão de cada backend.
+/// Só para a suíte: o par de conversões de permissão de cada backend, e as
+/// linhas que a sincronia do cache de instruções percorre nele.
 #[cfg(feature = "modo-teste")]
-pub use atual::permissoes_ida_e_volta;
+pub use atual::{linhas_da_sincronia_de_teste, permissoes_ida_e_volta};
 
 /// Acesso ao barramento PCI, que difere em mecanismo entre as duas
 /// arquiteturas: portas de I/O no x86, ECAM no ARM.
@@ -246,6 +249,22 @@ impl Permissoes {
     // `usuario::programa::carregar`. Uma constante aqui seria um segundo lugar
     // com a mesma resposta, e o dia em que os dois discordassem o carregador
     // silenciosamente ignoraria o que o programa pediu.
+}
+
+/// O que [`sincronizar_instrucoes`] fez: as linhas de cache que limpou e
+/// que invalidou. Zero onde a arquitetura não precisa — o x86, e um ARM que
+/// anuncie o `IDC` e o `DIC`.
+///
+/// Fora da suíte, ninguém lê: é a conta que o caso `memoria: a carga
+/// sincroniza o cache de instrucoes do codigo` confere, porque o emulador
+/// não mostra o que a manutenção evita.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Sincronia {
+    /// `dc cvau`: linhas do cache de dados limpas até o ponto de unificação.
+    pub limpas: u64,
+    /// `ic ivau`: linhas dos caches de instruções invalidadas.
+    pub invalidadas: u64,
 }
 
 /// Uma página de usuário, como o percurso das tabelas a encontra.

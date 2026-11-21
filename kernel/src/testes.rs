@@ -32633,6 +32633,119 @@ fn memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel() -> Resultado 
     neste.and(noutro)
 }
 
+/// A carga torna o código que escreveu visível às buscas de instrução, e
+/// só o código (o item A do lote ICACHE).
+///
+/// # O que estava faltando
+///
+/// A carga escreve cada segmento pelo cache de dados e o mapeia executável
+/// em seguida, e no ARM o cache de instruções não acompanha as escritas:
+/// ele pode guardar, do frame que o alocador acabou de devolver, o código
+/// do processo que o teve antes — e o processo novo executaria o código do
+/// outro, com a autoridade dele. A carga agora sincroniza cada página
+/// executável (`arch::sincronizar_instrucoes`): `dc cvau` e `ic ivau` em
+/// cada linha, com as barreiras.
+///
+/// # Por que pela conta, e não pelo efeito
+///
+/// Porque o emulador não mostra o defeito: o QEMU sem aceleração mantém o
+/// código traduzido coerente com a memória, e lá o `dc cvau` e o `ic ivau`
+/// não fazem nada. O caso confere a manutenção pelo número de operações:
+/// um fio do kernel carrega o exemplo, e as páginas sincronizadas — as do
+/// fio, e não as da máquina (`paginacao::sincronia_de_teste`) — têm de ser
+/// as do segmento de código, e só elas, com uma limpeza e uma invalidação
+/// por linha de cada uma, no tamanho de linha do `CTR_EL0`. No x86 as
+/// páginas são as mesmas, e as linhas, nenhuma: lá o cache de instruções é
+/// coerente.
+fn memoria_a_carga_sincroniza_o_cache_de_instrucoes_do_codigo() -> Resultado {
+    use crate::arch::TAMANHO_PAGINA;
+    use crate::paginacao::sincronia_de_teste as sincronia;
+
+    // 0: o caso ainda não vigia; 1: pode carregar.
+    static FASE: AtomicU64 = AtomicU64::new(0);
+    // 0: ainda carregando; 1: carregou; 2: a carga falhou.
+    static CARREGOU: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn carregador(_argumento: u64) -> ! {
+        while FASE.load(SeqCst) == 0 {
+            crate::fios::ceder();
+        }
+        let carregou =
+            crate::usuario::programa::carregar_de_teste(crate::usuario::exemplo::bytes(), None)
+                .is_ok();
+        CARREGOU.store(if carregou { 1 } else { 2 }, SeqCst);
+        crate::fios::terminar()
+    }
+
+    // As páginas de cada segmento, como a carga as conta — da página do
+    // destino à que cobre o fim, pelo menos uma —, e as linhas que a
+    // sincronia percorre nas de código.
+    let (linha_de_dados, linha_de_instrucoes) = crate::arch::linhas_da_sincronia_de_teste();
+    let linhas = |inicio: u64, fim: u64, linha: u64| {
+        if linha == 0 {
+            0
+        } else {
+            (fim - (inicio & !(linha - 1))).div_ceil(linha)
+        }
+    };
+    let elf = crate::usuario::elf::validar(crate::usuario::exemplo::bytes())?;
+    let (mut de_codigo, mut de_dados, mut limpas, mut invalidadas) = (0u64, 0u64, 0u64, 0u64);
+    for segmento in elf.segmentos() {
+        let inicio = segmento.destino & !(TAMANHO_PAGINA - 1);
+        let fim = (segmento.destino + segmento.bytes_na_memoria as u64)
+            .div_ceil(TAMANHO_PAGINA)
+            .max(inicio / TAMANHO_PAGINA + 1)
+            * TAMANHO_PAGINA;
+        let paginas = (fim - inicio) / TAMANHO_PAGINA;
+        if segmento.executavel {
+            de_codigo += paginas;
+            limpas += linhas(inicio, fim, linha_de_dados);
+            invalidadas += linhas(inicio, fim, linha_de_instrucoes);
+        } else {
+            de_dados += paginas;
+        }
+    }
+    // Sem os dois, o caso passaria de graça: sem código, nada a sincronizar;
+    // sem dados, nada que a carga pudesse sincronizar a mais.
+    if de_codigo == 0 || de_dados == 0 {
+        return Err("o exemplo nao tem segmento de codigo e de dados: o caso nao mediria nada");
+    }
+
+    FASE.store(0, SeqCst);
+    CARREGOU.store(0, SeqCst);
+    let fio = crate::fios::criar("teste-icache", carregador, 0)?;
+    sincronia::vigiar(fio.numero());
+    FASE.store(1, SeqCst);
+    let terminou = esperar_cedendo(|| CARREGOU.load(SeqCst) != 0, 300);
+    let (paginas, limpas_vistas, invalidadas_vistas) = sincronia::contas();
+    sincronia::esquecer();
+    terminou.map_err(|_| "o fio do caso nao terminou a carga")?;
+    if CARREGOU.load(SeqCst) != 1 {
+        return Err("a carga do exemplo falhou");
+    }
+
+    crate::log_info!(
+        "teste",
+        "carga do exemplo: {} pagina(s) de codigo e {} de dados; sincronizadas {}, com {} limpeza(s) e {} invalidacao(oes) de linha, esperadas {} e {} (linhas de {} e {} bytes)",
+        de_codigo,
+        de_dados,
+        paginas,
+        limpas_vistas,
+        invalidadas_vistas,
+        limpas,
+        invalidadas,
+        linha_de_dados,
+        linha_de_instrucoes
+    );
+    if paginas != de_codigo {
+        return Err("a carga nao sincronizou exatamente as paginas de codigo");
+    }
+    if (limpas_vistas, invalidadas_vistas) != (limpas, invalidadas) {
+        return Err("a sincronia nao limpou e invalidou cada linha das paginas de codigo");
+    }
+    Ok(())
+}
+
 /// O neto de um `fork` nasce com a memória de dados gravável.
 ///
 /// # O caso que só aparece na segunda geração
@@ -43614,6 +43727,12 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "contencao: o desfecho que permite nao grava dentro de um comando",
         f: nascimento::contencao_o_desfecho_que_permite_nao_grava_no_comando,
+    },
+    // O lote ICACHE, no fim pelo mesmo motivo — nenhum caso de antes muda
+    // de parte —: a carga de código e o cache de instruções.
+    Caso {
+        nome: "memoria: a carga sincroniza o cache de instrucoes do codigo",
+        f: memoria_a_carga_sincroniza_o_cache_de_instrucoes_do_codigo,
     },
 ];
 
