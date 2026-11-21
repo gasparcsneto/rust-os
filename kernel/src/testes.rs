@@ -4082,6 +4082,17 @@ fn usb_relatorio_hid_vira_teclas() -> Resultado {
         return Err("shift e `b` no mesmo relatorio nao deram maiuscula");
     }
 
+    // E o relatório sem o modificador solta o shift do teclado: a mesma tecla
+    // de novo é minúscula. Sem soltar, o caso deixava o shift — que é global
+    // — apertado para os seguintes da mesma rodada (a CI 532).
+    processar(&mut anterior, [0, 0, 0, 0, 0, 0, 0, 0]);
+    processar(&mut anterior, [0, 0, 0x05, 0, 0, 0, 0, 0]);
+    let depois_de_soltar = crate::teclado::ler();
+    processar(&mut anterior, [0, 0, 0, 0, 0, 0, 0, 0]);
+    if depois_de_soltar != Some('b') {
+        return Err("o relatorio sem o shift nao soltou o shift do teclado");
+    }
+
     // E um usage que não é texto não vira nada.
     if crate::usb::hid::traduzir(0x32).is_some() {
         return Err("um usage sem equivalente virou codigo");
@@ -44526,6 +44537,10 @@ static CASOS: &[Caso] = &[
         nome: "paginacao: a tabela nova chega zerada antes de ser ligada",
         f: paginacao_a_tabela_nova_chega_zerada_antes_de_ser_ligada,
     },
+    Caso {
+        nome: "suite: o executor ve e solta o shift que o caso deixou apertado",
+        f: suite_o_executor_ve_e_solta_o_shift_apertado,
+    },
 ];
 
 /// A cauda da suíte: os casos que rodam em **toda** parte, depois da fatia
@@ -63135,18 +63150,56 @@ fn suite_o_executor_ve_e_devolve_o_coletor_e_o_journal() -> Resultado {
 /// de novo. Na parte 2 de 2 do boot pela UEFI do ARM nenhum o pausava, e a
 /// decisão de um `device.forget` foi num registro só de auditoria, antes do
 /// da desfeita ("pareamento: esquecer e parear de novo").
+///
+/// E o shift do teclado, que é global (`teclado::SHIFT`): o caso que o deixa
+/// apertado reprova aqui, e o executor o solta. A CI 532 achou um assim:
+/// `usb: o relatorio hid vira teclas` terminava com o shift do relatório, e
+/// `pareamento: o terminal de verdade engole fora da coordenacao`, na mesma
+/// parte 3 de 3 do ARM — as partes são intercaladas (`i % n`), e um caso
+/// novo no meio da tabela tinha deslocado os índices —, sem um caso no meio
+/// que esvaziasse o teclado, não achou a tecla de uma minúscula ("um
+/// caractere que o teclado nao produz sem shift").
 fn estado_da_suite_devolvido() -> Resultado {
     let solto = !crate::persistencia::auditoria_pausada_de_teste();
     let segurado = crate::persistencia::auditoria_segurada_de_teste();
+    let shift = crate::teclado::shift_apertado_de_teste();
     crate::persistencia::pausar_a_auditoria_de_teste(true);
     crate::persistencia::segurar_a_auditoria_de_teste(false);
+    crate::teclado::soltar_o_shift_de_teste();
     if solto {
         return Err("o caso deixou o coletor da auditoria solto");
     }
     if segurado {
         return Err("o caso deixou o journal segurado");
     }
+    if shift {
+        return Err("o caso deixou o shift do teclado apertado");
+    }
     Ok(())
+}
+
+/// O executor confere o shift do teclado que cada caso devolve
+/// ([`estado_da_suite_devolvido`]): o shift apertado reprova, e o executor o
+/// solta — a tecla seguinte sai minúscula. O controle positivo da conferência
+/// que a CI 532 pediu; sem ela, um caso que deixasse o shift apertado só
+/// apareceria quando a divisão em partes o pusesse antes de um que digita.
+fn suite_o_executor_ve_e_solta_o_shift_apertado() -> Resultado {
+    crate::teclado::esvaziar();
+    crate::teclado::evento(42, true);
+    let apertado = estado_da_suite_devolvido();
+    let solto = !crate::teclado::shift_apertado_de_teste();
+    crate::teclado::evento(30, true);
+    let letra = crate::teclado::ler();
+    crate::teclado::evento(30, false);
+    let o_da_suite = estado_da_suite_devolvido();
+    crate::teclado::esvaziar();
+    if apertado != Err("o caso deixou o shift do teclado apertado") || !solto {
+        return Err("o executor nao viu, ou nao soltou, o shift apertado");
+    }
+    if letra != Some('a') {
+        return Err("depois do executor, a tecla ainda saiu maiuscula");
+    }
+    o_da_suite.map_err(|_| "o executor reprovou o estado da suite")
 }
 
 // ---------------------------------------------------------------------------

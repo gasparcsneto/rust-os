@@ -490,6 +490,21 @@ pub fn esvaziar() {
     SHIFT.store(false, Ordering::Relaxed);
 }
 
+/// Se o shift ficou apertado. Para a suíte, que confere o estado que cada
+/// caso devolve: o shift é global, e um caso que o deixasse apertado faria o
+/// seguinte da mesma rodada digitar maiúsculas — e não achar a tecla de uma
+/// minúscula.
+#[cfg(feature = "modo-teste")]
+pub fn shift_apertado_de_teste() -> bool {
+    SHIFT.load(Ordering::Relaxed)
+}
+
+/// Solta o shift, sem mexer em mais nada do teclado. Para a suíte.
+#[cfg(feature = "modo-teste")]
+pub fn soltar_o_shift_de_teste() {
+    SHIFT.store(false, Ordering::Relaxed);
+}
+
 // ---------------------------------------------------------------------------
 // Esperar por uma tecla sem girar
 // ---------------------------------------------------------------------------
