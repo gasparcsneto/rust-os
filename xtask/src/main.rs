@@ -23793,6 +23793,31 @@ fn registros_do_log(resposta: &str) -> Option<(Vec<RegistroDoLog>, u64)> {
     Some((registros, emitidos))
 }
 
+/// O número da primeira linha de `registros`, de `desde` em diante, que diz
+/// que um processo saiu com `codigo`.
+///
+/// # Por que só de `desde` em diante
+///
+/// Porque o texto se repete. A espera do `guardar`, na sonda do armazém,
+/// casava a linha `processo encerrou com codigo 77` entre as 32 últimas do
+/// anel, e havia uma de antes: o filho do `contido`, da sonda da interface
+/// nativa, também sai com 77. Ela passava na hora, sem esperar o `guardar`
+/// nenhum — o `xtask` dizia "guardar saiu com 77" antes da primeira linha
+/// dele —, e a saída dele nunca era conferida: um `guardar` quebrado
+/// passaria. E ele corria por cima da sonda seguinte, a da rede, cujas
+/// linhas de log caíam na janela que ela mede — a CI 527.
+///
+/// `desde` é quantos registros o kernel já tinha emitido antes do pedido —
+/// o `total_emitted` de um `log.tail` —, e as linhas de antes dele não
+/// contam.
+fn saida_desde(registros: &[RegistroDoLog], desde: u64, codigo: i64) -> Option<u64> {
+    let procurada = format!("processo encerrou com codigo {codigo}");
+    registros
+        .iter()
+        .find(|r| r.seq >= desde && r.mensagem == procurada)
+        .map(|r| r.seq)
+}
+
 /// O kernel num instante, pelos relatórios que um agente lê: o relógio, o
 /// pulso de cada núcleo, as apresentações da tela e quantos registros de log
 /// já saíram. Dois retratos, um de cada lado de uma janela, dizem o que a
@@ -23917,10 +23942,7 @@ impl Retrato {
             (n, None) => format!("tela: {n} apresentacao(oes)"),
         });
 
-        let na_janela: Vec<&RegistroDoLog> = registros
-            .iter()
-            .filter(|r| (self.emitidos..depois.emitidos).contains(&r.seq))
-            .collect();
+        let na_janela = self.linhas(depois, registros);
         let esperadas = depois.emitidos.saturating_sub(self.emitidos);
         let mut log = format!("log: {esperadas} linha(s)");
         // A leitura de depois pode não alcançar as primeiras da janela: o
@@ -23949,6 +23971,18 @@ impl Retrato {
         }
         partes.push(log);
         partes.join("; ")
+    }
+
+    /// As linhas de `registros` que entraram no anel de `self` a `depois`.
+    fn linhas<'r>(
+        &self,
+        depois: &Retrato,
+        registros: &'r [RegistroDoLog],
+    ) -> Vec<&'r RegistroDoLog> {
+        registros
+            .iter()
+            .filter(|r| (self.emitidos..depois.emitidos).contains(&r.seq))
+            .collect()
     }
 }
 
@@ -24091,13 +24125,20 @@ fn sob_a_rede(
     // No silêncio a serial espera, e o executor não: um agente numa porta é
     // respondido enquanto isso.
     const SILENCIO_MS: u64 = 1500;
-    // O retrato de antes, pela serial, antes de a porta conectar; o de
-    // depois, pela porta, logo depois do ping. O que a janela tiver de
-    // atraso fica entre os dois — ver [`Retrato`].
-    let antes = Retrato::tirar(&mut |m, p| serial.pedir(m, p))?;
     // A porta conecta antes: o aperto do kernel de depuração leva centenas
     // de milissegundos, e o que se mede é o pedido.
     let mut agente = AgenteNaPorta::conectar(arch, 2)?;
+    // E o aperto não acaba quando a resposta dele chega: o kernel a manda,
+    // e só então registra a entrada — a auditoria e a linha `entrou` no log
+    // — e estabelece a sessão, no núcleo que vai atender o ping. Medida a
+    // partir da resposta, a janela levava esse fim junto: no kernel de
+    // depuração, com o console cheio, a linha `entrou` rolava a tela, e o
+    // núcleo ficava mascarado por ela dentro da janela (CI 527). O primeiro
+    // pedido pela porta só é respondido depois dele: o retrato de antes,
+    // tirado por ela, deixa o aperto inteiro fora da janela. O de depois
+    // vem pela porta também, logo depois do ping: o que a janela tiver de
+    // atraso fica entre os dois — ver [`Retrato`].
+    let antes = Retrato::tirar(&mut |m, p| agente.pedir(m, p))?;
     let comeco = std::time::Instant::now();
     let silencio_id = serial.mandar(
         "net.recv",
@@ -24130,19 +24171,30 @@ fn sob_a_rede(
             "rede: o agente na porta nao foi respondido\n  {ping}"
         ));
     }
-    let janela = antes.janela(
-        &depois,
-        &registros_do_log(&registros)
-            .map(|(r, _)| r)
-            .unwrap_or_default(),
-    );
+    let registros = registros_do_log(&registros)
+        .map(|(r, _)| r)
+        .unwrap_or_default();
+    let janela = antes.janela(&depois, &registros);
     // O que se mediu vai sempre, e não só na reprovação: uma rodada que
     // passa perto do teto é a evidência que falta quando outra o passa.
     println!(
-        "  [rede] medido  o ping na porta 2 em {} ms, a leitura da serial em {} ms; do retrato antes da porta ao de depois do ping: {janela}",
+        "  [rede] medido  o ping na porta 2 em {} ms, a leitura da serial em {} ms; do retrato antes do ping ao de depois: {janela}",
         respondido.as_millis(),
         durou.as_millis()
     );
+    // O aperto inteiro fica fora da janela — é o que o retrato de antes,
+    // pela porta, garante. A linha `entrou` da porta dentro dela diria que a
+    // medida voltou a levar o fim do aperto.
+    if let Some(r) = antes.linhas(&depois, &registros).into_iter().find(|r| {
+        r.subsistema == "agent"
+            && r.mensagem.starts_with("porta 2: ")
+            && r.mensagem.contains(" entrou")
+    }) {
+        return Err(format!(
+            "rede: o aperto da porta 2 terminou dentro da janela medida ([{}] {}); na janela: {janela}",
+            r.seq, r.mensagem
+        ));
+    }
     if !silencio.contains(r#""returned":0"#) || !silencio.contains(r#""state":"established""#) {
         return Err(format!(
             "rede: a leitura no silencio nao veio vazia\n  {silencio}"
@@ -26002,6 +26054,11 @@ fn sob_o_armazem(
     }
     println!("  [armazem] ok  gravado, conflito de versao, lido pelo VFS");
 
+    // A saída que conta é a deste `guardar`: as linhas que entraram no anel
+    // depois do pedido — ver [`saida_desde`].
+    let desde = registros_do_log(&pedir("log.tail", r#"{"count":0}"#)?)
+        .map(|(_, emitidos)| emitidos)
+        .ok_or("armazem: o log.tail nao se le")?;
     let lancado = pedir(
         "user.run",
         &format!(r#"{{"path":"/programas/{}/guardar"}}"#, arch.nome()),
@@ -26011,21 +26068,29 @@ fn sob_o_armazem(
             "armazem: o user.run nao lancou guardar\n  {lancado}"
         ));
     }
-    let procurada = "processo encerrou com codigo 77";
     let limite = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let log = pedir("log.tail", r#"{"count":32}"#)?;
-        if log.contains(procurada) {
-            break;
+    let saiu = loop {
+        let log = pedir("log.tail", r#"{"count":64}"#)?;
+        let registros = registros_do_log(&log)
+            .map(|(r, _)| r)
+            .ok_or_else(|| format!("armazem: o log.tail nao se le\n  {log}"))?;
+        if let Some(seq) = saida_desde(&registros, desde, 77) {
+            break seq;
         }
         if std::time::Instant::now() >= limite {
+            let dele: Vec<String> = registros
+                .iter()
+                .filter(|r| r.seq >= desde)
+                .map(|r| format!("[{}] {} {}", r.seq, r.subsistema, r.mensagem))
+                .collect();
             return Err(format!(
-                "armazem: guardar nao saiu com 77 — o armazem nao respondeu de dentro\n  {log}"
+                "armazem: guardar nao saiu com 77 depois do pedido — o armazem nao respondeu de dentro\n  {}",
+                dele.join("\n  ")
             ));
         }
         std::thread::sleep(Duration::from_millis(150));
-    }
-    println!("  [armazem] ok  guardar saiu com 77");
+    };
+    println!("  [armazem] ok  guardar saiu com 77, no registro {saiu} do log, depois do pedido");
 
     // Um agente de verdade, numa porta, manda binário fora do JSON: todos
     // os bytes, o zero e o fim de linha incluídos, em quadros de anexo da
@@ -28939,5 +29004,42 @@ mod testes {
         );
         // Um relatório que não se lê não vira um retrato de zeros.
         assert_eq!(Retrato::de("{}", sem_tela, &log(5)), None);
+    }
+
+    /// A espera do `guardar` é pela saída dele: uma linha igual de antes do
+    /// pedido — o filho do `contido` também sai com 77 — não conta, e a de
+    /// depois conta, com outras no meio.
+    #[test]
+    fn a_saida_que_conta_e_a_de_depois_do_pedido() {
+        use super::*;
+        let r = |seq: u64, mensagem: &str| RegistroDoLog {
+            seq,
+            uptime_ms: seq * 10,
+            subsistema: "usuario".into(),
+            mensagem: mensagem.into(),
+        };
+        let so_a_de_antes = [
+            r(139, "processo encerrou com codigo 77"),
+            r(140, "coletor recolheu 1 fio(s)"),
+        ];
+        assert_eq!(saida_desde(&so_a_de_antes, 150, 77), None);
+        let com_a_dele = [
+            r(139, "processo encerrou com codigo 77"),
+            r(151, "guardar: gravado na versao 4"),
+            r(162, "guardar conferido: o armazem pelo mesmo gate"),
+            r(163, "processo encerrou com codigo 77"),
+        ];
+        assert_eq!(saida_desde(&com_a_dele, 150, 77), Some(163));
+        // Outro código, ou um que só começa com o procurado, não é a saída.
+        let outros = [
+            r(151, "processo encerrou com codigo 7"),
+            r(152, "processo encerrou com codigo 770"),
+        ];
+        assert_eq!(saida_desde(&outros, 150, 77), None);
+        // A linha de número `desde` é a primeira depois do pedido.
+        assert_eq!(
+            saida_desde(&[r(150, "processo encerrou com codigo 77")], 150, 77),
+            Some(150)
+        );
     }
 }
