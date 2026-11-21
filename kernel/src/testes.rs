@@ -32746,6 +32746,118 @@ fn memoria_a_carga_sincroniza_o_cache_de_instrucoes_do_codigo() -> Resultado {
     Ok(())
 }
 
+/// A regra da entrada nova no aarch64 (o item B do lote ICACHE): a entrada
+/// **privada** de um processo — a faixa do usuário numa raiz de processo —
+/// só publica, sem `tlbi`; a **compartilhada** — uma região do kernel, de
+/// qualquer raiz, ou a faixa do usuário na raiz do kernel — leva o `tlbi`
+/// difundido do endereço.
+///
+/// # Por que pela conta
+///
+/// O que o `tlbi` da compartilhada fecha não se vê no emulador: um núcleo
+/// sem o FEAT_ETS que leia uma página do kernel recém-mapeada logo depois de
+/// um aviso pode tê-la traduzido antes do aviso, e tomar uma falta de
+/// tradução espúria, fatal no EL1 — ver `mmu::privada_de_um_processo`. O
+/// caso confere a regra pelos `tlbi` que este núcleo fez a cada mapeamento,
+/// com as interrupções mascaradas — nada mais roda aqui entre as duas
+/// leituras —, nos dois sentidos: sem o da compartilhada, reprova; com o da
+/// privada de volta, que custava à carga de uma imagem quatro vezes o tempo
+/// com quatro núcleos, também.
+#[cfg(target_arch = "aarch64")]
+fn paginacao_a_entrada_nova_privada_publica_e_a_compartilhada_invalida() -> Resultado {
+    use crate::arch::aarch64::mmu::tlbi_deste_nucleo_de_teste as tlbi;
+    use crate::arch::{self, Permissoes, TAMANHO_PAGINA};
+
+    // Uma página da área das pilhas bem além de todas as vagas — memória do
+    // kernel que ninguém usa —, uma adiante da do caso `smp: desmapear do
+    // kernel vale em todo nucleo`.
+    const DO_KERNEL: u64 = arch::BASE_DAS_PILHAS + 64 * 1024 * 1024 + TAMANHO_PAGINA;
+    const DO_USUARIO: u64 = crate::usuario::BASE;
+
+    // Os `tlbi` deste núcleo — por endereço e inteiros — que mapear
+    // `endereco` fez.
+    fn contados(endereco: u64, permissoes: Permissoes) -> Result<(u64, u64), &'static str> {
+        let antes = tlbi();
+        crate::paginacao::mapear_novo(endereco, permissoes)?;
+        let depois = tlbi();
+        Ok((depois.0 - antes.0, depois.1 - antes.1))
+    }
+
+    let privada = arch::ENTRADA_PRIVADA as usize;
+    let kernel = arch::espaco_do_kernel();
+
+    let vistos = arch::sem_interrupcoes(|| -> Result<_, &'static str> {
+        // Na raiz do kernel: a região do kernel, e a faixa do usuário dela.
+        let kernel_na_do_kernel = contados(DO_KERNEL, Permissoes::DADOS)?;
+        crate::paginacao::desmapear_e_liberar(DO_KERNEL)?;
+        let usuario_na_do_kernel = contados(DO_USUARIO, Permissoes::DADOS_USUARIO)?;
+        crate::paginacao::desmapear_e_liberar(DO_USUARIO)?;
+
+        // Numa raiz de processo: a faixa do usuário, e a região do kernel,
+        // que ela também traduz.
+        let espaco = crate::paginacao::Espaco::novo(privada)?;
+        // SAFETY: a raiz veio de `Espaco::novo` e carrega as entradas de topo
+        // do kernel; voltamos ao espaço do kernel antes de largá-la, e o
+        // `Drop` dele devolve a página do usuário que ficar num erro.
+        let no_processo = unsafe {
+            arch::trocar_espaco(espaco.raiz());
+            let r = (|| -> Result<_, &'static str> {
+                let usuario = contados(DO_USUARIO, Permissoes::DADOS_USUARIO)?;
+                let do_kernel = contados(DO_KERNEL, Permissoes::DADOS)?;
+                // A do kernel sai daqui mesmo: ela é de todos os espaços.
+                crate::paginacao::desmapear_e_liberar(DO_KERNEL)?;
+                Ok((usuario, do_kernel))
+            })();
+            arch::trocar_espaco(kernel);
+            r
+        };
+        drop(espaco);
+        let (usuario_no_processo, kernel_no_processo) = no_processo?;
+        Ok([
+            (
+                "a do kernel, na raiz do kernel",
+                kernel_na_do_kernel,
+                (1, 0),
+            ),
+            (
+                "a do usuario, na raiz do kernel",
+                usuario_na_do_kernel,
+                (1, 0),
+            ),
+            (
+                "a do usuario, numa raiz de processo",
+                usuario_no_processo,
+                (0, 0),
+            ),
+            (
+                "a do kernel, numa raiz de processo",
+                kernel_no_processo,
+                (1, 0),
+            ),
+        ])
+    })?;
+
+    let mut certo = true;
+    for (qual, visto, esperado) in vistos {
+        crate::log_info!(
+            "teste",
+            "entrada nova {}: {} tlbi por endereco e {} inteiro(s), esperados {} e {}",
+            qual,
+            visto.0,
+            visto.1,
+            esperado.0,
+            esperado.1
+        );
+        certo &= visto == esperado;
+    }
+    if !certo {
+        return Err(
+            "a entrada nova nao seguiu a regra: so a privada de um processo dispensa o tlbi",
+        );
+    }
+    Ok(())
+}
+
 /// O neto de um `fork` nasce com a memória de dados gravável.
 ///
 /// # O caso que só aparece na segunda geração
@@ -43733,6 +43845,12 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "memoria: a carga sincroniza o cache de instrucoes do codigo",
         f: memoria_a_carga_sincroniza_o_cache_de_instrucoes_do_codigo,
+    },
+    // A regra da entrada nova privada e da compartilhada, só no aarch64.
+    #[cfg(target_arch = "aarch64")]
+    Caso {
+        nome: "paginacao: a entrada nova so do processo publica, e a compartilhada leva o tlbi",
+        f: paginacao_a_entrada_nova_privada_publica_e_a_compartilhada_invalida,
     },
 ];
 

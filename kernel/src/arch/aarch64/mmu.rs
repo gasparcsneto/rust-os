@@ -683,9 +683,12 @@ const fn indices(virtual_: u64) -> (usize, usize, usize) {
 
 /// Desce um nível, criando a tabela se ainda não existir.
 ///
-/// A tabela nova entra no lugar de uma entrada **inválida** e, como a
-/// página de [`mapear_frame`], sem `tlbi`: quem a publica é o [`publicar`]
-/// do fim do mapeamento.
+/// A tabela nova entra no lugar de uma entrada **inválida**, e quem a
+/// publica é o fim do mapeamento, junto com a página de [`mapear_frame`]: o
+/// [`publicar`], na entrada privada de um processo, ou o `tlbi` difundido do
+/// endereço, na compartilhada — ver [`privada_de_um_processo`]. O `tlbi` por
+/// endereço alcança os níveis intermediários do percurso daquele endereço,
+/// que é o único que a tabela nova traduz até ali.
 ///
 /// # Safety
 /// `entrada` precisa apontar para um descritor válido de L1 ou L2.
@@ -722,7 +725,10 @@ unsafe fn descer(entrada: *mut u64) -> Result<*mut u64, &'static str> {
     //
     // Enquanto cada página mapeada tinha o `tlbi` dela, uma tradução dessas
     // morria quando o endereço dela fosse mapeado — por acaso, e só ali. Sem
-    // ele (ver [`publicar`]), a ordem vem desta barreira.
+    // ele (ver [`publicar`]), a ordem vem desta barreira — e a entrada
+    // compartilhada, que voltou a ter o `tlbi` do endereço, também precisa
+    // dela: o `tlbi` só derruba o percurso daquele endereço, e não o dos
+    // outros 511 que a tabela nova cobre.
     //
     // SAFETY: uma barreira de memória, sem pré-condição.
     unsafe { asm!("dsb ishst", options(nostack)) };
@@ -822,12 +828,74 @@ pub unsafe fn mapear_frame(
 
         // A entrada era inválida — a recusa logo acima garante —, e a tabela
         // que `descer` tenha criado no caminho também: nenhuma TLB guarda uma
-        // entrada inválida, e não há o que invalidar. Resta publicar a
-        // escrita — ver [`publicar`].
+        // entrada inválida, e não há o que invalidar. Na entrada privada de
+        // um processo, resta publicar a escrita ([`publicar`]); na
+        // compartilhada, o `tlbi` difundido do endereço ordena também os
+        // percursos dos outros núcleos — a regra, e o motivo, em
+        // [`privada_de_um_processo`].
+        //
         // SAFETY: a entrada foi escrita; resta publicá-la.
-        unsafe { publicar() };
+        unsafe {
+            if privada_de_um_processo(virtual_, l1) {
+                publicar();
+            } else {
+                invalidar(virtual_);
+            }
+        }
         Ok(())
     })
+}
+
+/// A entrada de `virtual_`, na raiz `raiz`, é **privada** — só o núcleo em
+/// que a raiz está ativa a traduz?
+///
+/// # A regra
+///
+/// Privada é a faixa do usuário — a entrada de topo privada,
+/// [`crate::arch::e_privado`] — numa raiz de **processo**. Todo o resto é
+/// compartilhado: as regiões do kernel, que toda raiz copia e todo núcleo
+/// traduz, e qualquer faixa da raiz do **kernel**, que os fios do kernel de
+/// todos os núcleos têm ativa ao mesmo tempo — a faixa do usuário dela
+/// também, que hoje fica vazia, mas nada recusa.
+///
+/// A entrada nova privada só publica ([`publicar`]); a compartilhada leva o
+/// `tlbi` difundido do endereço ([`invalidar`]), como a remoção.
+///
+/// # Por que a compartilhada leva o `tlbi`, se não há o que invalidar
+///
+/// Porque ele ordena os percursos de tabela dos **outros** núcleos. Sem o
+/// FEAT_ETS, a arquitetura deixa um núcleo traduzir um acesso antes de uma
+/// leitura que vem antes dele no programa: um núcleo que espera um aviso —
+/// "a página está mapeada" — e então lê a página, num endereço que ele já
+/// conhecia, pode tê-la traduzido antes de ver o aviso, com a entrada ainda
+/// inválida, e tomar uma falha de tradução que já não existe. No EL1 ela é
+/// fatal (`vetores.rs`). É a janela que o commit do Linux "arm64: mm: Ignore
+/// spurious translation faults taken from the kernel" descreve, com três
+/// saídas: o `tlbi` difundido no caminho do mapeamento, um `dsb; isb` em
+/// quem lê depois do aviso, ou tratar a falta espúria. O Linux escolheu a
+/// terceira; aqui é a primeira, só onde a janela existe: o `tlbi … is` deste
+/// núcleo, completado pelo `dsb ish` antes do aviso, alcança também o
+/// percurso que o outro tenha adiantado.
+///
+/// # Por que a privada dispensa
+///
+/// Porque nela não há outro núcleo. A raiz de um processo fica ativa num
+/// núcleo de cada vez — o processo tem um fio só, e os fios do kernel usam a
+/// raiz do kernel —, e quem mapeia na entrada privada é esse núcleo, na raiz
+/// ativa dele. Um núcleo que passe a rodar o processo depois instala a raiz
+/// por [`trocar_espaco`]: o `isb` de lá vem depois de ele ter tomado o fio,
+/// e o percurso de cada acesso do processo, depois do `isb` — a segunda das
+/// três saídas, embutida na troca.
+///
+/// # O custo
+///
+/// Todo o ganho da entrada nova sem `tlbi` — a carga de uma imagem e o
+/// `mapear` de um processo — é na entrada privada, e fica. A compartilhada
+/// paga um `tlbi … is` por página: as pilhas dos fios, a memória das
+/// superfícies e do Argon2, o MMIO; no emulador com quatro núcleos, de 19 a
+/// 42 µs cada.
+fn privada_de_um_processo(virtual_: u64, raiz: *const u64) -> bool {
+    crate::arch::e_privado(virtual_) && raiz as u64 != espaco_do_kernel()
 }
 
 /// Recusa endereços que não podem ser mapeados nesta configuração.
@@ -895,8 +963,9 @@ pub fn desmapear(virtual_: u64) -> Result<u64, &'static str> {
             // guardá-la: só o `tlbi` a tira, antes de o frame voltar a quem
             // chamou. É também o `tlbi` de uma página que muda de frame ou de
             // permissão — a resolução da cópia na escrita, a carga de um
-            // segmento —, que passa por aqui e mapeia de novo: mapear só
-            // publica ([`publicar`]).
+            // segmento —, que passa por aqui e mapeia de novo: na entrada
+            // privada de um processo, onde as duas moram, mapear só publica
+            // ([`publicar`]).
             invalidar(virtual_);
 
             // Recupera as tabelas que esta remoção esvaziou — mas **só** na
@@ -996,6 +1065,8 @@ unsafe fn tabela_vazia(tabela: *const u64) -> bool {
 /// # Safety
 /// Deve ser chamada logo após descartar uma tabela de tradução.
 unsafe fn invalidar_tudo() {
+    #[cfg(feature = "modo-teste")]
+    TLBI_INTEIRAS[super::nucleo_atual()].fetch_add(1, Ordering::Relaxed);
     // SAFETY: manutenção de TLB, sempre válida a partir de EL1.
     unsafe {
         asm!(
@@ -1008,9 +1079,37 @@ unsafe fn invalidar_tudo() {
     }
 }
 
-/// Publica a troca de uma entrada **inválida** por uma válida — a página
-/// nova de [`mapear_frame`], e as tabelas que [`descer`] cria no caminho —,
-/// sem invalidar a TLB.
+/// Só para a suíte: quantos `tlbi` difundidos cada núcleo fez — por
+/// endereço ([`invalidar`]) e inteiros ([`invalidar_tudo`]).
+///
+/// Por núcleo, e não um para a máquina: um caso que conta com as
+/// interrupções mascaradas sabe que nada mais roda neste núcleo entre as
+/// duas leituras, e não conta o que os outros fazem ao mesmo tempo. É como
+/// o caso `paginacao: a entrada nova so do processo publica, e a
+/// compartilhada leva o tlbi` confere a regra de [`privada_de_um_processo`]
+/// — o que ela fecha não se vê no emulador.
+#[cfg(feature = "modo-teste")]
+static TLBI_POR_ENDERECO: [AtomicU64; crate::nucleos::MAX_NUCLEOS] =
+    [const { AtomicU64::new(0) }; crate::nucleos::MAX_NUCLEOS];
+/// Ver [`TLBI_POR_ENDERECO`].
+#[cfg(feature = "modo-teste")]
+static TLBI_INTEIRAS: [AtomicU64; crate::nucleos::MAX_NUCLEOS] =
+    [const { AtomicU64::new(0) }; crate::nucleos::MAX_NUCLEOS];
+
+/// Só para a suíte: os `tlbi` difundidos deste núcleo até agora — por
+/// endereço e inteiros. Ver [`TLBI_POR_ENDERECO`].
+#[cfg(feature = "modo-teste")]
+pub fn tlbi_deste_nucleo_de_teste() -> (u64, u64) {
+    let nucleo = super::nucleo_atual();
+    (
+        TLBI_POR_ENDERECO[nucleo].load(Ordering::Relaxed),
+        TLBI_INTEIRAS[nucleo].load(Ordering::Relaxed),
+    )
+}
+
+/// Publica a troca de uma entrada **inválida** por uma válida, na entrada
+/// privada de um processo — a página nova de [`mapear_frame`], e as tabelas
+/// que [`descer`] cria no caminho —, sem invalidar a TLB.
 ///
 /// # Por que sem `tlbi`
 ///
@@ -1052,6 +1151,11 @@ unsafe fn invalidar_tudo() {
 /// [`crate::paginacao::mapear_faixa_preenchendo`] desmapeiam e mapeiam de
 /// novo, e o `tlbi` é o do primeiro passo.
 ///
+/// E a entrada nova **compartilhada** — uma região do kernel, ou a raiz do
+/// kernel —, também por [`invalidar`]: lá não há o que invalidar, mas o
+/// `tlbi` difundido ordena os percursos dos outros núcleos, que traduzem a
+/// mesma entrada — ver [`privada_de_um_processo`].
+///
 /// # O que custava
 ///
 /// No emulador com vários núcleos, um `tlbi …is` para os outros núcleos
@@ -1073,12 +1177,15 @@ unsafe fn publicar() {
 ///
 /// A entrada velha pode estar na TLB de qualquer núcleo, e só o `tlbi` a
 /// tira: é o caso da remoção ([`desmapear`]) e o da troca de permissão ou
-/// de marca ([`com_descritor_da_folha`]). Uma entrada que era inválida não
-/// passa por aqui — ver [`publicar`].
+/// de marca ([`com_descritor_da_folha`]). Uma entrada que era inválida só
+/// passa por aqui na faixa compartilhada, pelo percurso dos outros núcleos
+/// — ver [`publicar`] e [`privada_de_um_processo`].
 ///
 /// # Safety
 /// Deve ser chamada logo após escrever um descritor.
 unsafe fn invalidar(virtual_: u64) {
+    #[cfg(feature = "modo-teste")]
+    TLBI_POR_ENDERECO[super::nucleo_atual()].fetch_add(1, Ordering::Relaxed);
     // SAFETY: sequência de manutenção de TLB exigida pelo manual.
     unsafe {
         asm!(
