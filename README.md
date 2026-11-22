@@ -17422,6 +17422,32 @@ dentro da guarda. O último job foi o do SDK da malha entre dispositivos
 (mesma arquitetura), que esperou 47,9 minutos na fila e rodou 23,4; o
 maior, a atualização do ARM, com 50,6.
 
+A CI 537 (`fa4fa2b`, o lote A11 e os parágrafos das CIs 533 a 536) passou
+verde, 48 de 48, na primeira tentativa, em 77,1 minutos e 1084 de máquina.
+As regras novas do A11 — os comentários fora da regra das variáveis do
+cargo, a entrada das invariantes no `with:`, o passo da ação sem `if:` nem
+`continue-on-error:` e a raiz só com o apelido — rodaram contra os
+workflows de verdade, no job de lints, dentro da ação: 77 s, e o job
+inteiro 6,7 minutos. A ação levou de 14 a 22 s nos outros 47 jobs. O
+holdover da bancada de tempo, na parte 3/3: o x86 a -101 ppm (2056 s em
+2056) e o ARM a +0 ppm (2055 s em 2055), os dois dentro da guarda. O último
+job foi o dos fluxos entre dispositivos (x86_64 e aarch64), que esperou
+39,0 minutos na fila e rodou 31,4; o maior, a atualização do ARM, com 50,8.
+
+A CI 538 (`1ce9484`, os lotes ICACHE-3 e FUMAÇA-3) passou verde, 48 de 48,
+na primeira tentativa, em 69,6 minutos e 1132 de máquina. A suíte inteira
+passou com o executor conferindo o registro de identidade depois de cada
+caso, nas duas arquiteturas e em release — o ARM em release, 1062 de 1062 —,
+e o caso de controle do registro passou. O caso da tela, com a mediana e os
+quinze pares, deu 116% da cópia no x86 (2177 contra 1862 µs por tela; pela
+mediana, 116%) e 104% no ARM (7809 contra 7472 µs; pela mediana, 104%): a
+primeira medida da mediana no QEMU 10.2.1 do runner. O holdover da bancada
+de tempo, na parte 3/3: o x86 a -78 ppm (2056 s; 2055 no relógio do
+kernel) e o ARM a -1 ppm (2056 s em 2056), os dois dentro da guarda. O
+último job foi o dos fluxos entre dispositivos (mesma arquitetura), que
+esperou 39,8 minutos na fila e rodou 24,6; o maior, a persistência do x86,
+parte 2/3, com 53,8.
+
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na
 508 e 58 na 509 —, e o que sobra até o piso é a ordem da fila, que não se
