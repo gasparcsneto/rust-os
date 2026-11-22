@@ -18257,6 +18257,34 @@ os dois dentro da guarda. O último job foi o dos fluxos entre dispositivos
 (x86_64 e aarch64), que esperou 41,0 minutos na fila e rodou 31,1; o maior,
 a atualização do ARM, com 51,2.
 
+A CI 542 (`3d556b2`, o lote A13 e o parágrafo da CI 541) passou verde, 48
+de 48, na primeira tentativa, em 75,8 minutos e 1128 de máquina. Foi a
+primeira rodada no runner da leitura dos workflows que reprova no arquivo
+inteiro — as quebras de linha que só o YAML vê, o conteúdo dos blocos, as
+formas que ela não lê, os passos da própria ação —, e ela passou contra os
+workflows de verdade: no job de lints, a ação com as invariantes levou 45
+s. Nos outros 47 jobs, a ação, com as regras novas do passo do ambiente —
+o submódulo, e o que não é pasta no caminho de um diretório de saída —,
+levou de 14 a 21 s. As fumaças passaram com as esperas pelo console da
+sonda, em todas as variantes da CI. O holdover da bancada de tempo, na
+parte 3/3: o x86 a -52 ppm (2056 s em 2056) e o ARM a -2 ppm (2056 s em
+2056), os dois dentro da guarda. O último job foi o dos fluxos entre
+dispositivos (x86_64 e aarch64), que esperou 41,7 minutos na fila e rodou
+30,2; o maior, a atualização do ARM, com 51,2.
+
+A CI 543 (`01dcbe8`, o lote ICACHE-5 e a AUD-CAMPO no dossiê) passou verde,
+48 de 48, na primeira tentativa, em 76,6 minutos e 1121 de máquina. A
+suíte inteira passou com a conferência dos segredos mais estrita — a
+palavra inteira das senhas, o log do caso inteiro pela marca, a auditoria
+no anel inteiro e o journal —, em todas as partes e em release — o ARM em
+release, 1068 de 1068: os 1067 da CI 541, mais o controle novo do laço —,
+e o caso da remoção, com a anotação da ordem, passou na parte em que cai,
+nas duas arquiteturas. O holdover da bancada de tempo, na parte 3/3: o x86
+a -138 ppm (2057 s em 2057) e o ARM a -4 ppm (2055 s em 2055), os dois
+dentro da guarda. O último job foi o dos fluxos entre dispositivos (x86_64
+e aarch64), que esperou 40,6 minutos na fila e rodou 31,1; o maior, a
+persistência do x86, parte 2/3, com 53,8.
+
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na
 508 e 58 na 509 —, e o que sobra até o piso é a ordem da fila, que não se
