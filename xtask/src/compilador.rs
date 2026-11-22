@@ -80,7 +80,8 @@
 //!   ambiente, o PATH, os `rust-toolchain`, os artefatos, os links — desde
 //!   o lote A12, no commit e no caminho dos diretórios de saída — e os
 //!   submódulos do commit e o que não é pasta nesse caminho — desde o lote
-//!   A13 —, e o config do cargo — o do executor desde o
+//!   A13; desde o lote A14, pelo `git` sem o ambiente do job —, e o config
+//!   do cargo — o do executor desde o
 //!   lote A9, os outros desde o lote A10 —, e o das invariantes, que o job
 //!   de lints liga pela entrada `invariantes: true` no `with:` do passo dela
 //!   ([`conferir_a_acao`], [`as_invariantes_na_acao`]) — desde o lote A13,
@@ -277,6 +278,21 @@ const PASSO_DO_EXECUTOR: &str = "executor";
 /// mesmo texto em todo compilador, e "um cache é do compilador que o encheu"
 /// deixaria de valer, com o `cargo xtask invariantes` passando (o M2 do
 /// adversário do lote A13, e o N3 do revisor da rodada 6).
+///
+/// # O git sem o ambiente do job, desde o lote A14
+///
+/// Os passos do ambiente e do canal leem o índice e a árvore pelo `git`,
+/// que lia o ambiente do job: um `GIT_INDEX_FILE` — ou um `GIT_DIR` — no
+/// `env:` do job mostrava às regras dos diretórios de saída, dos links e
+/// dos submódulos outro índice, e o arquivo do commit num `target/` e o
+/// submódulo no lugar dele sumiam da lista (o M5 do adversário do lote
+/// A13); e a configuração que o `HOME` ou o `XDG_CONFIG_HOME` do job
+/// escolhem — um `.gitconfig` do commit — faz o `git ls-files` e o
+/// `git diff` rodarem um programa, o `core.fsmonitor` (o lote A14 o achou
+/// na revisão, num brinquedo). Os dois rodam o `git` só com o PATH, que o
+/// passo do ambiente confere, e sem a configuração global e a do sistema
+/// (`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM`): a do repositório é a que
+/// o checkout escreveu, e o commit não a traz.
 const PASSOS_DA_ACAO: [(&str, &str, &[&str]); 4] = [
     (
         "ambiente",
@@ -298,6 +314,8 @@ const PASSOS_DA_ACAO: [(&str, &str, &[&str]); 4] = [
             "if os.path.islink(atual):",
             "if modo == \"160000\":",
             "if os.path.lexists(atual)",
+            "SEM_O_GIT = {\"PATH\": os.environ.get(\"PATH\", \"\"), \"GIT_CONFIG_NOSYSTEM\": \"1\", \"GIT_CONFIG_GLOBAL\": os.devnull}",
+            "env=SEM_O_GIT",
         ],
     ),
     (
@@ -308,6 +326,7 @@ const PASSOS_DA_ACAO: [(&str, &str, &[&str]); 4] = [
             "export RUSTUP_TOOLCHAIN=\"$canal\"",
             "sysroot=$(rustc --print sysroot)",
             "echo \"canal=$canal\" >> \"$GITHUB_OUTPUT\"",
+            "env -i PATH=\"$PATH\" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git diff",
         ],
     ),
     (
@@ -4348,6 +4367,138 @@ mod testes {
         }
         let _ = std::fs::remove_dir_all(&base);
         assert!(cegos.is_empty(), "{cegos:#?}");
+    }
+
+    /// O git da ação sem o ambiente do job (no lote A14, o M5 do adversário
+    /// do lote A13, e o `HOME` que o lote achou na revisão): com um
+    /// `GIT_INDEX_FILE` — um índice vazio — ou um `GIT_DIR` — outro
+    /// repositório — no ambiente do job, o arquivo do commit no `target/debug`
+    /// e o submódulo no lugar do `target` sumiam da lista do passo do
+    /// ambiente, que passava; e, com o `HOME` numa pasta cujo `.gitconfig`
+    /// tem um `core.fsmonitor` — ou com o `GIT_CONFIG_COUNT` que o põe —, o
+    /// `git ls-files` do passo do ambiente e o `git diff` do passo do canal
+    /// rodavam o programa dele. Rodado como o runner, com cada variável: o
+    /// arquivo e o submódulo reprovam no passo do ambiente, cada um com o
+    /// erro dele; a árvore limpa passa nos três passos — o `git diff` do
+    /// canal também não lê o índice do job —; o programa do `fsmonitor` não
+    /// roda; e a ação sem as marcas reprova.
+    #[test]
+    fn adversario_a13_o_git_da_acao_sem_o_ambiente_do_job() {
+        let base = base_da_acao("acao-a13-git");
+        let no_target = "target/debug/xtask: um arquivo do commit num diretório de saída do cargo";
+        let submodulo = "target: um submódulo no commit (um gitlink)";
+        let outro = base.join("outro");
+        std::fs::create_dir_all(&outro).expect("o outro");
+        let feito = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&outro)
+            .output()
+            .expect("o git");
+        assert!(feito.status.success(), "{feito:?}");
+        // O programa do `core.fsmonitor`: deixa uma marca, se roda.
+        let marca = base.join("o-fsmonitor-rodou");
+        let gancho = base.join("gancho");
+        std::fs::write(
+            &gancho,
+            format!("#!/bin/sh\necho \"$@\" >> '{}'\nexit 1\n", marca.display()),
+        )
+        .expect("o gancho");
+        tornar_executavel(&gancho);
+        let casa = base.join("casa-do-job");
+        std::fs::create_dir_all(&casa).expect("a casa");
+        std::fs::write(
+            casa.join(".gitconfig"),
+            format!("[core]\n\tfsmonitor = {}\n", gancho.display()),
+        )
+        .expect("o .gitconfig");
+        let arquivo = vec![("target/debug/xtask", String::from("#!/bin/sh\nexit 0\n"))];
+        let variaveis: Vec<(&str, Vec<(&str, String)>)> = vec![
+            (
+                "indice",
+                vec![(
+                    "GIT_INDEX_FILE",
+                    base.join("indice-vazio").display().to_string(),
+                )],
+            ),
+            (
+                "repositorio",
+                vec![("GIT_DIR", outro.join(".git").display().to_string())],
+            ),
+            ("casa", vec![("HOME", casa.display().to_string())]),
+            (
+                "config",
+                vec![
+                    ("GIT_CONFIG_COUNT", String::from("1")),
+                    ("GIT_CONFIG_KEY_0", String::from("core.fsmonitor")),
+                    ("GIT_CONFIG_VALUE_0", gancho.display().to_string()),
+                ],
+            ),
+        ];
+        let mut cegos = Vec::new();
+        for (rotulo, ambiente) in &variaveis {
+            for (nome, caso, esperado) in [
+                (
+                    "o-arquivo-no-target",
+                    ArvoreDoCaso {
+                        arquivos: &arquivo,
+                        links: &[],
+                        forcados: &["target/debug/xtask"],
+                        submodulos: &[],
+                    },
+                    Some(no_target),
+                ),
+                (
+                    "o-submodulo-target",
+                    ArvoreDoCaso {
+                        arquivos: &[],
+                        links: &[],
+                        forcados: &[],
+                        submodulos: &["target"],
+                    },
+                    Some(submodulo),
+                ),
+                (
+                    "nenhum",
+                    ArvoreDoCaso {
+                        arquivos: &[],
+                        links: &[],
+                        forcados: &[],
+                        submodulos: &[],
+                    },
+                    None,
+                ),
+            ] {
+                let nome = format!("{rotulo}-{nome}");
+                let r = rodar_a_acao_na_arvore(&base, &nome, &caso, ambiente, None);
+                let certo = match esperado {
+                    Some(erro) => !r.passou && r.saida.contains(&format!("::error::{erro}")),
+                    None => r.passou,
+                };
+                if !certo {
+                    cegos.push(format!("{nome}: {}", r.saida));
+                }
+            }
+        }
+        let rodou = std::fs::read_to_string(&marca).ok();
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(cegos.is_empty(), "{cegos:#?}");
+        assert_eq!(rodou, None, "o programa do core.fsmonitor rodou");
+        for (rotulo, velho, novo) in [
+            (
+                "o git do ambiente com o ambiente do job",
+                "SEM_O_GIT = {\"PATH\": os.environ.get(\"PATH\", \"\"), ",
+                "SEM_O_GIT = {**os.environ, ",
+            ),
+            (
+                "o git do canal com o ambiente do job",
+                "env -i PATH=\"$PATH\" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git diff",
+                "git diff",
+            ),
+        ] {
+            let sem_a_marca = ACAO.replacen(velho, novo, 1);
+            assert_ne!(sem_a_marca, ACAO, "{rotulo}");
+            assert!(!conferir_a_acao(&sem_a_marca).is_empty(), "{rotulo}");
+        }
     }
 
     /// F2 (adversário do lote A9): a ação rodava o `cargo` que cada

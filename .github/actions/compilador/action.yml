@@ -58,10 +58,16 @@
 #      também nenhum submódulo no commit — o modo 160000 —, que num
 #      checkout com os submódulos traria outro repositório para a árvore, e,
 #      no caminho de um diretório de saída, nada que não seja pasta, como o
-#      `target` que é um arquivo do commit.
+#      `target` que é um arquivo do commit. Desde o lote A14, o `git`
+#      dessas regras — e o do passo 2 — roda só com o PATH conferido e sem
+#      a configuração global e a do sistema: as variáveis do git do job
+#      (`GIT_INDEX_FILE`, `GIT_DIR`) mostravam a elas outro índice, e a
+#      configuração que o `HOME` do job escolhe roda um programa dentro do
+#      `git` (o `core.fsmonitor`).
 # 2. `conferir`: o canal do `rust-toolchain.toml`, lido como o rustup o lê
 #    (é TOML), um nightly com data, e o arquivo — e o do modelo do SDK — o
-#    do commit; a instalação — o proxy do rustup instala o toolchain do
+#    do commit, pelo `git` sem o ambiente do job, como no passo 1 (desde o
+#    lote A14); a instalação — o proxy do rustup instala o toolchain do
 #    arquivo da raiz, que o passo 1 conferiu, com os componentes e os
 #    alvos, na primeira chamada —; e, daí em diante, o toolchain fixado pelo
 #    canal (`RUSTUP_TOOLCHAIN`), e não o que o diretório escolhe: a versão
@@ -273,12 +279,22 @@ runs:
                     f"o canal {canais[1]!r} do sdk/modelo/rust-toolchain.toml não é o da raiz, "
                     f"{canais[0]!r}"
                 )
+        # O git, sem o ambiente do job: só o PATH, que este passo já conferiu,
+        # e sem a configuração global e a do sistema. As variáveis do git do
+        # job — um GIT_INDEX_FILE, um GIT_DIR, um GIT_CONFIG_* — mostrariam às
+        # regras abaixo outro índice, ou outro repositório, e o arquivo do
+        # commit num diretório de saída, o link e o submódulo sumiriam da
+        # lista; e a configuração que o HOME ou o XDG_CONFIG_HOME do job
+        # escolhem rodaria um programa — o core.fsmonitor — dentro do git.
+        # Desde o lote A14.
+        SEM_O_GIT = {"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
         # A árvore: nenhum outro rust-toolchain, nenhum manifesto que escolha
         # o programa que compila ou liga, e nada do commit num diretório de
         # saída do cargo.
         lista = subprocess.run(
             ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
             capture_output=True,
+            env=SEM_O_GIT,
         )
         if lista.returncode != 0:
             erros.append(
@@ -310,7 +326,9 @@ runs:
         # diretório de saída. O índice guarda o link com o modo 120000, e, desde
         # o lote A13, o submódulo — um gitlink — com o 160000; o repositório não
         # tem nenhum dos dois.
-        indice = subprocess.run(["git", "ls-files", "-z", "--stage"], capture_output=True)
+        indice = subprocess.run(
+            ["git", "ls-files", "-z", "--stage"], capture_output=True, env=SEM_O_GIT
+        )
         if indice.returncode != 0:
             erros.append(
                 "o git não listou o índice: os links do commit não se conferem "
@@ -416,7 +434,12 @@ runs:
           echo "::error file=rust-toolchain.toml::o canal '$canal' não é um nightly com data"
           exit 1
         fi
-        if ! git diff --quiet HEAD -- rust-toolchain.toml sdk/modelo/rust-toolchain.toml; then
+        # O arquivo do commit, pelo git sem o ambiente do job — só o PATH, que
+        # o passo do ambiente conferiu, e sem a configuração global e a do
+        # sistema —, como no passo do ambiente: o HOME do job escolheria a
+        # configuração do git, e com ela um programa que o `git diff` roda (o
+        # core.fsmonitor); e um GIT_INDEX_FILE, outro índice. Desde o lote A14.
+        if ! env -i PATH="$PATH" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git diff --quiet HEAD -- rust-toolchain.toml sdk/modelo/rust-toolchain.toml; then
           echo "::error file=rust-toolchain.toml::o rust-toolchain.toml difere do commit: vale o do commit"
           exit 1
         fi
