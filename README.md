@@ -3940,6 +3940,22 @@ sonda da árvore lê pela própria árvore, é a que o console passou a mostrar
 depois dele: procurada na árvore inteira, ela casava a resposta de um
 `system.uptime` que a sonda do Terminal deixa na grade dele.
 
+E a linha do comando executado tem de dizer que ele executou. O
+interpretador a escrevia antes da validação e da decisão do gate, e um
+comando negado também deixava a `executado:` — a espera por ela passava com
+ele (o informativo 9 do adversário do lote FUMAÇA-2). Desde o lote
+EXECUTADO, a linha sai com a licença na mão, e a recusa e o parâmetro
+inválido deixam `negado:` e `parametro invalido:` no lugar dela — ver [A
+árvore semântica](#a-árvore-semântica). As quatro esperas da fumaça por um
+`executado:` — a pessoa pelo teclado, o agente na linha do Terminal, o
+confirm da árvore e o agente da porta 2 — reprovam com a recusa do mesmo
+comando pela mesma origem, como a de uma ação reprova com a recusa no
+elemento; a do agente da porta 2, que espera por um predicado, a leva na
+mensagem do prazo. Com o comando de um agente no Terminal negado pelo gate
+— a mutação do adversário da rodada 4 —, a fumaça passava inteira; agora
+reprova na sonda do Terminal, com a linha da recusa, mesmo com a
+`executado:` de volta antes da decisão.
+
 ### O que as mutações mostraram
 
 Na fase 8, com o armazém ainda no journal de estado: dezesseis mutações dirigidas ao armazém, cada uma contra a suíte inteira
@@ -11191,7 +11207,7 @@ O número da sessão é dado pelo kernel, pelo canal por onde o pedido chegou
 
 ```
 info ui       agente 2: confirm no elemento 3
-info console  executado: agent.ping (agente 2)
+info console  executado: agent.ping (agente 2) em console
 ```
 
 **Os canais.** A serial continua sendo a sessão 0, e a de emergência: a
@@ -11785,7 +11801,12 @@ recusado: ela já teria ecoado —, e o caso confere que ela ficou, a prova
 de que as teclas passaram pelo teclado; a senha do login, digitada sem
 eco, não fica. A resposta é a mesma
 para o comando que existe e para o que não existe: quem digitou não fica
-sabendo se ele existe. Não há login automático.
+sabendo se ele existe. O comando recusado assim, ou a linha que não é
+comando, deixa no log a recusa com o mesmo método do registro — `negado:
+agent.ping (pessoa) em console: DENY_NOT_AUTHENTICATED`, ou o marcador no
+lugar da linha —, e nada do que se digitou; as palavras do console não
+deixam linha (o lote EXECUTADO; ver [A árvore
+semântica](#a-árvore-semântica)). Não há login automático.
 
 **Entrar.** `login` pede o nome e a senha (`login nome` pede só a senha).
 A senha não ecoa, não aparece na árvore semântica — o valor da linha
@@ -15778,9 +15799,9 @@ desenhado naquela linha e coluna.
 
 **Agir é passar pelo caminho da pessoa.** Confirmar a linha de comando executa
 o que está nela exatamente como o Enter: pelo interpretador, que despacha pelo
-registro, desenha a resposta na tela e registra no log. Quem está na frente da
-máquina vê o comando aparecer e a resposta ser desenhada — nada acontece por
-trás da tela. E o log diz quem foi:
+registro e pelo gate, registra no log o que o gate decidiu e desenha a resposta
+na tela. Quem está na frente da máquina vê o comando aparecer e a resposta ser
+desenhada — nada acontece por trás da tela. E o log diz quem foi:
 
 ```
 info console  executado: system.uptime (agente 0) em console
@@ -15789,6 +15810,34 @@ info console  executado: agent.ping (pessoa) em console
 
 É o começo do que a fase 13 chama de auditoria: se um agente pode fazer tudo
 que uma pessoa faz, o registro precisa dizer qual dos dois fez.
+
+**A linha sai depois da decisão.** A `executado:` só sai com a licença do gate
+na mão, logo antes de executar — o `log.tail` que ela anuncia já a vê. A recusa
+e os parâmetros que não passam pelo que o comando declara deixam a linha
+deles, no mesmo subsistema, com o código e o número do registro da recusa, ou
+o campo:
+
+```
+info console  negado: keyboard.read (pessoa) em console: DENY_PERMISSION; registro 812
+info console  negado: agent.ping (pessoa) em terminal:1: DENY_NOT_AUTHENTICATED
+info console  parametro invalido: log.tail (pessoa) em console: count
+```
+
+O pedido adiado pelo caminho da auditoria não deixa linha ao ser adiado —
+nada foi decidido nem executado —, e a reexecução, quando a espera acaba,
+deixa a dela, uma vez; o comando que suspende sozinho, como a leitura que
+espera dados, roda duas vezes, cada uma com a sua licença e o seu registro, e
+deixa duas. A linha é diagnóstico, e não auditoria: a decisão é o registro da
+auditoria, e a linha só aponta o número dele. Nem leva o que se digitou além
+do nome de um comando que existe: sem ninguém entrado, a linha que não é
+comando vai com o marcador `(comando desconhecido)`, como na auditoria; o
+campo que o comando não declara — a chave de um JSON qualquer, que pode ser
+uma senha no lugar errado —, como `(campo nao declarado)`; e o comando
+desconhecido de quem entrou não deixa linha. A frase na tela é a de sempre.
+Até o lote EXECUTADO, a `executado:` saía antes da validação e da decisão: o
+comando negado também a deixava, e o adiado, duas vezes — a primeira sem ter
+rodado. A `ajuda` não muda: é uma palavra do console, não passa pelo gate e
+sempre roda.
 
 **O primeiro botão.** A barra superior tem o **Limpar**, que aceita `press` —
 ver a seção da barra, abaixo. As janelas também aparecem na árvore, como
