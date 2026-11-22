@@ -30838,4 +30838,122 @@ mod testes {
             r#"{"jsonrpc":"2.0","id":6801,"error":{"code":-32011,"message":"RATE_LIMIT"}}"#;
         assert!(recusa_do_aperto(recusada, 200, claro).is_err());
     }
+
+    /// A linha `entrou` que conta é a última desta conexão: a de dentro da
+    /// janela reprova mesmo com outra, de antes, no anel; e a da primeira
+    /// linha da janela já é de dentro dela. Matam as mutações S1 — a
+    /// primeira `entrou`, e não a última — e S2 — a borda da janela fora
+    /// dela — do adversário do lote FUMAÇA-2.
+    #[test]
+    fn a_entrou_de_dentro_da_janela_vence_a_de_antes() {
+        use super::*;
+        let retrato = |emitidos: u64| {
+            Retrato::de(
+                r#"{"jsonrpc":"2.0","id":1,"result":{"cores":[{"index":0,"state":"online","ticks":7}],"uptime_ms":70}}"#,
+                r#"{"jsonrpc":"2.0","id":4,"result":{"polls":1,"wakes":1}}"#,
+                r#"{"jsonrpc":"2.0","id":2,"result":{"present":false}}"#,
+                &format!(
+                    r#"{{"jsonrpc":"2.0","id":3,"result":{{"records":[],"total_emitted":{emitidos}}}}}"#
+                ),
+                (Instant::now(), Instant::now()),
+            )
+            .expect("o retrato se le")
+        };
+        let (antes, depois) = (retrato(162), retrato(165));
+        let r = |seq: u64, subsistema: &str, mensagem: &str| RegistroDoLog {
+            seq,
+            uptime_ms: seq * 10,
+            subsistema: subsistema.into(),
+            mensagem: mensagem.into(),
+        };
+        let entrada = "porta 2: agente-2 entrou (";
+        let duas = [
+            r(160, "agent", "porta 2: agente-2 entrou (cc3d388b)"),
+            r(161, "mem", "coletor recolheu 1 fio(s)"),
+            r(162, "mem", "coletor recolheu 1 fio(s)"),
+            r(163, "agent", "porta 2: agente-2 entrou (cc3d388b)"),
+            r(164, "usuario", "guardar conferido"),
+        ];
+        let erro = aperto_fora_da_janela(&antes, &depois, &duas, 158, entrada)
+            .map(|r| r.seq)
+            .expect_err("a de dentro reprova");
+        assert!(erro.contains("dentro da janela medida ([163]"), "{erro}");
+        let na_borda = [
+            r(160, "mem", "coletor recolheu 1 fio(s)"),
+            r(161, "mem", "coletor recolheu 1 fio(s)"),
+            r(162, "agent", "porta 2: agente-2 entrou (cc3d388b)"),
+            r(163, "mem", "coletor recolheu 1 fio(s)"),
+            r(164, "usuario", "guardar conferido"),
+        ];
+        let erro = aperto_fora_da_janela(&antes, &depois, &na_borda, 158, entrada)
+            .map(|r| r.seq)
+            .expect_err("a da borda reprova");
+        assert!(erro.contains("dentro da janela medida ([162]"), "{erro}");
+    }
+
+    /// O `desde` é o número da próxima linha a sair, e não o da última que
+    /// saiu: o F1 da barra, a linha logo antes do clique do mouse, não conta
+    /// para ele. Com o `desde` uma linha antes — a mutação S3 do adversário
+    /// do lote FUMAÇA-2 —, a espera do mouse passava pelo F1, sem clique
+    /// nenhum. E a resposta que não se lê é erro, e não um zero.
+    #[test]
+    fn o_desde_e_o_numero_da_proxima_linha() {
+        use super::*;
+        let mut pedir = |metodo: &str, params: &str| -> Result<String, String> {
+            assert_eq!((metodo, params), ("log.tail", r#"{"count":0}"#));
+            Ok(
+                r#"{"jsonrpc":"2.0","id":9,"result":{"records":[],"total_emitted":115}}"#
+                    .to_string(),
+            )
+        };
+        let desde = desde_do_log(&mut pedir, "mouse").expect("o log.tail se le");
+        assert_eq!(desde, 115);
+        let f1 = r#"{"jsonrpc":"2.0","id":10,"result":{"records":[{"seq":114,"uptime_ms":23220,"level":"info","subsystem":"ui","message":"pessoa: press no elemento 5"}],"total_emitted":115}}"#;
+        let press = Esperada::Acao {
+            origem: "pessoa",
+            acao: "press",
+            elemento: 5,
+        };
+        assert_eq!(diz_desde(f1, desde, press, "mouse"), Ok(false));
+        let mut recusado = |_: &str, _: &str| -> Result<String, String> {
+            Ok(
+                r#"{"jsonrpc":"2.0","id":9,"error":{"code":-32029,"message":"RATE_LIMIT"}}"#
+                    .to_string(),
+            )
+        };
+        assert!(desde_do_log(&mut recusado, "mouse").is_err());
+    }
+
+    /// O relógio do hospedeiro da resposta do `system.info` é lido assim
+    /// que ela chega, antes do pedido seguinte do retrato. Lido no fim — a
+    /// mutação S4 do adversário do lote FUMAÇA-2 —, a marca do relógio
+    /// atrás perde até a duração do retrato.
+    #[test]
+    fn a_hora_do_system_info_e_lida_antes_do_pedido_seguinte() {
+        use super::*;
+        let mut chegadas: Vec<(String, Instant)> = Vec::new();
+        let mut pedir = |metodo: &str, _: &str| -> Result<String, String> {
+            std::thread::sleep(Duration::from_millis(5));
+            let resposta = match metodo {
+                "system.info" => {
+                    r#"{"jsonrpc":"2.0","id":1,"result":{"cores":[{"index":0,"state":"online","ticks":7}],"uptime_ms":70}}"#
+                }
+                "tasks.stats" => r#"{"jsonrpc":"2.0","id":4,"result":{"polls":11,"wakes":10}}"#,
+                "display.info" => r#"{"jsonrpc":"2.0","id":2,"result":{"present":false}}"#,
+                "log.tail" => {
+                    r#"{"jsonrpc":"2.0","id":3,"result":{"records":[],"total_emitted":9}}"#
+                }
+                outro => return Err(format!("pedido inesperado: {outro}")),
+            };
+            chegadas.push((metodo.to_string(), Instant::now()));
+            Ok(resposta.to_string())
+        };
+        let (retrato, _) = Retrato::tirar(&mut pedir).expect("o retrato se tira");
+        let (_, lido) = retrato.relogio_lido;
+        assert_eq!(chegadas[1].0, "tasks.stats");
+        assert!(
+            lido < chegadas[1].1,
+            "a hora da resposta do system.info foi lida depois do pedido seguinte"
+        );
+    }
 }
