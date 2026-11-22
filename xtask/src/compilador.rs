@@ -75,7 +75,9 @@
 //!   lote A14, os espaços que ele não toma por espaço e os caracteres que
 //!   ele não imprime — e, fora do
 //!   conteúdo dos blocos, as formas que ela não lê reprovam
-//!   ([`quebras_que_a_leitura_nao_ve`], [`forma_que_a_leitura_nao_le`]), e
+//!   ([`quebras_que_a_leitura_nao_ve`], [`forma_que_a_leitura_nao_le`]) —
+//!   e, desde o lote A14, um segundo documento
+//!   ([`marcadores_de_documento`]) —, e
 //!   um checkout escrito numa delas não escapa da ordem —; a ação tem —
 //!   desde o lote A14, na forma que o runner lê, sem chave nem passo a mais,
 //!   e com o canal do passo que o confere ([`forma_da_acao`]) — os passos
@@ -1922,6 +1924,44 @@ fn forma_que_a_leitura_nao_le(texto: &str) -> Option<&'static str> {
     }
 }
 
+/// Os marcadores de documento do YAML de `linhas` — as de código de um
+/// workflow ou de uma ação —: na coluna zero, o `---` do começo de um
+/// documento e o `...` do fim, sozinhos ou seguidos de um espaço; menos o
+/// `---` sozinho — com um comentário, no máximo — na primeira linha de
+/// código, o começo explícito do único documento, que o YAML e a leitura
+/// leem igual.
+///
+/// # Por quê, desde o lote A14
+///
+/// A leitura por linhas lia um arquivo com dois documentos como um só: o
+/// `---` e o `...` eram, para ela, escalares simples. O runner recusa o
+/// segundo documento, e o PyYAML também — o workflow não roda, e falha
+/// fechado no GitHub —, e o `cargo xtask invariantes` passava, ou lia como
+/// mais um job o que o YAML lê como outro documento (o I4 do adversário do
+/// lote A13). O que a leitura não lê com certeza, reprova: um marcador fora
+/// do começo, e o do começo com alguma coisa depois (`--- !!map`). Na ação
+/// do compilador, a forma dela já recusa toda linha da raiz que não é uma
+/// das chaves dela ([`forma_da_acao`]).
+fn marcadores_de_documento<'a, 'b>(linhas: &'b [Linha<'a>]) -> Vec<&'b Linha<'a>> {
+    let primeira = linhas.iter().position(|l| !l.texto.is_empty());
+    linhas
+        .iter()
+        .enumerate()
+        .filter(|(k, l)| {
+            let marcador = l.recuo == 0
+                && !l.escalar
+                && ["---", "..."].iter().any(|m| {
+                    l.texto
+                        .strip_prefix(m)
+                        .is_some_and(|resto| resto.is_empty() || resto.starts_with([' ', '\t']))
+                });
+            let o_do_comeco = Some(*k) == primeira && sem_comentario(l.texto) == "---";
+            marcador && !o_do_comeco
+        })
+        .map(|(_, l)| l)
+        .collect()
+}
+
 /// O valor de YAML sem as aspas que o fecham — `'compilador'` e
 /// `"compilador"` são o `compilador` do GitHub —, se ele está inteiro entre
 /// elas, sem escape nem outra aspa dentro; senão, o próprio valor. Desde o
@@ -2215,7 +2255,9 @@ fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str>
 /// ([`quebras_que_a_leitura_nao_ve`]) — e, fora do conteúdo dos blocos, as
 /// formas que ela não lê ([`forma_que_a_leitura_nao_le`]) — o estilo de
 /// fluxo, a chave entre aspas ou com escape, a chave complexa, a âncora, o
-/// apelido, a etiqueta, a fusão, o texto entre aspas em várias linhas. Um
+/// apelido, a etiqueta, a fusão, o texto entre aspas em várias linhas — e,
+/// desde o lote A14, um marcador de documento fora do começo
+/// ([`marcadores_de_documento`]). Um
 /// checkout, ou uma ação de fora da lista, escrito numa delas reprova por
 /// ela, e não escapa mais da ordem nem da lista: antes, um checkout em
 /// estilo de fluxo ou com um escape na chave não pedia a conferência depois
@@ -2246,6 +2288,15 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
                     l.texto
                 ));
             }
+        }
+        // Um documento só, também na ação do compilador (desde o lote A14).
+        for l in marcadores_de_documento(&linhas) {
+            fora.push(format!(
+                "{nome}: `{}` — um marcador de documento do YAML: a leitura por linhas do `xtask` \
+                 lê um documento só, e o runner recusa um segundo; só o `---` sozinho, na \
+                 primeira linha de código, passa",
+                l.texto
+            ));
         }
         if nome == ACAO_DO_COMPILADOR {
             continue;
@@ -6477,6 +6528,64 @@ jobs:
                 o_que_o_job_escolhe(nome, &linhas_de_codigo(texto)),
                 Vec::<String>::new()
             );
+        }
+    }
+
+    /// Um documento só (no lote A14, o I4 do adversário do lote A13): um
+    /// segundo documento — vazio, ou com um job —, o fim do documento e o
+    /// começo com alguma coisa depois (`--- !!map`) reprovam, também na ação
+    /// do compilador; o `---` sozinho na primeira linha de código — depois
+    /// de um comentário, com um comentário — passa, e o `---` do conteúdo de
+    /// um bloco é texto. Os workflows e a ação do repositório não têm nenhum.
+    #[test]
+    fn adversario_a13_um_documento_so() {
+        let marcador = |fora: &[String]| {
+            fora.iter()
+                .filter(|f| f.contains(" — um marcador de documento do YAML"))
+                .count()
+        };
+        for (rotulo, texto) in [
+            ("um segundo documento vazio", format!("{OFICIAL}---\n")),
+            ("o fim do documento", format!("{OFICIAL}...\n# fim\n")),
+            (
+                "um segundo documento com um job",
+                format!(
+                    "{OFICIAL}---\njobs:\n  x:\n    steps:\n      - uses: actions/checkout@v4\n"
+                ),
+            ),
+            ("o começo com uma etiqueta", format!("--- !!map\n{OFICIAL}")),
+            (
+                "o começo depois de uma chave",
+                format!("on: push\n---\n{OFICIAL}"),
+            ),
+        ] {
+            assert_eq!(marcador(&um(CI, &texto)), 1, "{rotulo}");
+        }
+        assert_eq!(
+            marcador(&um(ACAO_DO_COMPILADOR, &format!("{ACAO}---\n"))),
+            1
+        );
+        for texto in [
+            format!("---\n{OFICIAL}"),
+            format!("# O workflow.\n---\n{OFICIAL}"),
+            format!("--- # o começo\n{OFICIAL}"),
+            OFICIAL.replacen(
+                "        run: cargo xtask test\n",
+                "        run: |\n          cat <<'FIM'\n          ---\n          ...\n          FIM\n          \
+                 cargo xtask test\n",
+                1,
+            ),
+        ] {
+            assert_ne!(texto, OFICIAL);
+            assert_eq!(um(CI, &texto), Vec::<String>::new(), "{texto}");
+        }
+        for texto in [
+            include_str!("../../.github/workflows/ci.yml"),
+            include_str!("../../.github/workflows/rede-principal.yml"),
+            include_str!("../../.github/workflows/canario.yml"),
+            ACAO,
+        ] {
+            assert!(marcadores_de_documento(&linhas_de_codigo(texto)).is_empty());
         }
     }
 
