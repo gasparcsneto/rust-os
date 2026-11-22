@@ -1472,7 +1472,8 @@ fn linhas_de_codigo(texto: &str) -> Vec<Linha<'_>> {
 }
 
 /// A chave e o valor de uma linha `chave: valor` de YAML, com o `- ` de um
-/// item de lista e as aspas da chave tirados.
+/// item de lista e as aspas da chave tirados, e o valor sem o comentário do
+/// fim da linha ([`sem_comentario`]).
 fn chave_e_valor(texto: &str) -> Option<(&str, &str)> {
     let texto = texto.strip_prefix("- ").unwrap_or(texto);
     let (chave, valor) = texto.split_once(':')?;
@@ -1483,7 +1484,58 @@ fn chave_e_valor(texto: &str) -> Option<(&str, &str)> {
         && chave
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-    de_yaml.then_some((chave, valor.trim()))
+    de_yaml.then_some((chave, sem_comentario(valor.trim())))
+}
+
+/// Onde acaba o valor de YAML entre aspas do começo de `valor`: o índice
+/// depois da aspa que o fecha — na dupla, a `\` escapa o caractere
+/// seguinte; na simples, `''` é uma aspa de dentro —; nenhum, se ele não
+/// começa por aspas ou não fecha na linha.
+fn fim_das_aspas(valor: &str) -> Option<usize> {
+    let b = valor.as_bytes();
+    let aspa = b.first().copied().filter(|&c| c == b'"' || c == b'\'')?;
+    let mut i = 1;
+    while let Some(&c) = b.get(i) {
+        match c {
+            b'\\' if aspa == b'"' => i += 2,
+            b'\'' if aspa == b'\'' && b.get(i + 1) == Some(&b'\'') => i += 2,
+            _ if c == aspa => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// O valor de uma linha de YAML sem o comentário do fim dela: o `#` depois
+/// de um espaço — ou no começo do valor — e o que vem depois, fora das
+/// aspas. Num valor entre aspas, o `#` de dentro é do valor, e o
+/// comentário só começa depois da aspa que o fecha; o que não fecha na
+/// linha fica inteiro.
+///
+/// # Por quê, desde o lote A12
+///
+/// O `invariantes: true  # x`, o `uses: ./.github/actions/compilador  # x`
+/// e o `id: compilador  # x` são o YAML que o GitHub lê sem o comentário, e
+/// reprovavam o `cargo xtask invariantes` sem defeito nenhum: o comentário
+/// entrava no valor que a entrada do `with:`, o nome da ação e a contagem
+/// do `id` comparam (o achado 2 do adversário do lote A11). Vale em toda
+/// leitura de [`chave_e_valor`] — também na chave de cache, onde um
+/// comentário com o canal passava pelo canal que a chave não tem —; a regra
+/// das variáveis do cargo na CI (`variaveis_do_cargo_na_ci`, no `main.rs`)
+/// lê o texto cru, de propósito, e não muda.
+fn sem_comentario(valor: &str) -> &str {
+    let desde = if valor.starts_with(['"', '\'']) {
+        match fim_das_aspas(valor) {
+            Some(fim) => fim,
+            None => return valor,
+        }
+    } else {
+        0
+    };
+    let b = valor.as_bytes();
+    (desde..b.len())
+        .find(|&i| b[i] == b'#' && (i == 0 || b[i - 1] == b' ' || b[i - 1] == b'\t'))
+        .map_or(valor, |i| valor[..i].trim_end())
 }
 
 /// O nome da ação de um `uses:` — sem as aspas e sem a versão.
@@ -4209,6 +4261,79 @@ jobs:
         ] {
             assert_eq!(um(nome, texto), Vec::<String>::new(), "{nome}");
         }
+    }
+
+    /// O comentário no fim de uma linha estrutural (no lote A12, o achado 2
+    /// do adversário do lote A11): no `invariantes: true` do `with:` do job
+    /// de lints, no `uses:` e no `id:` do passo da ação, ele é do YAML — o
+    /// GitHub não o lê —, e reprovava o `invariantes` sem defeito, porque
+    /// entrava no valor. Os três passam, cada um e juntos, no `ci.yml` de
+    /// verdade, e em todo passo da ação. Um `#` dentro de aspas continua
+    /// parte do valor: a ação entre aspas com ele não é a do compilador, e a
+    /// entrada não liga as invariantes. E a chave de cache com o canal só
+    /// num comentário reprova.
+    #[test]
+    fn adversario_a11_o_comentario_no_fim_de_uma_linha_estrutural() {
+        let ci = include_str!("../../.github/workflows/ci.yml");
+        let entrada = "          invariantes: true\n";
+        let uso = "        uses: ./.github/actions/compilador\n";
+        let id = "        id: compilador\n";
+        assert_eq!(ci.matches(entrada).count(), 1);
+        let comentar = |texto: &str, linha: &str, comentario: &str| {
+            texto.replacen(linha, &format!("{}  # {comentario}\n", linha.trim_end()), 1)
+        };
+        let na_entrada = comentar(ci, entrada, "so no job de lints");
+        let no_uso = comentar(ci, uso, "a conferencia, antes de todo cargo");
+        let no_id = comentar(ci, id, "a chave do cache le o canal daqui");
+        let nos_tres = comentar(&comentar(&na_entrada, uso, "a conferencia"), id, "o canal");
+        let em_todo_passo = ci
+            .replace(
+                uso,
+                "        uses: ./.github/actions/compilador # a conferencia\n",
+            )
+            .replace(id, "        id: compilador # o canal\n");
+        for (rotulo, texto) in [
+            ("na entrada", &na_entrada),
+            ("no uses", &no_uso),
+            ("no id", &no_id),
+            ("nos tres", &nos_tres),
+            ("em todo passo", &em_todo_passo),
+        ] {
+            assert_ne!(texto, ci, "{rotulo}");
+            assert_eq!(
+                as_invariantes_na_acao(texto),
+                Vec::<String>::new(),
+                "{rotulo}"
+            );
+            assert_eq!(um(CI, texto), Vec::<String>::new(), "{rotulo}");
+        }
+        // O `#` dentro de aspas é do valor.
+        let entre_aspas = ci.replacen(
+            uso,
+            "        uses: './.github/actions/compilador # a conferencia'\n",
+            1,
+        );
+        let fora = um(CI, &entre_aspas);
+        assert!(
+            fora.iter().any(|f| f.contains(
+                "`./.github/actions/compilador # a conferencia` não é uma ação permitida"
+            )),
+            "{fora:?}"
+        );
+        let entrada_entre_aspas = ci.replacen(entrada, "          invariantes: 'true # x'\n", 1);
+        assert_eq!(as_invariantes_na_acao(&entrada_entre_aspas).len(), 1);
+        // O canal só no comentário não está na chave de cache.
+        let no_comentario = OFICIAL.replacen(
+            "          key: testes-${{ steps.compilador.outputs.canal }}-",
+            "          key: testes-  # steps.compilador.outputs.canal ",
+            1,
+        );
+        assert_ne!(no_comentario, OFICIAL);
+        let fora = um(CI, &no_comentario);
+        assert!(
+            fora.len() == 1 && fora[0].contains("não leva o canal"),
+            "{fora:?}"
+        );
     }
 
     #[test]
