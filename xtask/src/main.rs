@@ -21066,7 +21066,12 @@ fn sob_arvore(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> R
         ));
     }
     let log = pedir(7706, "log.tail", r#"{"count":16}"#)?;
-    let executado = Esperada::Executado("executado: system.uptime (agente 0)");
+    // No console físico, onde o confirm foi: a linha do mesmo comando que a
+    // sonda do Terminal deixou é de outro console — ver [`ConsoleDaSonda`].
+    let executado = Esperada::Executado(
+        "executado: system.uptime (agente 0)",
+        ConsoleDaSonda::Fisico,
+    );
     if !diz_desde(&log, desde, executado, "arvore")? {
         return Err(format!(
             "arvore: o log nao registrou o agente como origem\n  {log}"
@@ -22246,7 +22251,10 @@ fn sob_agentes(arch: Arquitetura) -> Result<(), String> {
     // Uma espera por um predicado: o motivo de uma leitura que não se
     // completa vai na mensagem do prazo — ver [`LeituraDoLog::achou`].
     let leitura = LeituraDoLog::desde(desde, "agentes");
-    let executado = Esperada::Executado("executado: system.info (agente 2)");
+    let executado = Esperada::Executado(
+        "executado: system.info (agente 2)",
+        ConsoleDaSonda::Terminal,
+    );
     agente
         .esperar(
             "log.tail",
@@ -24661,16 +24669,58 @@ enum Esperada<'t> {
     },
     /// Um comando que o interpretador executou, no subsistema `console`: o
     /// texto — `executado: <comando> (<origem>)` — seguido de ` em
-    /// <console>`. O kernel a escreve depois que o gate permitiu, com a
-    /// licença na mão; a recusa e o parâmetro inválido saem no lugar dela,
-    /// com `negado: ` e `parametro invalido: ` no lugar de `executado: `, o
+    /// <console>`, o console da sonda ([`ConsoleDaSonda`]). O kernel a
+    /// escreve depois que o gate permitiu, com a licença na mão, logo antes
+    /// de executar; a recusa e o parâmetro inválido saem no lugar dela, com
+    /// `negado: ` e `parametro invalido: ` no lugar de `executado: `, o
     /// mesmo resto, e o código ou o campo depois — ver
     /// `interpretador::despachar`, no kernel. Antes do lote EXECUTADO a
     /// linha saía antes da decisão, e um comando negado também a deixava (o
     /// informativo 9 do adversário do lote FUMAÇA-2).
-    Executado(&'t str),
+    Executado(&'t str, ConsoleDaSonda),
     /// Uma linha que um programa escreveu, no subsistema `usuario`, igual.
     DoPrograma(&'t str),
+}
+
+/// O console em que uma sonda pediu o comando que ela espera: só a
+/// `executado:` dele conta — ver [`Esperada::Executado`]. A recusa do mesmo
+/// comando pela mesma origem reprova em qualquer console, como antes: na
+/// janela da espera, só o pedido da sonda pede o comando.
+///
+/// # Por quê, desde o lote A13
+///
+/// A espera aceitava a `executado:` do comando, pela origem, em qualquer
+/// console: a sonda do agente no Terminal passaria com a linha do mesmo
+/// comando, pela mesma origem, confirmado no console físico (o I3 do
+/// adversário do lote EXECUTADO, na rodada 5). Nenhuma sonda de hoje deixa
+/// as duas na mesma janela, e o `desde` afasta as de antes; a sonda que
+/// sabe onde pediu só aceita, agora, a linha de lá.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConsoleDaSonda {
+    /// O console físico, `console`: a linha de comando do interpretador na
+    /// tela, que a sonda da árvore semântica confirma.
+    Fisico,
+    /// Um Terminal, `terminal:<n>`: a linha de comando da grade dele, que as
+    /// sondas do agente no Terminal confirmam. O número é o da instância do
+    /// pseudo-terminal, que a sonda não sabe.
+    Terminal,
+    /// Qualquer um: a sonda do teclado não escolhe o console — a tecla vai
+    /// aonde o foco está —, e quem prova que ela chegou ao Terminal é a
+    /// sonda seguinte, pelo que ele mostra.
+    Qualquer,
+}
+
+impl ConsoleDaSonda {
+    /// Se `console` — o que a linha diz depois de ` em ` — é o desta sonda.
+    fn e(self, console: &str) -> bool {
+        match self {
+            ConsoleDaSonda::Fisico => console == "console",
+            ConsoleDaSonda::Terminal => console
+                .strip_prefix("terminal:")
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())),
+            ConsoleDaSonda::Qualquer => true,
+        }
+    }
 }
 
 impl Esperada<'_> {
@@ -24685,11 +24735,12 @@ impl Esperada<'_> {
                 r.subsistema == "ui"
                     && r.mensagem == format!("{origem}: {acao} no elemento {elemento}")
             }
-            Esperada::Executado(texto) => {
+            Esperada::Executado(texto, console) => {
                 r.subsistema == "console"
                     && r.mensagem
                         .strip_prefix(texto)
-                        .is_some_and(|resto| resto.starts_with(" em "))
+                        .and_then(|resto| resto.strip_prefix(" em "))
+                        .is_some_and(|onde| console.e(onde))
             }
             Esperada::DoPrograma(texto) => r.subsistema == "usuario" && r.mensagem == texto,
         }
@@ -24714,7 +24765,7 @@ impl Esperada<'_> {
                             feito.ends_with(&format!(" no elemento {elemento}"))
                         })
             }
-            Esperada::Executado(texto) => {
+            Esperada::Executado(texto, _) => {
                 let Some(pedido) = texto.strip_prefix("executado: ") else {
                     return false;
                 };
@@ -24737,7 +24788,7 @@ impl Esperada<'_> {
     fn nas(&self, linhas: &[RegistroDoLog], quem: &str) -> Result<bool, String> {
         if let Some(r) = linhas.iter().find(|r| self.e_a_recusa(r)) {
             let o_que = match self {
-                Esperada::Executado(_) => "o comando",
+                Esperada::Executado(..) => "o comando",
                 Esperada::Acao { .. } | Esperada::DoPrograma(_) => "a acao",
             };
             return Err(format!(
@@ -27853,8 +27904,10 @@ fn sob_interpretador(
     // e um `agent.ping` negado deixa no lugar dela o `negado:`, que reprova a
     // espera na hora — sem ninguém entrado no console, também (o lote
     // EXECUTADO, pelo informativo 9 do adversário do lote FUMAÇA-2). A
-    // resposta, quem confere é a sonda seguinte, a do Terminal.
-    let pessoa = Esperada::Executado("executado: agent.ping (pessoa)");
+    // resposta, quem confere é a sonda seguinte, a do Terminal. Em qualquer
+    // console: a tecla vai aonde o foco está, e a sonda seguinte prova, pelo
+    // que o Terminal mostra, que ela chegou lá — ver [`ConsoleDaSonda`].
+    let pessoa = Esperada::Executado("executado: agent.ping (pessoa)", ConsoleDaSonda::Qualquer);
     let leitura = LeituraDoLog::desde(desde, "interpretador");
     // O mesmo comando executado em nome de outro, se aparecer.
     let mut de_outro: Option<String> = None;
@@ -27962,8 +28015,23 @@ fn sob_terminal(
 ///
 /// A sonda anterior viu a pessoa digitar; esta pede, pelo canal do agente,
 /// o `set_value` e o `confirm` na linha de comando do Terminal — o campo
-/// dentro da grade dele, e não o do console do kernel —, e confere que o
-/// comando executou atribuído ao agente, e que a resposta está na grade.
+/// dentro da grade dele, e não o do console do kernel —, e confere: que o
+/// `set_value` chega à linha; que o `confirm` é aceito; e, no log, que o
+/// gate permitiu o comando ao agente, num Terminal — a `executado:
+/// system.uptime (agente 0) em terminal:<n>` de depois do pedido, sem a
+/// recusa dele ([`Esperada::nas`], [`ConsoleDaSonda`]).
+///
+/// # O que ela não confere
+///
+/// A resposta na grade. A `executado:` sai com a licença na mão, logo antes
+/// de executar (o lote EXECUTADO): a espera prova a decisão do gate e a
+/// origem, e não a resposta. A resposta que o Terminal mostra, a sonda
+/// anterior confere, no comando da pessoa, pela mesma grade; a do agente
+/// pediria ler o texto da grade antes e depois do confirm, como
+/// [`nova_no_console`] faz no console, e esperar o Terminal desenhá-la —
+/// uma sonda nova na fumaça. O texto de antes dizia que ela conferia a
+/// resposta na grade, e ela não conferia (o I4 do adversário do lote
+/// EXECUTADO, na rodada 5; o texto era de antes daquele lote).
 fn sob_terminal_pelo_agente(
     escrita: &mut UnixStream,
     leitor: &mut BufReader<UnixStream>,
@@ -28035,7 +28103,10 @@ fn sob_terminal_pelo_agente(
             }
         }
     }
-    let executado = Esperada::Executado("executado: system.uptime (agente 0)");
+    let executado = Esperada::Executado(
+        "executado: system.uptime (agente 0)",
+        ConsoleDaSonda::Terminal,
+    );
     let leitura = LeituraDoLog::desde(desde, "terminal");
     let limite = std::time::Instant::now() + Duration::from_secs(8);
     loop {
@@ -30657,7 +30728,10 @@ mod testes {
         // O comando executado: o texto e o console depois dele; o que só
         // começa igual, o que não diz o console e o de outro subsistema,
         // não.
-        let executado = Esperada::Executado("executado: system.uptime (agente 0)");
+        let executado = Esperada::Executado(
+            "executado: system.uptime (agente 0)",
+            ConsoleDaSonda::Fisico,
+        );
         let no_console = r(
             111,
             "console",
@@ -30707,7 +30781,8 @@ mod testes {
             subsistema: subsistema.into(),
             mensagem: mensagem.into(),
         };
-        let executado = Esperada::Executado("executado: agent.ping (pessoa)");
+        let executado =
+            Esperada::Executado("executado: agent.ping (pessoa)", ConsoleDaSonda::Qualquer);
         let feito = r(140, "console", "executado: agent.ping (pessoa) em console");
         assert_eq!(
             executado.nas(std::slice::from_ref(&feito), "interpretador"),
@@ -30798,7 +30873,10 @@ mod testes {
         // Pela resposta do `log.tail`, como a espera a lê: o negado de
         // depois do pedido reprova; o de antes, não.
         let resposta = r#"{"jsonrpc":"2.0","id":7,"result":{"records":[{"seq":170,"uptime_ms":24090,"level":"info","subsystem":"console","message":"negado: system.uptime (agente 0) em console: DENY_PERMISSION; registro 31"}],"total_emitted":171}}"#;
-        let uptime = Esperada::Executado("executado: system.uptime (agente 0)");
+        let uptime = Esperada::Executado(
+            "executado: system.uptime (agente 0)",
+            ConsoleDaSonda::Fisico,
+        );
         assert!(diz_desde(resposta, 170, uptime, "arvore").is_err());
         assert_eq!(diz_desde(resposta, 171, uptime, "arvore"), Ok(false));
         // E numa espera por um predicado: a recusa conta como não achada, e
@@ -30820,7 +30898,10 @@ mod testes {
     #[test]
     fn a_recusa_numa_espera_por_um_predicado_fica() {
         use super::*;
-        let esperada = Esperada::Executado("executado: system.info (agente 2)");
+        let esperada = Esperada::Executado(
+            "executado: system.info (agente 2)",
+            ConsoleDaSonda::Terminal,
+        );
         let negado = r#"{"jsonrpc":"2.0","id":7,"result":{"records":[{"seq":170,"uptime_ms":24090,"level":"info","subsystem":"console","message":"negado: system.info (agente 2) em terminal:0: DENY_PERMISSION; registro 31"}],"total_emitted":171}}"#;
         let depois = r#"{"jsonrpc":"2.0","id":8,"result":{"records":[{"seq":170,"uptime_ms":24090,"level":"info","subsystem":"console","message":"negado: system.info (agente 2) em terminal:0: DENY_PERMISSION; registro 31"},{"seq":171,"uptime_ms":24100,"level":"info","subsystem":"console","message":"executado: system.info (agente 2) em terminal:0"}],"total_emitted":172}}"#;
         let leitura = LeituraDoLog::desde(170, "agentes");
@@ -30837,6 +30918,78 @@ mod testes {
         let leitura = LeituraDoLog::desde(171, "agentes");
         assert!(!leitura.achou(curta, esperada));
         assert!(leitura.achou(depois, esperada));
+    }
+
+    /// A espera pelo `executado:` só aceita a linha do console da sonda (no
+    /// lote A13, o I3 do adversário do lote EXECUTADO): a das sondas do
+    /// Terminal, um `terminal:<n>` — e não o console físico, nem o que só
+    /// começa igual —; a da árvore, o console físico; e a do teclado,
+    /// qualquer um. A recusa do mesmo comando pela mesma origem reprova as
+    /// três, em qualquer console, como antes.
+    #[test]
+    fn a_espera_pelo_executado_e_a_do_console_da_sonda() {
+        use super::*;
+        let r = |seq: u64, mensagem: &str| RegistroDoLog {
+            seq,
+            uptime_ms: seq * 10,
+            subsistema: "console".into(),
+            mensagem: mensagem.into(),
+        };
+        let texto = "executado: system.uptime (agente 0)";
+        let no_fisico = r(200, "executado: system.uptime (agente 0) em console");
+        let no_terminal = r(201, "executado: system.uptime (agente 0) em terminal:0");
+        let noutro_terminal = r(202, "executado: system.uptime (agente 0) em terminal:12");
+        let parecidas = [
+            r(203, "executado: system.uptime (agente 0) em terminal:"),
+            r(204, "executado: system.uptime (agente 0) em terminal:x"),
+            r(205, "executado: system.uptime (agente 0) em terminalx:0"),
+            r(206, "executado: system.uptime (agente 0) em terminal:0 "),
+            r(207, "executado: system.uptime (agente 0) em consoles"),
+        ];
+        let terminal = Esperada::Executado(texto, ConsoleDaSonda::Terminal);
+        let fisico = Esperada::Executado(texto, ConsoleDaSonda::Fisico);
+        let qualquer = Esperada::Executado(texto, ConsoleDaSonda::Qualquer);
+        for (esperada, linha, acha) in [
+            (terminal, &no_terminal, true),
+            (terminal, &noutro_terminal, true),
+            (terminal, &no_fisico, false),
+            (fisico, &no_fisico, true),
+            (fisico, &no_terminal, false),
+            (fisico, &noutro_terminal, false),
+            (qualquer, &no_fisico, true),
+            (qualquer, &no_terminal, true),
+            (qualquer, &noutro_terminal, true),
+        ] {
+            assert_eq!(
+                esperada.nas(std::slice::from_ref(linha), "sonda"),
+                Ok(acha),
+                "{esperada:?}: {}",
+                linha.mensagem
+            );
+        }
+        assert_eq!(terminal.nas(&parecidas, "terminal"), Ok(false));
+        assert_eq!(fisico.nas(&parecidas, "arvore"), Ok(false));
+        // A recusa reprova as três, em qualquer console.
+        for recusa in [
+            r(
+                210,
+                "negado: system.uptime (agente 0) em console: DENY_PERMISSION; registro 9",
+            ),
+            r(
+                211,
+                "negado: system.uptime (agente 0) em terminal:0: DENY_PERMISSION",
+            ),
+        ] {
+            for esperada in [terminal, fisico, qualquer] {
+                assert!(
+                    esperada
+                        .nas(std::slice::from_ref(&recusa), "sonda")
+                        .is_err(),
+                    "{esperada:?}: {}",
+                    recusa.mensagem
+                );
+            }
+        }
     }
 
     /// Uma leitura do log que não alcança a primeira linha que a espera
@@ -30894,7 +31047,10 @@ mod testes {
         // Por um predicado: a leitura que não se completa conta como não
         // achada, e o motivo vai na mensagem do prazo.
         let leitura = LeituraDoLog::desde(100, "agentes");
-        let executado = Esperada::Executado("executado: system.info (agente 2)");
+        let executado = Esperada::Executado(
+            "executado: system.info (agente 2)",
+            ConsoleDaSonda::Terminal,
+        );
         assert!(!leitura.achou(&log(140..172, 172), executado));
         let prazo = leitura.no_prazo("agentes: o comando nao executou\n  a resposta".into());
         assert!(
