@@ -13,7 +13,10 @@
 # Roda logo depois do checkout, antes do cache e de qualquer `cargo` (o
 # `cargo xtask invariantes` confere a ordem, e, desde o lote A11, que o
 # passo que a usa não tem `if:` nem `continue-on-error:`, que a deixariam
-# sem rodar ou o job seguir com ela reprovada), em quatro passos:
+# sem rodar ou o job seguir com ela reprovada — desde o lote A12, numa
+# leitura que falha fechada: o passo só tem o `name:`, o `id:`, o `uses:` e
+# o `with:` com as entradas, e uma linha dele que ela não lê reprova), em
+# quatro passos:
 #
 # 1. `ambiente`, em Python — o do sistema, `/usr/bin/python3`, e não o do
 #    PATH, que é o que ele confere —, antes de qualquer programa do
@@ -41,7 +44,10 @@
 #      compila, o `xtask` das invariantes inclusive;
 #    - e nenhum arquivo do commit num diretório de saída do cargo (o
 #      `target/` de cada diretório de build): o cargo tomaria um artefato
-#      do commit pelo que ele compilou.
+#      do commit pelo que ele compilou. Desde o lote A12, também nenhum link
+#      no commit — o modo 120000 do índice — nem no caminho de um diretório
+#      de saída, no disco: um `target` que é link para uma pasta do commit
+#      escapava da regra, que casa o caminho do arquivo.
 # 2. `conferir`: o canal do `rust-toolchain.toml`, lido como o rustup o lê
 #    (é TOML), um nightly com data, e o arquivo — e o do modelo do SDK — o
 #    do commit; a instalação — o proxy do rustup instala o toolchain do
@@ -75,8 +81,8 @@
 #    o `cargo xtask invariantes`, com o toolchain fixado, logo depois das
 #    conferências, antes do cache e de todo outro `cargo` do job. Nada do
 #    repositório roda antes dele — nem os testes do hospedeiro, nem os
-#    `build.rs` deles, nem a formatação —, e o cache, que vem depois, não
-#    lhe traz artefato nenhum.
+#    `build.rs` deles; e a formatação, que só lê o código, também vem
+#    depois —, e o cache, que vem depois, não lhe traz artefato nenhum.
 #
 # Por quê: o `cargo xtask` é o `cargo run` do `xtask`, e o `cargo run` passa
 # o binário pelo executor. Um executor do repositório que respondesse

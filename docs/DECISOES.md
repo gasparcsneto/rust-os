@@ -2400,6 +2400,39 @@ pendência #298.
     global ([README](../README.md#vários-núcleos), "A remoção vale nos
     outros núcleos", e [Testes](../README.md#testes)).
 
+  Depois do lote ICACHE-3, o lote A12, [B], fez os achados do adversário
+  do lote A11 e as precisões do revisor dele, na guarda do compilador e no
+  texto, sem autoridade, regra de acesso, registro, identidade,
+  persistência ou semântica de auditoria novos:
+  - a leitura do passo da ação do compilador, nos workflows, falha
+    fechada: ele só tem o `name:`, o `id:`, o `uses:` da ação e o `with:`
+    com as entradas, na forma simples, e toda outra linha dele reprova,
+    com a linha na mensagem — o `"i\x66": false`, que um parser de YAML
+    conforme lê como `if: false`, passava pelo `cargo xtask invariantes`,
+    porque a leitura ignorava a linha que não reconhecia (o achado 1); e o
+    `uses:` da ação numa entrada do `with:` de outra ação, ou numa linha
+    de um bloco `run:`, que contava como a conferência sem ela rodar,
+    também reprova;
+  - o comentário do fim de uma linha sai do valor que as regras dos
+    workflows comparam — o nome da ação, a contagem do `id`, a entrada do
+    `with:`, a chave de cache —: o `invariantes: true  # x` reprovava sem
+    defeito (o achado 2). A regra das variáveis do cargo na CI continua
+    lendo o texto cru;
+  - o passo do ambiente da ação recusa todo link do commit, pelo modo do
+    índice, e todo link no caminho de um diretório de saída do cargo, no
+    disco: um `target` que é link para uma pasta do commit escapava da
+    regra dos arquivos do commit num diretório de saída, que casa o
+    caminho, e, num experimento fora da árvore, com as horas dos arquivos
+    a favor do ataque, o cargo rodou o `xtask` plantado nela (o achado 3,
+    da guarda do lote A10). O repositório não tem link nenhum;
+  - o texto, pelas precisões do revisor.
+
+  Fica o que fica dos lotes A10 e A11 — o `if:` e o `continue-on-error:`
+  de um job inteiro, e o resto da definição da CI, com a revisão. Três
+  testes novos no hospedeiro e um reforçado, e as mutações do lote (*As do
+  lote A12*, no
+  [README](../README.md#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
+
 ### I7
 
 **O resumo sem chave dos parâmetros, no console sem ninguém** — o I7 da

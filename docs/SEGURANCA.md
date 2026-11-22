@@ -171,8 +171,11 @@ pontos onde acontece — não num canal paralelo:
   entrada relativa ou do repositório, as casas do cargo e do rustup dentro
   dele, um `rust-toolchain` fora dos dois oficiais ou com `path`, um
   manifesto com `cargo-features` ou um perfil com `rustflags` ou
-  `codegen-backend`, um arquivo do commit num diretório de saída, e o config
-  de um diretório de build fora da lista — na raiz, outro que o apelido —;
+  `codegen-backend`, um arquivo do commit num diretório de saída — e,
+  desde o lote A12, um link no commit ou no caminho de um diretório de
+  saída, por onde os arquivos do commit chegavam a um `target` sem a regra
+  os ver —, e o config de um diretório de build fora da lista — na raiz,
+  outro que o apelido —;
   roda todo `cargo` dela no toolchain fixado pelo canal — uma exceção à
   letra do 4.1 do `CLAUDE.md`, que proíbe o `RUSTUP_TOOLCHAIN` no projeto,
   proposta ao dono do projeto: se ele preferir a letra, a fixação sai, e a
@@ -183,7 +186,10 @@ pontos onde acontece — não num canal paralelo:
   não tem `if:` nem `continue-on-error:`, que a deixariam sem rodar ou o
   job seguir com ela reprovada, e que a entrada das invariantes está no
   `with:` do passo do job de lints; e o `xtask` aceita na raiz só o
-  apelido, como ela. O que as guardas de texto do
+  apelido, como ela. Desde o lote A12, a leitura desse passo falha
+  fechada — uma linha dele que ela não lê, como um escape na chave que o
+  YAML lê como `if:`, reprova —, e o comentário do fim de uma linha sai do
+  valor que ela compara. O que as guardas de texto do
   `xtask` não fecham — quem escreve no kernel para contorná-las de
   propósito — e a definição da CI ficam com a revisão ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)).
   E as recusas das perguntas sobre quem

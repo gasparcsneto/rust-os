@@ -64,12 +64,14 @@
 //!   outro toolchain; os workflows oficiais só usam as ações de
 //!   [`ACOES_OFICIAIS`], não sobrepõem o toolchain e conferem o compilador
 //!   — a ação `.github/actions/compilador`, num passo sem `if:` nem
-//!   `continue-on-error:` — depois de cada checkout, antes do cache e de
-//!   qualquer `cargo`, com o canal em toda chave de cache; a ação tem os
-//!   passos que conferem, fora do cargo, o ambiente, o PATH, os
-//!   `rust-toolchain` e o config do cargo — o do executor desde o lote A9,
-//!   os outros desde o lote A10 —, e o das invariantes, que o job de lints
-//!   liga pela entrada `invariantes: true` no `with:` do passo dela
+//!   `continue-on-error:`, que, desde o lote A12, a leitura lê inteiro e
+//!   falha fechada ([`linhas_que_o_passo_nao_le`]) — depois de cada
+//!   checkout, antes do cache e de qualquer `cargo`, com o canal em toda
+//!   chave de cache; a ação tem os passos que conferem, fora do cargo, o
+//!   ambiente, o PATH, os `rust-toolchain`, os artefatos e — desde o lote
+//!   A12 — os links do commit, e o config do cargo — o do executor desde o
+//!   lote A9, os outros desde o lote A10 —, e o das invariantes, que o job
+//!   de lints liga pela entrada `invariantes: true` no `with:` do passo dela
 //!   ([`conferir_a_acao`], [`as_invariantes_na_acao`]); e o canário, o
 //!   único que sobrepõe — ele
 //!   testa o candidato —, não roda nos pushes, não usa o cache da CI, não
