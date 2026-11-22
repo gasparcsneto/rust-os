@@ -62,7 +62,10 @@
 //!   nem o executor, nem o apelido, e fica na lista — na raiz, só o
 //!   apelido, como na ação —; o `xtask` não chama o cargo nem o rustc com
 //!   outro toolchain; os workflows oficiais só usam as ações de
-//!   [`ACOES_OFICIAIS`], não sobrepõem o toolchain e conferem o compilador
+//!   [`ACOES_OFICIAIS`], não sobrepõem o toolchain — nem, desde o lote A14,
+//!   o escolhem pelo job: nenhum `container:`, o `env:` do workflow e o dos
+//!   jobs numa lista fechada, nenhum `GITHUB_ENV`, e o checkout só do
+//!   commit ([`o_que_o_job_escolhe`]) — e conferem o compilador
 //!   — a ação `.github/actions/compilador`, num passo sem `if:` nem
 //!   `continue-on-error:`, que, desde o lote A12, a leitura lê inteiro e
 //!   falha fechada ([`linhas_que_o_passo_nao_le`]) — depois de cada
@@ -359,8 +362,11 @@ const COMPILADO_COM: &str = env!("XTASK_RUSTC_COMMIT");
 /// o `PATH` de um passo ou de um job, que escolhe o `cargo` (o F1 e o F2 do
 /// adversário do lote A9). Na ação do compilador, que roda antes de todo
 /// `cargo`, o ambiente do job se confere por uma lista fechada; aqui, o
-/// texto de todo passo, também dos que rodam depois dela.
-const SOBREPOSICOES: [&str; 24] = [
+/// texto de todo passo, também dos que rodam depois dela. E, desde o lote
+/// A14, o `GITHUB_ENV`, que põe uma variável no ambiente dos passos
+/// seguintes — num passo antes da ação, no dos passos dela —, por fora da
+/// lista fechada do `env:` dos jobs ([`VARIAVEIS_DOS_JOBS`]).
+const SOBREPOSICOES: [&str; 25] = [
     "RUSTUP_TOOLCHAIN",
     "RUSTUP_HOME",
     "CARGO_HOME",
@@ -384,6 +390,7 @@ const SOBREPOSICOES: [&str; 24] = [
     "rustup run",
     "rustup toolchain",
     "GITHUB_PATH",
+    "GITHUB_ENV",
     ".cargo/config",
 ];
 
@@ -428,6 +435,28 @@ const CHAVES_DO_PASSO_DA_ACAO: [&str; 4] = ["name", "id", "uses", "with"];
 /// ([`linhas_que_o_passo_da_acao_nao_le`]). Desde o lote A13 (o M4 do
 /// adversário do lote A12).
 const CHAVES_DOS_PASSOS_DA_ACAO: [&str; 3] = ["name", "id", "shell"];
+
+/// As chaves do passo do checkout, num workflow oficial
+/// ([`conferir_os_workflows`]): o `uses:` e o `name:`. Um `with:` escolhe
+/// outro commit (`ref:`), outro repositório (`repository:`), outro lugar
+/// (`path:`) ou o que vem com ele (`submodules:`, `lfs:`) — e a ação do
+/// compilador, que é local, viria do que ele trouxe —; um `env:` muda o que
+/// o `git` dele grava (`GIT_INDEX_FILE`). Desde o lote A14 (o I3 do
+/// adversário do lote A13). O canário, que testa a linha oficial, não segue
+/// esta regra.
+const CHAVES_DO_CHECKOUT: [&str; 2] = ["uses", "name"];
+
+/// Os nomes do `env:` de um workflow oficial, e do de um job dele — a lista
+/// fechada ([`o_que_o_job_escolhe`]): a cor do terminal e o `RUST_BACKTRACE`,
+/// de todo job, e os pares e os núcleos das bancadas. Eles chegam aos passos
+/// da ação do compilador; um nome novo entra aqui, de propósito, com a
+/// revisão. Desde o lote A14 (o I2 do adversário do lote A13).
+const VARIAVEIS_DOS_JOBS: [&str; 4] = [
+    "CARGO_TERM_COLOR",
+    "RUST_BACKTRACE",
+    "DUKE_PARES",
+    "DUKE_NUCLEOS",
+];
 
 /// As chaves de cima da ação do compilador, o que o runner lê nela: o nome,
 /// a descrição, as entradas, as saídas e os passos ([`forma_da_acao`]).
@@ -2165,7 +2194,12 @@ fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str>
 /// [`CHAVES_FORA_DO_PASSO_DA_ACAO`] e que a leitura lê inteiro, só com as de
 /// [`CHAVES_DO_PASSO_DA_ACAO`], na forma simples
 /// ([`linhas_que_o_passo_nao_le`]); e toda chave de cache, a principal e as
-/// de restauração, leva o canal. Nenhum `uses:` em várias linhas. O canário
+/// de restauração, leva o canal. Nenhum `uses:` em várias linhas. Desde o
+/// lote A14, nos oficiais, nenhum job roda num `container:`, o `env:` do
+/// workflow e o de cada job só têm os nomes de [`VARIAVEIS_DOS_JOBS`]
+/// ([`o_que_o_job_escolhe`]), nenhum passo escreve no `GITHUB_ENV`
+/// ([`SOBREPOSICOES`]), e o checkout só tem as chaves de
+/// [`CHAVES_DO_CHECKOUT`]. O canário
 /// sobrepõe, mas não roda nos pushes, não usa o cache nem publica a
 /// proveniência. As ações locais seguem as regras dos workflows oficiais,
 /// menos a que confere o compilador, que cita o que recusa: nela vale só a
@@ -2306,8 +2340,14 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
             continue;
         }
 
+        // Os jobs rodam no runner, com o ambiente numa lista fechada, e o
+        // checkout é o do commit (desde o lote A14): o que a ação do
+        // compilador confere não depende de um programa nem de um commit que
+        // o workflow escolhe.
+        fora.extend(o_que_o_job_escolhe(nome, &linhas));
+
         let mut pendente = false;
-        for l in &linhas {
+        for (i, l) in linhas.iter().enumerate() {
             let acao = chave_e_valor(l.texto)
                 .filter(|(chave, _)| *chave == "uses")
                 .map(|(_, valor)| nome_da_acao(valor));
@@ -2319,6 +2359,18 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
                         ));
                     }
                     pendente = true;
+                    for c in chaves_do_item(&linhas, i) {
+                        if !CHAVES_DO_CHECKOUT.contains(&c.chave) {
+                            fora.push(format!(
+                                "{nome}: `{}: {}` no checkout — o checkout dos workflows \
+                                 oficiais só tem o `uses:` e o `name:`: um `with:` escolhe outro \
+                                 commit (`ref:`), outro repositório ou outro lugar, e a ação do \
+                                 compilador, que é local, viria dele; um `env:` muda o que o \
+                                 `git` dele grava",
+                                c.chave, c.valor
+                            ));
+                        }
+                    }
                 }
                 Some("./.github/actions/compilador") => pendente = false,
                 Some("actions/cache") if pendente => {
@@ -2368,6 +2420,94 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
                 fora.push(format!(
                     "{nome}: a chave de cache `{chave}` não leva o canal do compilador"
                 ));
+            }
+        }
+    }
+    fora
+}
+
+/// O que um workflow oficial — `nome`, e `linhas`, as de código dele —
+/// escolhe para os passos de um job, e que a ação do compilador não
+/// confere: o `container:` de um job, que roda os passos dele numa imagem
+/// que o workflow escolhe, e o `env:` do workflow e o de cada job, que só
+/// têm os nomes de uma lista fechada ([`VARIAVEIS_DOS_JOBS`]) — os dois
+/// chegam aos passos da ação, que roda com o ambiente do job. O `env:` de
+/// um passo — de um item de lista — só vale nele, e o do passo da ação, a
+/// leitura dele já recusa ([`linhas_que_o_passo_nao_le`]).
+///
+/// # Por quê, desde o lote A14
+///
+/// A ação confere o ambiente do job por uma lista fechada dos nomes que o
+/// cargo, o rustc e o rustup leem, e não os dos outros programas que o job
+/// roda: o carregador (`LD_PRELOAD`), que roda o código dele dentro de todo
+/// programa, o `python3` da ação inclusive, antes de qualquer conferência;
+/// o compilador de C do `build.rs` do `ring` (`CC`, `CFLAGS`), cujos objetos
+/// entram no binário do `xtask` das invariantes — num experimento, o build
+/// do `ring` rodou 36 vezes o programa do `CC`; o `git` da ação
+/// (`GIT_INDEX_FILE`, e o `HOME`, que escolhe a configuração dele); e o
+/// `bash` dos passos dela (`BASH_ENV`, que o `bash` do runner lê antes do
+/// script — num experimento, ele trocou o `cargo` por uma função, e o passo
+/// saiu com 0). E o `container:` troca todos de uma vez: a ação rodaria com
+/// o `python3`, o `git` e o `rustup` da imagem. Uma linha no `env:` ou no
+/// job bastava, e o `cargo xtask invariantes` passava (o I1 e o I2 do
+/// adversário do lote A13; o `HOME` e o `BASH_ENV`, o lote A14 os achou na
+/// revisão). Num job assim a ação pode não acusar nada — o carregador e o
+/// `bash` mentem para ela —, e quem acusa é o `cargo xtask invariantes` de
+/// fora dele: o local e o do canário.
+fn o_que_o_job_escolhe(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
+    let mut fora = Vec::new();
+    for (i, l) in linhas.iter().enumerate() {
+        if l.escalar {
+            continue;
+        }
+        let Some((chave, valor)) = chave_e_valor(l.texto) else {
+            continue;
+        };
+        if chave == "container" {
+            fora.push(format!(
+                "{nome}: `{}` — o `container:` de um job roda os passos dele numa imagem que o \
+                 workflow escolhe: a ação do compilador rodaria com o `python3`, o `git` e o \
+                 `rustup` dela",
+                l.texto
+            ));
+        }
+        // O `env:` do workflow, ou o de um job: fora de um item de lista.
+        if chave != "env" || item_da_linha(linhas, i).is_some() {
+            continue;
+        }
+        if !valor.is_empty() {
+            fora.push(format!(
+                "{nome}: `{}` — o `env:` do workflow, ou o de um job, com o valor na linha, que a \
+                 leitura não lê: os nomes dele são uma lista fechada",
+                l.texto
+            ));
+            continue;
+        }
+        // As linhas de dentro: cada uma, uma chave da lista, na coluna da
+        // primeira; o conteúdo de um bloco é o valor de uma delas.
+        let dentro = linhas[i + 1..]
+            .iter()
+            .filter(|d| !d.escalar && !d.texto.is_empty())
+            .take_while(|d| d.recuo > l.recuo);
+        let mut coluna = None;
+        for d in dentro {
+            let na_coluna = *coluna.get_or_insert(d.recuo) == d.recuo;
+            match chave_e_valor(d.texto) {
+                Some((c, _)) if na_coluna && VARIAVEIS_DOS_JOBS.contains(&c) => {}
+                Some(_) if na_coluna => fora.push(format!(
+                    "{nome}: `{}` no `env:` do workflow, ou no de um job — fora da lista ({}): \
+                     o ambiente do job chega aos passos da ação do compilador, e uma variável de \
+                     fora dela escolhe o programa que roda neles — o carregador (`LD_PRELOAD`), o \
+                     compilador de C dos `build.rs` (`CC`), a configuração do `git` (`HOME`), o \
+                     `bash` (`BASH_ENV`); uma nova entra na lista, revisada",
+                    d.texto,
+                    VARIAVEIS_DOS_JOBS.join(", ")
+                )),
+                _ => fora.push(format!(
+                    "{nome}: `{}` no `env:` do workflow, ou no de um job, que não é uma chave na \
+                     coluna das dele — a leitura não a lê, e os nomes dele são uma lista fechada",
+                    d.texto
+                )),
             }
         }
     }
@@ -6179,6 +6319,165 @@ jobs:
         // O passo é o de verdade: o `shell:` dele, e não o do texto.
         let (shell, _) = passo_da_acao(&casos[3].1, "conferir").expect("o passo");
         assert_eq!(shell, "/bin/true {0}");
+    }
+
+    /// O que o job escolhe para a ação (no lote A14, o I1, o I2 e o I3 do
+    /// adversário do lote A13, e o `HOME` e o `BASH_ENV` que o lote achou na
+    /// revisão): o `container:` de um job; no `env:` do workflow ou de um
+    /// job, o `LD_PRELOAD`, o `CC`, o `HOME`, o `XDG_CONFIG_HOME`, o
+    /// `BASH_ENV`, o `GIT_INDEX_FILE` — qualquer nome fora da lista —, o
+    /// valor na linha e uma linha que não é chave; o `GITHUB_ENV` de um passo;
+    /// e o checkout com um `with:` — outro commit, outro repositório — ou com
+    /// um `env:`. Passavam; cada um reprova, com a linha. O `env:` de um passo
+    /// fica com ele, o checkout com o `name:` passa, e os workflows do
+    /// repositório passam.
+    #[test]
+    fn adversario_a13_o_container_o_ambiente_e_o_checkout_dos_jobs() {
+        let job = "  testes:\n    steps:\n";
+        assert_eq!(OFICIAL.matches(job).count(), 1);
+        let checkout = "      - uses: actions/checkout@v4\n";
+        assert_eq!(OFICIAL.matches(checkout).count(), 1);
+        let no_job =
+            |linhas: &str| OFICIAL.replacen(job, &format!("  testes:\n{linhas}    steps:\n"), 1);
+        let casos: Vec<(&str, String, &str)> = vec![
+            (
+                "o container de um job",
+                no_job("    container: docker.io/library/rust:latest\n"),
+                "`container: docker.io/library/rust:latest` — o `container:` de um job",
+            ),
+            (
+                "o container com a imagem",
+                no_job("    container:\n      image: docker.io/library/rust:latest\n"),
+                "`container:` — o `container:` de um job",
+            ),
+            (
+                "o LD_PRELOAD no env do workflow",
+                format!("env:\n  LD_PRELOAD: ./ferramentas/x.so\n{OFICIAL}"),
+                "`LD_PRELOAD: ./ferramentas/x.so` no `env:`",
+            ),
+            (
+                "o CC no env do job",
+                no_job("    env:\n      CC: ./ferramentas/cc\n"),
+                "`CC: ./ferramentas/cc` no `env:`",
+            ),
+            (
+                "o HOME no env do job",
+                no_job("    env:\n      HOME: ${{ github.workspace }}/casa\n"),
+                "`HOME: ${{ github.workspace }}/casa` no `env:`",
+            ),
+            (
+                "o XDG_CONFIG_HOME no env do job",
+                no_job("    env:\n      XDG_CONFIG_HOME: ./casa\n"),
+                "`XDG_CONFIG_HOME: ./casa` no `env:`",
+            ),
+            (
+                "o BASH_ENV no env do job",
+                no_job("    env:\n      RUST_BACKTRACE: 1\n      BASH_ENV: ./ferramentas/x.sh\n"),
+                "`BASH_ENV: ./ferramentas/x.sh` no `env:`",
+            ),
+            (
+                "o GIT_INDEX_FILE no env do job",
+                no_job("    env:\n      GIT_INDEX_FILE: /tmp/x\n"),
+                "`GIT_INDEX_FILE: /tmp/x` no `env:`",
+            ),
+            (
+                "o env do job com o valor na linha",
+                no_job("    env: ${{ fromJSON(vars.AMBIENTE) }}\n"),
+                "`env: ${{ fromJSON(vars.AMBIENTE) }}` — o `env:` do workflow, ou o de um job, com o \
+                 valor na linha",
+            ),
+            (
+                "uma linha mais funda no env do job",
+                no_job("    env:\n      CARGO_TERM_COLOR: always\n        LD_PRELOAD: x\n"),
+                "`LD_PRELOAD: x` no `env:` do workflow, ou no de um job, que não é uma chave",
+            ),
+            (
+                "um nome da lista mais fundo no env do job",
+                no_job("    env:\n      CARGO_TERM_COLOR: always\n        RUST_BACKTRACE: 1\n"),
+                "`RUST_BACKTRACE: 1` no `env:` do workflow, ou no de um job, que não é uma chave",
+            ),
+            (
+                "uma lista no env do job",
+                no_job("    env:\n      - LD_PRELOAD=x\n"),
+                "`- LD_PRELOAD=x` no `env:` do workflow, ou no de um job, que não é uma chave",
+            ),
+            (
+                "o GITHUB_ENV de um passo",
+                OFICIAL.replacen(
+                    checkout,
+                    &format!("{checkout}      - run: echo \"LD_PRELOAD=x\" >> \"$GITHUB_ENV\"\n"),
+                    1,
+                ),
+                "`GITHUB_ENV` sobrepõe",
+            ),
+            (
+                "o checkout de outro commit",
+                OFICIAL.replacen(
+                    checkout,
+                    &format!("{checkout}        with:\n          ref: 1111111111111111111111111111111111111111\n"),
+                    1,
+                ),
+                "`with: ` no checkout",
+            ),
+            (
+                "o checkout de outro repositorio",
+                OFICIAL.replacen(
+                    checkout,
+                    &format!("{checkout}        with:\n          repository: outro/repositorio\n"),
+                    1,
+                ),
+                "`with: ` no checkout",
+            ),
+            (
+                "o checkout com o env",
+                OFICIAL.replacen(
+                    checkout,
+                    &format!("{checkout}        env:\n          GIT_INDEX_FILE: /tmp/x\n"),
+                    1,
+                ),
+                "`env: ` no checkout",
+            ),
+        ];
+        let mut cegos = Vec::new();
+        for (rotulo, texto, esperado) in &casos {
+            assert_ne!(texto, OFICIAL, "{rotulo}");
+            let fora = um(CI, texto);
+            if !fora.iter().any(|f| f.contains(*esperado)) {
+                cegos.push(format!("{rotulo}: {fora:#?}"));
+            }
+        }
+        assert!(cegos.is_empty(), "{cegos:#?}");
+        // O `env:` de um passo fica com ele; o do job, com os nomes da lista,
+        // passa; o checkout com o `name:` também.
+        for texto in [
+            OFICIAL.replacen(
+                "        run: cargo xtask test\n",
+                "        run: cargo xtask test\n        env:\n          DUKE_PARTE: 1/2\n",
+                1,
+            ),
+            no_job("    env:\n      DUKE_PARES: x86_64-aarch64\n      DUKE_NUCLEOS: 2\n"),
+            OFICIAL.replacen(
+                checkout,
+                "      - name: O checkout\n        uses: actions/checkout@v4\n",
+                1,
+            ),
+        ] {
+            assert_ne!(texto, OFICIAL);
+            assert_eq!(um(CI, &texto), Vec::<String>::new(), "{texto}");
+        }
+        // Os workflows do repositório passam.
+        for (nome, texto) in [
+            (CI, include_str!("../../.github/workflows/ci.yml")),
+            (
+                ".github/workflows/rede-principal.yml",
+                include_str!("../../.github/workflows/rede-principal.yml"),
+            ),
+        ] {
+            assert_eq!(
+                o_que_o_job_escolhe(nome, &linhas_de_codigo(texto)),
+                Vec::<String>::new()
+            );
+        }
     }
 
     /// O passo da ação como o texto de um bloco (no lote A13, o M2 do
