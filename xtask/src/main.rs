@@ -21040,10 +21040,10 @@ fn sob_arvore(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> R
     if !r.contains(r#""ok":true"#) {
         return Err(format!("arvore: set_value recusado\n  {r}"));
     }
-    let arvore = pedir(7703, "ui.tree", "{}")?;
-    if !arvore.contains(r#""value":"system.uptime""#) {
+    let antes = pedir(7703, "ui.tree", "{}")?;
+    if !antes.contains(r#""value":"system.uptime""#) {
         return Err(format!(
-            "arvore: a linha de comando nao ficou com o valor\n  {arvore}"
+            "arvore: a linha de comando nao ficou com o valor\n  {antes}"
         ));
     }
 
@@ -21056,11 +21056,13 @@ fn sob_arvore(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> R
         return Err(format!("arvore: confirm nao executou a linha\n  {r}"));
     }
 
-    // A resposta do comando foi desenhada no console, e a árvore a lê de lá.
-    let arvore = pedir(7705, "ui.tree", "{}")?;
-    if !arvore.contains("uptime_ms") {
+    // A resposta do comando foi desenhada no console, e a árvore a lê de lá:
+    // do texto do console, e só do que ele passou a mostrar depois do
+    // confirm — ver [`nova_no_console`].
+    let depois = pedir(7705, "ui.tree", "{}")?;
+    if !nova_no_console(&antes, &depois, "uptime_ms")? {
         return Err(format!(
-            "arvore: a resposta do comando nao apareceu no texto do console\n  {arvore}"
+            "arvore: a resposta do comando nao apareceu no texto do console\n  {depois}"
         ));
     }
     let log = pedir(7706, "log.tail", r#"{"count":16}"#)?;
@@ -21073,6 +21075,52 @@ fn sob_arvore(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> R
 
     println!("  [arvore] ok  set_value, confirm e a resposta lida de volta pela arvore");
     Ok(())
+}
+
+/// Se o console passou a mostrar, da árvore `antes` para a `depois`, uma
+/// linha com `marca`: a resposta de um comando, desenhada depois do confirm.
+///
+/// # Por que só o console, e só o que é novo
+///
+/// A conferência de antes procurava `uptime_ms` na árvore inteira, e a
+/// sonda do Terminal, duas antes, deixa a resposta de um `system.uptime` na
+/// grade dele — outra área de texto da mesma árvore. Um console que não
+/// desenhasse a resposta passava pelo texto velho do Terminal (o achado 4 do
+/// adversário do lote FUMAÇA-2). Agora conta só o `value` do elemento
+/// `console`, e nele só as linhas que a árvore de antes do confirm não
+/// mostrava: o console rola, e uma resposta mais antiga que continue na
+/// tela está nas duas. A linha da resposta do `system.uptime` traz o
+/// relógio da execução, e não se repete de uma execução para outra.
+fn nova_no_console(antes: &str, depois: &str, marca: &str) -> Result<bool, String> {
+    let texto = |arvore: &str| {
+        texto_do_console(arvore)
+            .ok_or_else(|| format!("arvore: a arvore nao traz o texto do console\n  {arvore}"))
+    };
+    let (antes, depois) = (texto(antes)?, texto(depois)?);
+    let mostradas: std::collections::BTreeSet<&str> = antes.lines().collect();
+    Ok(depois
+        .lines()
+        .any(|linha| linha.contains(marca) && !mostradas.contains(linha)))
+}
+
+/// O texto do console numa resposta de `ui.tree`: o `value` do elemento
+/// `console`, filho da tela, sem os escapes. `None` se a árvore não o traz.
+fn texto_do_console(arvore: &str) -> Option<String> {
+    let filhos = protocolo::json::Json(arvore.trim().as_bytes())
+        .member("result")?
+        .member("root")?
+        .member("children")?;
+    let mut i = 0;
+    while let Some(elemento) = filhos.item(i) {
+        if elemento.member("label").and_then(|l| l.as_str()) == Some("console") {
+            let valor = elemento.member("value")?;
+            // Sem os escapes, o texto nunca fica maior que o JSON dele.
+            let mut texto = vec![0u8; valor.0.len()];
+            return valor.desescapar_em(&mut texto).map(str::to_string);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Um pedido ao QMP, e a resposta dele.
@@ -23798,6 +23846,10 @@ fn sob_canal_tcp(
             Ok(_) => return Err(format!("tcp: {quem} entrou pela rede")),
         }
     }
+    // A recusa do pedido em claro vai à auditoria antes de a conexão fechar,
+    // e conta só a de depois deste ponto — ver [`recusa_do_aperto`].
+    let antes = numero_no_caminho(&pedir("audit.head", "{}")?, &["seq"])
+        .ok_or("tcp: o audit.head nao disse o numero")?;
     let mut cru = std::net::TcpStream::connect(("127.0.0.1", porta))
         .map_err(|e| format!("tcp: o canal nao aceitou conexao: {e}"))?;
     cru.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"system.info\",\"params\":{}}\n")
@@ -23810,10 +23862,10 @@ fn sob_canal_tcp(
         ));
     }
     drop(cru);
-    let cauda = pedir("audit.tail", r#"{"count":64}"#)?;
-    if !cauda.contains(r#""method":"session.open""#)
-        || !cauda.contains("quadro de tipo desconhecido (tcp 10.0.2.2:")
-    {
+    let cauda = pedir("audit.tail", &format!(r#"{{"after":{antes},"count":64}}"#))?;
+    let (achada, _) =
+        recusa_do_aperto(&cauda, antes, "quadro de tipo desconhecido (tcp 10.0.2.2:")?;
+    if achada.is_none() {
         return Err(format!(
             "tcp: a recusa do pedido em claro nao foi a auditoria com o par\n  {cauda}"
         ));
@@ -24043,8 +24095,11 @@ fn sob_canal_tcp(
         maior_na_saida / 1024
     );
 
-    // Quem conecta e não faz o aperto perde a conexão no prazo.
+    // Quem conecta e não faz o aperto perde a conexão no prazo, e a recusa
+    // que conta é a de depois deste ponto — ver [`recusa_do_aperto`].
     esperar_vagas_tcp_livres(&mut pedir)?;
+    let antes = numero_no_caminho(&pedir("audit.head", "{}")?, &["seq"])
+        .ok_or("tcp: o audit.head nao disse o numero")?;
     let inicio = Instant::now();
     let mut calado = std::net::TcpStream::connect(("127.0.0.1", porta))
         .map_err(|e| format!("tcp: o canal nao aceitou conexao: {e}"))?;
@@ -24056,15 +24111,28 @@ fn sob_canal_tcp(
             decorrido.as_millis()
         ));
     }
+    // A recusa vai à auditoria pelo coletor do kernel, num tique depois do
+    // fecho — ver `rede::canal::atender_pendencias`: em laço, cada leitura
+    // continuando da anterior.
     let limite = Instant::now() + Duration::from_secs(10);
+    let mut depois_de = antes;
     loop {
-        let cauda = pedir("audit.tail", r#"{"count":32}"#)?;
-        if cauda.contains("o aperto nao veio em 10 s (tcp 10.0.2.2:") {
+        let cauda = pedir(
+            "audit.tail",
+            &format!(r#"{{"after":{depois_de},"count":32}}"#),
+        )?;
+        let (achada, ultimo) = recusa_do_aperto(
+            &cauda,
+            depois_de,
+            "o aperto nao veio em 10 s (tcp 10.0.2.2:",
+        )?;
+        if achada.is_some() {
             break;
         }
+        depois_de = ultimo;
         if Instant::now() >= limite {
             return Err(format!(
-                "tcp: o prazo vencido nao foi a auditoria\n  {cauda}"
+                "tcp: o prazo vencido nao foi a auditoria (lidos os registros depois do {antes}, ate o {depois_de})\n  {cauda}"
             ));
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -24074,6 +24142,59 @@ fn sob_canal_tcp(
         decorrido.as_millis()
     );
     Ok(())
+}
+
+/// A recusa de um aperto pela rede numa resposta de `audit.tail`: um
+/// registro de depois de `depois_de` com o método `session.open`, o código
+/// `DENY_NOT_AUTHENTICATED` e `trecho` no detalhe — os três no mesmo
+/// registro. Devolve o número dele, se achou, e o do último registro de
+/// depois de `depois_de` que a resposta traz: de onde a leitura seguinte
+/// continua.
+///
+/// # Por que de depois, e no mesmo registro
+///
+/// A sonda do canal TCP lia as últimas da auditoria e conferia dois textos
+/// soltos: `"method":"session.open"`, que as recusas das duas chaves, pouco
+/// antes na mesma sonda, já satisfaziam, e o detalhe do pedido em claro. A
+/// recusa gravada com outro método passava pelo registro velho de outra
+/// recusa — a classe do P1 do lote FUMAÇA-USB, na auditoria em vez do log
+/// (o informativo 8 do adversário do lote FUMAÇA-2). O `depois_de` é o
+/// `audit.head` lido antes da conexão; o `after` do pedido já corta, e a
+/// conferência corta de novo, para não depender dele.
+fn recusa_do_aperto(
+    cauda: &str,
+    depois_de: u64,
+    trecho: &str,
+) -> Result<(Option<u64>, u64), String> {
+    let registros = apos(cauda, r#""records":["#)
+        .ok_or_else(|| "nao trouxe os registros".to_string())
+        .and_then(objetos_planos)
+        .map_err(|e| format!("tcp: o audit.tail nao se le: {e}\n  {cauda}"))?;
+    let (mut achada, mut ultimo) = (None, depois_de);
+    for campos in &registros {
+        let campo = |nome: &str| {
+            campos
+                .iter()
+                .find(|(n, _)| n == nome)
+                .and_then(|(_, v)| v.as_deref())
+                .unwrap_or_default()
+        };
+        let seq: u64 = campo("seq")
+            .parse()
+            .map_err(|_| format!("tcp: um registro da auditoria sem numero\n  {cauda}"))?;
+        if seq <= depois_de {
+            continue;
+        }
+        ultimo = ultimo.max(seq);
+        if achada.is_none()
+            && campo("method") == "session.open"
+            && campo("code") == "DENY_NOT_AUTHENTICATED"
+            && campo("detail").contains(trecho)
+        {
+            achada = Some(seq);
+        }
+    }
+    Ok((achada, ultimo))
 }
 
 /// O `id` do elemento da árvore marcado por `marca` — o papel e o rótulo,
@@ -30575,5 +30696,146 @@ mod testes {
             sem_motivo.no_prazo("agentes: prazo".into()),
             "agentes: prazo"
         );
+    }
+
+    /// A árvore confere a resposta do confirm no texto do console, e só no
+    /// que ele passou a mostrar depois do confirm (o achado 4 do adversário
+    /// do lote FUMAÇA-2): a resposta de um `system.uptime` na grade do
+    /// Terminal não conta, nem uma resposta velha que continue no console,
+    /// rolada ou não.
+    #[test]
+    fn a_resposta_do_confirm_e_a_nova_no_console() {
+        use super::*;
+        let escapado = |texto: &str| {
+            texto
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+        };
+        let arvore = |console: &str, terminal: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":7705,"result":{{"revision":9,"root":{{"id":1,"role":"screen","label":"tela","x":0,"y":0,"width":1280,"height":800,"actions":[],"children":[{{"id":2,"role":"text_area","label":"console","x":0,"y":32,"width":1280,"height":752,"value":"{}","value_complete":true,"actions":[],"children":[{{"id":3,"role":"text_field","label":"linha de comando","value":"","focused":true,"actions":["set_value","confirm"],"children":[]}}]}},{{"id":2147483714,"role":"window","label":"Terminal","x":40,"y":60,"width":640,"height":400,"actions":[],"children":[{{"id":2147483715,"role":"text_area","label":"terminal","value":"{}","actions":[],"children":[]}}]}}]}}}}}}"#,
+                escapado(console),
+                escapado(terminal)
+            )
+        };
+        let terminal = "duke> system.uptime\n{\n  \"uptime_ms\": 16450,\n  \"timer_hz\": 100\n}";
+        let antes = arvore("ola, dev (operador).\nduke> system.uptime", terminal);
+        // O console não desenhou a resposta: a do Terminal está na árvore,
+        // e não conta.
+        let sem_resposta = arvore("ola, dev (operador).\nduke> system.uptime\nduke>", terminal);
+        assert!(sem_resposta.contains("uptime_ms"));
+        assert_eq!(
+            nova_no_console(&antes, &sem_resposta, "uptime_ms"),
+            Ok(false)
+        );
+        // Desenhou.
+        let com_resposta = arvore(
+            "ola, dev (operador).\nduke> system.uptime\n{\n  \"uptime_ms\": 20450,\n  \"timer_hz\": 100\n}\nduke>",
+            terminal,
+        );
+        assert_eq!(
+            nova_no_console(&antes, &com_resposta, "uptime_ms"),
+            Ok(true)
+        );
+        // Uma resposta velha no console, que rolou uma linha e continua na
+        // tela, não é a deste confirm; a nova, com o relógio dela, é.
+        let velha = arvore(
+            "duke> system.uptime\n  \"uptime_ms\": 18000,\n}\nduke> system.uptime",
+            "",
+        );
+        let rolada = arvore("  \"uptime_ms\": 18000,\n}\nduke> system.uptime\nduke>", "");
+        assert_eq!(nova_no_console(&velha, &rolada, "uptime_ms"), Ok(false));
+        let nova = arvore(
+            "}\nduke> system.uptime\n{\n  \"uptime_ms\": 20450,\n}\nduke>",
+            "",
+        );
+        assert_eq!(nova_no_console(&velha, &nova, "uptime_ms"), Ok(true));
+        // O texto do console sai sem os escapes, e só do console.
+        assert_eq!(
+            texto_do_console(&com_resposta).as_deref(),
+            Some(
+                "ola, dev (operador).\nduke> system.uptime\n{\n  \"uptime_ms\": 20450,\n  \"timer_hz\": 100\n}\nduke>"
+            )
+        );
+        // Uma árvore sem o console é erro, e não um "não apareceu".
+        let sem_console = r#"{"jsonrpc":"2.0","id":7705,"result":{"revision":9,"root":null}}"#;
+        assert!(nova_no_console(&antes, sem_console, "uptime_ms").is_err());
+    }
+
+    /// A recusa de um aperto na auditoria é um registro de depois do pedido,
+    /// com o método, o código e o detalhe no mesmo registro (o informativo
+    /// 8 do adversário do lote FUMAÇA-2). A conferência de antes, dois
+    /// `contains` sobre a cauda, passava com a mesma resposta em que esta
+    /// não acha nada: o `session.open` de uma recusa de chave, e o detalhe
+    /// num registro de outro método.
+    #[test]
+    fn a_recusa_do_aperto_e_um_registro_de_depois_do_pedido() {
+        use super::*;
+        let registro = |seq: u64, metodo: &str, codigo: &str, detalhe: &str| {
+            format!(
+                r#"{{"seq":{seq},"ts_ms":{},"holder":"anonymous","session":9,"person_session":null,"agent":"","key":null,"role":"","method":"{metodo}","resource":"","result":"deny","code":"{codigo}","params":"","detail":"{detalhe}","prev":"00","link":"11","durable":false}}"#,
+                seq * 10
+            )
+        };
+        let cauda = |registros: &[String]| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":6801,"result":{{"durable_seq":150,"records":[{}]}}}}"#,
+                registros.join(",")
+            )
+        };
+        let claro = "quadro de tipo desconhecido (tcp 10.0.2.2:";
+        let negado = "DENY_NOT_AUTHENTICATED";
+        let velha = registro(
+            199,
+            "session.open",
+            negado,
+            "quadro de tipo desconhecido (tcp 10.0.2.2:50112, conexao 3)",
+        );
+        let de_chave = registro(
+            201,
+            "session.open",
+            negado,
+            "recusado: chave fora do registro (tcp 10.0.2.2:50114, conexao 4)",
+        );
+        let outro_metodo = registro(
+            202,
+            "system.info",
+            negado,
+            "quadro de tipo desconhecido (tcp 10.0.2.2:50116, conexao 5)",
+        );
+        let permitida = registro(
+            203,
+            "session.open",
+            "ALLOW",
+            "quadro de tipo desconhecido (tcp 10.0.2.2:50118, conexao 6)",
+        );
+        let soltas = cauda(&[velha.clone(), de_chave, outro_metodo, permitida]);
+        assert!(soltas.contains(r#""method":"session.open""#) && soltas.contains(claro));
+        assert_eq!(recusa_do_aperto(&soltas, 200, claro), Ok((None, 203)));
+        // O registro de antes do pedido não conta, mesmo inteiro.
+        assert_eq!(
+            recusa_do_aperto(&cauda(std::slice::from_ref(&velha)), 200, claro),
+            Ok((None, 200))
+        );
+        assert_eq!(
+            recusa_do_aperto(&cauda(&[velha]), 198, claro),
+            Ok((Some(199), 199))
+        );
+        // O de depois, inteiro.
+        let dele = registro(
+            204,
+            "session.open",
+            negado,
+            "quadro de tipo desconhecido (tcp 10.0.2.2:50120, conexao 7)",
+        );
+        assert_eq!(
+            recusa_do_aperto(&cauda(&[dele]), 200, claro),
+            Ok((Some(204), 204))
+        );
+        // Uma resposta sem os registros é erro.
+        let recusada =
+            r#"{"jsonrpc":"2.0","id":6801,"error":{"code":-32011,"message":"RATE_LIMIT"}}"#;
+        assert!(recusa_do_aperto(recusada, 200, claro).is_err());
     }
 }
