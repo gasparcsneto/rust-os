@@ -17054,6 +17054,57 @@ ARM a -3 ppm (2056 s em 2056), os dois dentro da guarda. O último job foi o
 dos fluxos entre dispositivos (x86_64 e aarch64), que esperou 48,2 minutos
 na fila e rodou 29,6; o maior, a atualização do ARM, com 49,9.
 
+A CI 533 (`c3acd71`, o lote ICACHE-2 e os parágrafos das CIs 530 e 531)
+passou 47 de 48 na primeira tentativa, em 76,2 minutos e 1071 de máquina.
+Reprovou só a parte 3/3 da suíte do ARM, 356 de 357, no mesmo caso do
+pareamento da CI 532, como se esperava: o commit é de antes da correção do
+shift (`759d2cc`). Os casos do lote ICACHE-2 passaram nas duas
+arquiteturas; na parte 3/3 do ARM, as duas metades do caso da marca e a
+remoção numa página privada deram o veredito na rodada 1, sem rodada
+repetida por um `tlbi` de outro núcleo. O holdover da bancada de tempo, na
+parte 3/3: o x86 a -88 ppm (2055 s em 2055) e o ARM a -6 ppm (2055 s em
+2055), os dois dentro da guarda. O último job foi o dos fluxos entre
+dispositivos (mesma arquitetura), que esperou 41,0 minutos na fila e rodou
+31,0; o maior, a bancada de tempo do x86, parte 3/3, com 45,9.
+
+A CI 534 (`9d1b067`, a correção do shift e o parágrafo da CI 532) passou
+verde, 48 de 48, na primeira tentativa, em 104,4 minutos e 1124 de máquina
+— esperou os runners das CIs 532 e 533. A parte 3/3 do ARM passou com o
+caso do pareamento, e o caso de controle do shift, no fim da tabela,
+passou nas duas arquiteturas. O holdover da bancada de tempo, na parte
+3/3: o x86 a -148 ppm (2057 s em 2057) e o ARM a -3 ppm (2056 s em 2056),
+os dois dentro da guarda. O último job foi o dos fluxos entre dispositivos
+(mesma arquitetura), que esperou 41,0 minutos na fila e rodou 24,3; o
+maior, a persistência do x86, parte 2/3, com 54,4.
+
+A CI 535 (`f500cdb`, o lote FUMAÇA-2) passou verde, 48 de 48, na primeira
+tentativa, em 69,8 minutos e 1099 de máquina. As fumaças passaram com as
+esperas que leem só o que entrou no anel depois do pedido e com a sonda da
+rede de cronômetro no retrato. O caso da tela, pelo bloco mais rápido, deu
+113% da cópia no x86 (1699 contra 1496 µs por tela; pelas somas, 101%) e
+104% no ARM (6327 contra 6071 µs; pelas somas, 104%): no runner, com o
+QEMU 10.2.1, uma tela do ARM custa três vezes e meia a da máquina de
+desenvolvimento, com o 8.2.2. O holdover da bancada de tempo, na parte
+3/3: o x86 a -127 ppm (2056 s em 2056) e o ARM a -3 ppm (2056 s em 2056),
+os dois dentro da guarda. O último job foi o do iniciador do ARM, parte
+1/2, que esperou 30,5 minutos na fila e rodou 28,6; o maior, a persistência
+do x86, parte 2/3, com 53,9.
+
+A CI 536 (`ea1cb6e`, o lote A10) passou verde, 48 de 48, na primeira
+tentativa, em 109,6 minutos e 1118 de máquina — esperou os runners da CI
+535. Foi a primeira rodada no runner de verdade do passo do ambiente da
+ação do compilador: ele passou nos 48 jobs, e a ação inteira levou de 15 a
+22 s em cada um, contra 14 a 23 s na CI 535 — a imagem não pôs variável do
+cargo ou do rustup fora da lista fechada, e o PATH e os proxies
+conferiram. No job de lints, a ação com as invariantes dentro levou 78 s,
+com o `xtask` compilado sem o cache, contra uns 16 s da ação e 30 do passo
+das invariantes na CI 535; o job inteiro, 6,8 minutos. O caso da tela deu
+116% no x86 e 105% no ARM. O holdover da bancada de tempo, na parte 3/3: o
+x86 a -137 ppm (2057 s em 2057) e o ARM a -3 ppm (2056 s em 2056), os dois
+dentro da guarda. O último job foi o do SDK da malha entre dispositivos
+(mesma arquitetura), que esperou 47,9 minutos na fila e rodou 23,4; o
+maior, a atualização do ARM, com 50,6.
+
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na
 508 e 58 na 509 —, e o que sobra até o piso é a ordem da fila, que não se
