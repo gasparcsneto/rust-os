@@ -29695,11 +29695,30 @@ fn smp_travas_excluem_entre_nucleos() -> Resultado {
 /// invalidações já são difundidas pelo hardware, e o caso confere que
 /// continuam sendo.
 ///
-/// Um fio fixo num núcleo secundário lê a página até a tradução estar na
-/// TLB dele e para. O primeiro núcleo troca o frame por baixo da mesma
-/// página — o antigo fica guardado, com o conteúdo antigo — e o fio lê de
-/// novo. Ler o conteúdo antigo é ler por uma tradução que deveria ter
-/// morrido.
+/// Um fio fixo em cada núcleo secundário lê a página até a tradução estar
+/// na TLB dele e para; este núcleo a lê também, e a tradução fica na dele.
+/// Este núcleo troca o frame por baixo da mesma página — o antigo fica
+/// guardado, com o conteúdo antigo —, cada leitor lê de novo, e este também.
+/// Ler o conteúdo antigo é ler por uma tradução que deveria ter morrido.
+///
+/// # Um leitor em cada núcleo secundário
+///
+/// Um leitor só conferia um núcleo: no x86, a remoção que avisasse só o
+/// núcleo dele passava, com os outros dois guardando a tradução velha (o
+/// achado 5 do adversário do lote ICACHE-3). Cada núcleo secundário tem o
+/// seu, e todos têm de ler o conteúdo novo.
+///
+/// # O conteúdo novo entra pelo mapa da memória física
+///
+/// O `NOVO` entra no frame novo pelo mapa da memória física, antes de ele
+/// ser mapeado, e não pela página. Escrito pela página, uma remoção que não
+/// invalidasse em núcleo nenhum o levaria, pela tradução velha deste
+/// núcleo, ao frame **antigo**, onde cada leitor, pela dele, o leria: o caso
+/// passava, no x86, com a remoção sem o `invlpg` e sem o aviso (o achado 1
+/// do adversário do lote ICACHE-3). Assim nenhuma escrita depois da troca
+/// passa por tradução nenhuma, e quem lê o `NOVO` leu o frame novo. E este
+/// núcleo lê a página depois dos leitores: a remoção tem de valer nele
+/// também.
 ///
 /// # O remapeamento não invalida nada
 ///
@@ -29709,27 +29728,32 @@ fn smp_travas_excluem_entre_nucleos() -> Resultado {
 /// `mapear_frame` faz numa entrada compartilhada a derrubava nos outros
 /// núcleos com ou sem o da remoção, e a remoção com o `tlbi` só deste núcleo
 /// passava aqui (o achado 1 do adversário do lote ICACHE-2). No x86, o
-/// `invlpg` do `mapear_frame` é só deste núcleo, e não alcança o leitor; o
-/// caso remapeia sem ele do mesmo jeito. A entrada era inválida, e nenhuma
-/// TLB guarda uma entrada inválida. No aarch64, sem o `tlbi` do mapeamento,
-/// o leitor faz `dsb ish; isb` entre o aviso e a leitura de depois — a
-/// segunda das três saídas de `mmu::privada_de_um_processo`.
+/// `invlpg` do `mapear_frame` é só deste núcleo, e não alcança os leitores;
+/// o caso remapeia sem ele do mesmo jeito, e o `invlpg` deste núcleo que
+/// sobra é o da remoção. A entrada era inválida, e nenhuma TLB guarda uma
+/// entrada inválida. No aarch64, sem o `tlbi` do mapeamento, cada leitor faz
+/// `dsb ish; isb` entre o aviso e a leitura de depois — a segunda das três
+/// saídas de `mmu::privada_de_um_processo`.
 ///
-/// # A janela, mascarada, e um terceiro núcleo
+/// # A janela, mascarada
 ///
-/// O leitor fica mascarado da primeira leitura à de depois, e este núcleo, a
-/// janela inteira: uma troca de espaço de um dos dois no meio derrubaria a
-/// tradução velha por conta própria — no aarch64, o `vmalle1is` da troca,
-/// de qualquer dos dois; no x86, a troca de `CR3` no núcleo do leitor, que
-/// descarta também as traduções do kernel, porque nenhuma é global. O aperto
-/// entre os dois é por fases, com desistência, como no caso da marca. E um
-/// `tlbi` difundido de um núcleo de fora do par, na janela, faria o mesmo:
-/// a rodada que o viu se repete ([`ate_uma_rodada_limpa`]).
+/// Cada leitor fica mascarado da primeira leitura à de depois, e este
+/// núcleo, a janela inteira: uma troca de espaço de um deles no meio
+/// derrubaria a tradução velha por conta própria — no aarch64, o
+/// `vmalle1is` da troca, de qualquer um; no x86, a troca de `CR3` no núcleo
+/// de um leitor, que descarta também as traduções do kernel, porque
+/// nenhuma é global. O aperto é por fases, com desistência, como no caso da
+/// marca. Com um leitor em cada núcleo secundário, todo núcleo ligado está
+/// na janela, mascarado: no aarch64 não sobra núcleo de fora que difunda um
+/// `tlbi` nela — a conta dos de fora fica vazia, e a rodada sai limpa —, e
+/// a rodada repetida de [`ate_uma_rodada_limpa`] fica de guarda para um
+/// núcleo ligado sem leitor.
 fn smp_desmapear_do_kernel_vale_em_todos_os_nucleos() -> Resultado {
     #[cfg(target_arch = "aarch64")]
     use crate::arch::aarch64::mmu::mapear_frame_sem_invalidar_de_teste as mapear_sem_invalidar;
     #[cfg(target_arch = "x86_64")]
     use crate::arch::x86_64::paginacao::mapear_frame_sem_invalidar_de_teste as mapear_sem_invalidar;
+    use crate::nucleos::MAX_NUCLEOS;
 
     const ANTIGO: u64 = 0xAAAA_AAAA_AAAA_AAAA;
     const NOVO: u64 = 0xBBBB_BBBB_BBBB_BBBB;
@@ -29738,40 +29762,45 @@ fn smp_desmapear_do_kernel_vale_em_todos_os_nucleos() -> Resultado {
     // kernel, compartilhada por todos os espaços, que ninguém mais usa.
     const PAGINA: u64 = crate::arch::BASE_DAS_PILHAS + 64 * 1024 * 1024;
 
-    // As fases: 0, o leitor nasce; 1, está pronto; 2, leia; 3, leu; 4, leia
-    // de novo; 5, leu de novo. De 90 em diante, o caso desistiu.
+    // As fases, que só o caso põe: 0, os leitores nascem; 2, leiam; 4, leiam
+    // de novo. De 90 em diante, o caso desistiu. E quantos leitores ficaram
+    // prontos, leram, leram de novo e saíram: cada um conta o seu passo.
     static FASE: AtomicU64 = AtomicU64::new(0);
-    static LIDO: AtomicU64 = AtomicU64::new(0);
-    static SAIU: AtomicBool = AtomicBool::new(false);
+    static PRONTOS: AtomicU64 = AtomicU64::new(0);
+    static LERAM: AtomicU64 = AtomicU64::new(0);
+    static LERAM_DE_NOVO: AtomicU64 = AtomicU64::new(0);
+    static SAIRAM: AtomicU64 = AtomicU64::new(0);
+    // O que o leitor de cada núcleo leu, antes e depois da troca.
+    static LIDO_ANTES: [AtomicU64; MAX_NUCLEOS] = [const { AtomicU64::new(0) }; MAX_NUCLEOS];
+    static LIDO_DEPOIS: [AtomicU64; MAX_NUCLEOS] = [const { AtomicU64::new(0) }; MAX_NUCLEOS];
 
-    extern "C" fn leitor(_argumento: u64) -> ! {
+    extern "C" fn leitor(nucleo: u64) -> ! {
+        let nucleo = nucleo as usize;
         // Mascarado da primeira leitura à de depois: uma troca de espaço
         // neste núcleo, no meio, derrubaria a tradução velha por conta
         // própria.
         crate::arch::sem_interrupcoes(|| {
-            // Só da fase 0: se o caso já desistiu, não volta atrás.
-            let _ = FASE.compare_exchange(0, 1, SeqCst, SeqCst);
             let fase_ou_desistiu = |f: u64| {
                 move || {
                     let agora = FASE.load(SeqCst);
                     agora == f || agora >= 90
                 }
             };
+            PRONTOS.fetch_add(1, SeqCst);
             if !girar_ate(fase_ou_desistiu(2), VOLTAS) || FASE.load(SeqCst) != 2 {
                 return;
             }
             let mut visto = 0;
             for _ in 0..1000 {
                 // SAFETY: a página está mapeada na fase 2 — o caso só a
-                // desmapeia depois de ver a fase 3, que só este fio põe.
+                // desmapeia depois de todo leitor ter contado a leitura.
                 visto = unsafe { (PAGINA as *const u64).read_volatile() };
             }
-            LIDO.store(visto, SeqCst);
-            // Só da fase 2: um `store` que caísse depois da desistência do
-            // caso a apagaria.
-            let _ = FASE.compare_exchange(2, 3, SeqCst, SeqCst);
-            // Espera sem tocar na página: entre a fase 3 e a 4 ela pode
-            // estar desmapeada, e lê-la seria uma falha de página no kernel.
+            LIDO_ANTES[nucleo].store(visto, SeqCst);
+            LERAM.fetch_add(1, SeqCst);
+            // Espera sem tocar na página: entre a leitura e a fase 4 ela
+            // pode estar desmapeada, e lê-la seria uma falha de página no
+            // kernel.
             if !girar_ate(fase_ou_desistiu(4), VOLTAS) || FASE.load(SeqCst) != 4 {
                 return;
             }
@@ -29784,25 +29813,25 @@ fn smp_desmapear_do_kernel_vale_em_todos_os_nucleos() -> Resultado {
             };
             // SAFETY: a fase 4 só começa com a página mapeada de novo.
             let depois = unsafe { (PAGINA as *const u64).read_volatile() };
-            LIDO.store(depois, SeqCst);
-            let _ = FASE.compare_exchange(4, 5, SeqCst, SeqCst);
+            LIDO_DEPOIS[nucleo].store(depois, SeqCst);
+            LERAM_DE_NOVO.fetch_add(1, SeqCst);
         });
-        SAIU.store(true, SeqCst);
+        SAIRAM.fetch_add(1, SeqCst);
         crate::fios::terminar()
     }
 
-    /// Mapeia `PAGINA` de novo, sobre um frame zerado, sem invalidar nada.
+    /// Mapeia `PAGINA` de novo, sobre um frame zerado e com o `NOVO` no
+    /// começo — os dois escritos pelo mapa da memória física, antes do
+    /// mapeamento —, sem invalidar nada.
     fn remapear() -> Result<(), &'static str> {
         let frame = crate::frames::alocar().ok_or("sem frame para o remapeamento")?;
         // SAFETY: o frame acabou de sair do alocador, e só nós o temos; ele é
-        // zerado pelo mapa da memória física, e então mapeado — o contrato de
-        // `mapear_frame`.
+        // zerado e escrito pelo mapa da memória física, e então mapeado — o
+        // contrato de `mapear_frame`.
         let r = unsafe {
-            core::ptr::write_bytes(
-                crate::arch::acesso_fisico(frame),
-                0,
-                crate::arch::TAMANHO_PAGINA as usize,
-            );
+            let novo = crate::arch::acesso_fisico(frame);
+            core::ptr::write_bytes(novo, 0, crate::arch::TAMANHO_PAGINA as usize);
+            (novo as *mut u64).write_volatile(NOVO);
             mapear_sem_invalidar(PAGINA, frame, crate::arch::Permissoes::DADOS)
         };
         if r.is_err() {
@@ -29811,39 +29840,69 @@ fn smp_desmapear_do_kernel_vale_em_todos_os_nucleos() -> Resultado {
         r
     }
 
-    let Some(alvo) = nucleos_secundarios().next() else {
+    let leitores: alloc::vec::Vec<usize> = nucleos_secundarios().collect();
+    if leitores.is_empty() {
         crate::log_info!("teste", "um nucleo so: nao ha outra TLB para conferir");
         return Ok(());
-    };
+    }
+    let quantos = leitores.len() as u64;
 
     let rodada = || -> Result<(Resultado, bool), &'static str> {
+        let inicio = crate::tempo::uptime_ms();
         FASE.store(0, SeqCst);
-        LIDO.store(0, SeqCst);
-        SAIU.store(false, SeqCst);
+        for conta in [&PRONTOS, &LERAM, &LERAM_DE_NOVO, &SAIRAM] {
+            conta.store(0, SeqCst);
+        }
+        for &nucleo in &leitores {
+            LIDO_ANTES[nucleo].store(0, SeqCst);
+            LIDO_DEPOIS[nucleo].store(0, SeqCst);
+        }
         crate::paginacao::mapear_novo(PAGINA, crate::arch::Permissoes::DADOS)?;
         // SAFETY: acabamos de mapear a página, e só este caso a usa.
         unsafe { (PAGINA as *mut u64).write_volatile(ANTIGO) };
-        if let Err(motivo) = crate::fios::criar_no_nucleo("teste-tlb", leitor, 0, alvo) {
-            let _ = crate::paginacao::desmapear_e_liberar(PAGINA);
-            return Err(motivo);
-        }
-        let pronto = esperar_ate(|| FASE.load(SeqCst) == 1, 300);
-        // A janela, mascarada também deste lado: no aarch64, uma troca de
-        // espaço daqui no meio difundiria um `vmalle1is` que a conta de fora
-        // do par não vê.
-        let r =
-            crate::arch::sem_interrupcoes(|| -> Result<(u64, bool, Option<u64>), &'static str> {
-                pronto.map_err(|_| "o leitor nao ficou pronto")?;
-                let par = [crate::arch::nucleo_atual(), alvo];
-                // Da primeira leitura do leitor — ele só lê depois da fase 2
-                // — à de depois — a fase 5 só vem depois dela.
-                let antes = tlbi_difundidos_de_fora(&par);
-                FASE.store(2, SeqCst);
-                if !girar_ate(|| FASE.load(SeqCst) == 3, VOLTAS) {
-                    return Err("o leitor nao leu a pagina antes da troca");
+        for (nascidos, &nucleo) in leitores.iter().enumerate() {
+            if let Err(motivo) =
+                crate::fios::criar_no_nucleo("teste-tlb", leitor, nucleo as u64, nucleo)
+            {
+                // Os que nasceram saem antes de a página sair do mapa.
+                FASE.store(99, SeqCst);
+                if esperar_ate(|| SAIRAM.load(SeqCst) == nascidos as u64, 300).is_ok() {
+                    let _ = crate::paginacao::desmapear_e_liberar(PAGINA);
                 }
-                if LIDO.load(SeqCst) != ANTIGO {
-                    return Err("o leitor nao viu a pagina antes da troca");
+                return Err(motivo);
+            }
+        }
+        let prontos = esperar_ate(|| PRONTOS.load(SeqCst) == quantos, 300);
+        // A janela, mascarada também deste lado: no aarch64, uma troca de
+        // espaço daqui no meio difundiria um `vmalle1is`.
+        let r =
+            crate::arch::sem_interrupcoes(|| -> Result<(u64, bool, bool, u64), &'static str> {
+                prontos.map_err(|_| "os leitores nao ficaram prontos")?;
+                // Este núcleo e o de cada leitor: os de fora, se sobrar
+                // algum.
+                let mut na_janela = [0usize; MAX_NUCLEOS];
+                na_janela[0] = crate::arch::nucleo_atual();
+                na_janela[1..=leitores.len()].copy_from_slice(&leitores);
+                let na_janela = &na_janela[..=leitores.len()];
+                // Da primeira leitura dos leitores — eles só leem depois da
+                // fase 2 — à de depois — que acaba antes da conta de todos.
+                let antes = tlbi_difundidos_de_fora(na_janela);
+                FASE.store(2, SeqCst);
+                if !girar_ate(|| LERAM.load(SeqCst) == quantos, VOLTAS) {
+                    return Err("os leitores nao leram a pagina antes da troca");
+                }
+                if leitores
+                    .iter()
+                    .any(|&n| LIDO_ANTES[n].load(SeqCst) != ANTIGO)
+                {
+                    return Err("um leitor nao viu a pagina antes da troca");
+                }
+                // E este núcleo lê também, já mascarado: a tradução dele está
+                // na TLB na hora da remoção, e nenhuma troca de espaço daqui
+                // a tira antes.
+                // SAFETY: a página está mapeada até a remoção, logo abaixo.
+                if unsafe { (PAGINA as *const u64).read_volatile() } != ANTIGO {
+                    return Err("este nucleo nao viu a pagina antes da troca");
                 }
                 // A troca: o frame antigo sai **sem** voltar ao alocador —
                 // fica com o conteúdo antigo, que é o que uma tradução velha
@@ -29853,39 +29912,50 @@ fn smp_desmapear_do_kernel_vale_em_todos_os_nucleos() -> Resultado {
                     crate::frames::liberar(antigo);
                     return Err(motivo);
                 }
-                // SAFETY: a página acabou de ser mapeada sobre um frame novo
-                // e zerado.
-                unsafe { (PAGINA as *mut u64).write_volatile(NOVO) };
                 FASE.store(4, SeqCst);
-                let leu = girar_ate(|| FASE.load(SeqCst) == 5, VOLTAS);
-                let limpa = antes.is_some() && tlbi_difundidos_de_fora(&par) == antes;
-                Ok((antigo, limpa, leu.then(|| LIDO.load(SeqCst))))
+                let leram = girar_ate(|| LERAM_DE_NOVO.load(SeqCst) == quantos, VOLTAS);
+                // SAFETY: a página está mapeada de novo, sobre o frame novo.
+                let aqui = unsafe { (PAGINA as *const u64).read_volatile() };
+                let limpa = antes.is_some() && tlbi_difundidos_de_fora(na_janela) == antes;
+                Ok((antigo, limpa, leram, aqui))
             });
-        if !matches!(r, Ok((_, _, Some(_)))) {
+        if !matches!(r, Ok((_, _, true, _))) {
             FASE.store(99, SeqCst);
         }
-        // A página só sai do mapa depois que o leitor saiu: lida de novo
-        // depois disso, seria uma falha de página no kernel. Se ele não
-        // sai, a página e os frames ficam.
-        if esperar_ate(|| SAIU.load(SeqCst), 300).is_err() {
-            return Err("o leitor nao saiu");
+        // A página só sai do mapa depois que todo leitor saiu: lida de novo
+        // depois disso, seria uma falha de página no kernel. Se um não sai,
+        // a página e os frames ficam.
+        if esperar_ate(|| SAIRAM.load(SeqCst) == quantos, 300).is_err() {
+            return Err("um leitor nao saiu");
         }
         let _ = crate::paginacao::desmapear_e_liberar(PAGINA);
-        let (antigo, limpa, depois) = r?;
+        let (antigo, limpa, leram, aqui) = r?;
         crate::frames::liberar(antigo);
-        let Some(depois) = depois else {
-            return Err("o leitor nao leu a pagina depois da troca");
-        };
+        if !leram {
+            return Err("um leitor nao leu a pagina depois da troca");
+        }
+        for &nucleo in &leitores {
+            crate::log_info!(
+                "teste",
+                "o nucleo {} leu {:#x} depois da troca",
+                nucleo,
+                LIDO_DEPOIS[nucleo].load(SeqCst)
+            );
+        }
         crate::log_info!(
             "teste",
-            "o nucleo {} leu {:#x} depois da troca",
-            alvo,
-            depois
+            "este nucleo leu {:#x} depois da troca; a rodada, com {} leitor(es), levou {} ms",
+            aqui,
+            quantos,
+            crate::tempo::uptime_ms().saturating_sub(inicio)
         );
-        let veredito = if depois == ANTIGO {
+        let depois = |n: &usize| LIDO_DEPOIS[*n].load(SeqCst);
+        let veredito = if leitores.iter().any(|n| depois(n) == ANTIGO) {
             Err("um nucleo continuou lendo o frame antigo: a traducao nao morreu nele")
-        } else if depois != NOVO {
-            Err("o leitor nao viu nem o conteudo novo nem o antigo")
+        } else if leitores.iter().any(|n| depois(n) != NOVO) {
+            Err("um leitor nao viu nem o conteudo novo nem o antigo")
+        } else if aqui != NOVO {
+            Err("este nucleo continuou lendo o frame antigo: a remocao nao invalidou nele")
         } else {
             Ok(())
         };
