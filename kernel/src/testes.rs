@@ -45299,6 +45299,17 @@ static CASOS: &[Caso] = &[
         nome: "suite: o executor ve e devolve o registro de pessoas que o caso mudou",
         f: suite_o_executor_ve_e_devolve_o_registro_de_pessoas,
     },
+    // E os controles do próprio executor: a impressão do registro vê cada
+    // campo, e o laço confere depois de cada caso (os achados 4 e 3 do
+    // adversário do lote ICACHE-3).
+    Caso {
+        nome: "suite: a impressao do registro ve cada campo, e o executor o devolve",
+        f: suite_a_impressao_do_registro_ve_cada_campo,
+    },
+    Caso {
+        nome: "suite: o executor confere o estado depois de cada caso",
+        f: suite_o_executor_confere_depois_de_cada_caso,
+    },
 ];
 
 /// A cauda da suíte: os casos que rodam em **toda** parte, depois da fatia
@@ -63820,10 +63831,13 @@ pub fn executar_todos() -> ! {
         // teste que emite log jogaria essas linhas no meio de uma linha de
         // relatório pela metade. Assim cada linha do relatório fica íntegra e
         // os logs do teste aparecem logo acima dela, que é onde ajudam.
+        CASOS_COMECADOS.fetch_add(1, SeqCst);
         let resultado = (caso.f)();
         // E o caso devolve o estado em que a suíte o deixou: o que não o
-        // devolve reprova, e o seguinte começa com ele de volta.
-        let devolvido = estado_da_suite_devolvido();
+        // devolve reprova, e o seguinte começa com ele de volta. A conta das
+        // conferências é a prova de que este laço confere — ver
+        // `suite_o_executor_confere_depois_de_cada_caso`.
+        let devolvido = conferir_depois_do_caso();
         let resultado = resultado.and(devolvido);
         #[cfg(target_arch = "aarch64")]
         anotar_o_fundo_das_excecoes(caso.nome);
@@ -63881,6 +63895,10 @@ pub fn executar_todos() -> ! {
 /// seguinte, ou no do coletor` solta o coletor com o journal solto, o
 /// espera gravar e vê a conta ter andado — sem ele, uma conta que nunca
 /// andasse passaria aqui (o achado 6 do adversário do lote A3 do #448).
+///
+/// O controle chama a conferência ele mesmo: prova a função, e não que o
+/// laço do executor a chama depois de cada caso — isso é
+/// [`suite_o_executor_confere_depois_de_cada_caso`].
 fn suite_o_executor_ve_e_devolve_o_coletor_e_o_journal() -> Resultado {
     use crate::persistencia as p;
     let antes = p::solturas_com_o_journal_solto_de_teste();
@@ -64038,6 +64056,10 @@ static IMPRESSAO_DO_REGISTRO: AtomicU64 = AtomicU64::new(0);
 /// no registro só apareceria quando a divisão em partes o pusesse antes de
 /// um que contasse os administradores, ou que dependesse de a chave de teste
 /// não ser um deles.
+///
+/// O controle chama a conferência ele mesmo: prova a função, e não que o
+/// laço do executor a chama depois de cada caso — isso é
+/// [`suite_o_executor_confere_depois_de_cada_caso`].
 fn suite_o_executor_ve_e_devolve_o_registro_de_identidade() -> Resultado {
     let chave = sigilo::publica_de(&ADMIN_DE_TESTE);
     let antes = crate::identidade::impressao_do_registro_de_teste();
@@ -64159,6 +64181,10 @@ fn anotar_as_pessoas(quando: &str) {
 /// controle positivo da conferência que o adversário do lote ICACHE-3 pediu
 /// (o achado 2). As quatro mudanças que não mudam o número de papéis são a
 /// guarda de uma comparação reduzida às contas, que passaria pela primeira.
+///
+/// O controle chama a conferência ele mesmo: prova a função, e não que o
+/// laço do executor a chama depois de cada caso — isso é
+/// [`suite_o_executor_confere_depois_de_cada_caso`].
 fn suite_o_executor_ve_e_devolve_a_politica_em_vigor() -> Resultado {
     if !politica_como_no_comeco() {
         return Err("a politica em vigor nao era a do comeco da suite");
@@ -64258,6 +64284,10 @@ fn suite_o_executor_ve_e_devolve_a_politica_em_vigor() -> Resultado {
 /// positivo da conferência que o adversário do lote ICACHE-3 pediu (o achado
 /// 2). As mudanças que não mudam quantas pessoas há são a guarda de uma
 /// comparação reduzida às contas, que passaria pela primeira.
+///
+/// O controle chama a conferência ele mesmo: prova a função, e não que o
+/// laço do executor a chama depois de cada caso — isso é
+/// [`suite_o_executor_confere_depois_de_cada_caso`].
 fn suite_o_executor_ve_e_devolve_o_registro_de_pessoas() -> Resultado {
     use crate::interpretador::PESSOA_DE_TESTE;
     use alloc::vec::Vec;
@@ -64359,11 +64389,127 @@ fn suite_o_executor_ve_e_devolve_o_registro_de_pessoas() -> Resultado {
     o_da_suite.map_err(|_| "o executor reprovou o estado da suite")
 }
 
+/// Quantos casos o executor começou nesta parte: o que
+/// [`suite_o_executor_confere_depois_de_cada_caso`] compara com
+/// [`CONFERENCIAS_DO_EXECUTOR`].
+static CASOS_COMECADOS: AtomicU64 = AtomicU64::new(0);
+
+/// Quantas vezes o laço do executor conferiu o estado depois de um caso
+/// ([`conferir_depois_do_caso`]).
+static CONFERENCIAS_DO_EXECUTOR: AtomicU64 = AtomicU64::new(0);
+
+/// A conferência que o laço do executor faz depois de cada caso — a de
+/// [`estado_da_suite_devolvido`], contada. Os casos de controle chamam a
+/// função eles mesmos, e a conta é só a do laço.
+fn conferir_depois_do_caso() -> Resultado {
+    CONFERENCIAS_DO_EXECUTOR.fetch_add(1, SeqCst);
+    estado_da_suite_devolvido()
+}
+
+/// O laço do executor conferiu o estado depois de cada caso desta parte:
+/// uma conferência por caso começado antes deste. Os controles do coletor,
+/// do shift, do registro, da política e das pessoas chamam
+/// [`estado_da_suite_devolvido`] eles mesmos: com o laço sem a conferência,
+/// todos passavam, e o caso que deixasse o estado mudado também (o achado 3
+/// do adversário do lote ICACHE-3). Este prova o laço, e não a função.
+fn suite_o_executor_confere_depois_de_cada_caso() -> Resultado {
+    let comecados = CASOS_COMECADOS.load(SeqCst);
+    let conferidos = CONFERENCIAS_DO_EXECUTOR.load(SeqCst);
+    crate::log_info!(
+        "teste",
+        "{} caso(s) comecado(s), {} conferencia(s) do executor",
+        comecados,
+        conferidos
+    );
+    if comecados < 2 || conferidos + 1 != comecados {
+        return Err("o executor nao conferiu o estado depois de cada caso");
+    }
+    Ok(())
+}
+
+/// A impressão do registro vê cada campo dele, e o executor o devolve: o
+/// papel de um agente, uma lápide, a ordem dos administradores, as fontes de
+/// hora e os editores, cada um mudado e devolvido antes do seguinte. O
+/// controle de antes só registra um administrador — a conta deles muda —, e
+/// uma impressão reduzida às contas passaria nele (o achado 4 do adversário
+/// do lote ICACHE-3).
+fn suite_a_impressao_do_registro_ve_cada_campo() -> Resultado {
+    let comeco = IMPRESSAO_DO_REGISTRO.load(SeqCst);
+    if crate::identidade::impressao_do_registro_de_teste() != comeco {
+        return Err("o registro nao era o do comeco da suite");
+    }
+    let esperado: Resultado = Err("o caso deixou o registro de identidade mudado");
+    let mut falhas: alloc::vec::Vec<&'static str> = alloc::vec::Vec::new();
+    let mut conferir = |qual: &'static str, mudar: &dyn Fn()| {
+        mudar();
+        let mudou = crate::identidade::impressao_do_registro_de_teste() != comeco;
+        let visto = estado_da_suite_devolvido();
+        let devolvido = crate::identidade::impressao_do_registro_de_teste() == comeco;
+        if !mudou || visto != esperado || !devolvido {
+            crate::log_error!(
+                "teste",
+                "{}: mudou {}, visto {:?}, devolvido {}",
+                qual,
+                mudou,
+                visto,
+                devolvido
+            );
+            falhas.push(qual);
+        }
+    };
+    let agente = crate::identidade::agentes()
+        .first()
+        .map(|a| a.nome.clone())
+        .ok_or("a imagem nao tem agente")?;
+    conferir("o papel de um agente", &|| {
+        let _ = crate::identidade::atribuir(&agente, "papel-de-controle");
+    });
+    conferir("uma lapide", &|| {
+        crate::identidade::aplicar_lapide(&[0x5a; 32])
+    });
+    conferir("a ordem dos administradores", &|| {
+        let grupo = crate::identidade::grupo_de_administradores();
+        let membros: alloc::vec::Vec<crate::identidade::MembroDeTeste> = grupo
+            .iter()
+            .rev()
+            .map(|a| {
+                (
+                    a.chave,
+                    a.nome.as_str(),
+                    a.papel.as_deref().unwrap_or(""),
+                    a.assinatura,
+                )
+            })
+            .collect();
+        crate::identidade::substituir_administradores_de_teste(&membros);
+    });
+    conferir("as fontes de hora", &|| {
+        let _ = crate::identidade::trocar_fontes_de_hora_de_teste(None);
+    });
+    conferir("os editores", &|| {
+        let _ = crate::identidade::trocar_editores_de_teste(alloc::vec::Vec::new());
+    });
+    let o_da_suite = estado_da_suite_devolvido();
+    if !falhas.is_empty() {
+        crate::log_error!(
+            "teste",
+            "a impressao nao viu, ou o executor nao devolveu: {:?}",
+            falhas
+        );
+        return Err("a impressao nao viu um campo do registro, ou o executor nao o devolveu");
+    }
+    o_da_suite.map_err(|_| "o executor reprovou o estado da suite")
+}
+
 /// O executor confere o shift do teclado que cada caso devolve
 /// ([`estado_da_suite_devolvido`]): o shift apertado reprova, e o executor o
 /// solta — a tecla seguinte sai minúscula. O controle positivo da conferência
 /// que a CI 532 pediu; sem ela, um caso que deixasse o shift apertado só
 /// apareceria quando a divisão em partes o pusesse antes de um que digita.
+///
+/// O controle chama a conferência ele mesmo: prova a função, e não que o
+/// laço do executor a chama depois de cada caso — isso é
+/// [`suite_o_executor_confere_depois_de_cada_caso`].
 fn suite_o_executor_ve_e_solta_o_shift_apertado() -> Resultado {
     crate::teclado::esvaziar();
     crate::teclado::evento(42, true);
