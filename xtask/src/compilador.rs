@@ -73,8 +73,10 @@
 //!   ele não imprime — e, fora do
 //!   conteúdo dos blocos, as formas que ela não lê reprovam
 //!   ([`quebras_que_a_leitura_nao_ve`], [`forma_que_a_leitura_nao_le`]), e
-//!   um checkout escrito numa delas não escapa da ordem —; a ação tem os
-//!   passos que conferem, fora do cargo, o
+//!   um checkout escrito numa delas não escapa da ordem —; a ação tem —
+//!   desde o lote A14, na forma que o runner lê, sem chave nem passo a mais,
+//!   e com o canal do passo que o confere ([`forma_da_acao`]) — os passos
+//!   que conferem, fora do cargo, o
 //!   ambiente, o PATH, os `rust-toolchain`, os artefatos, os links — desde
 //!   o lote A12, no commit e no caminho dos diretórios de saída — e os
 //!   submódulos do commit e o que não é pasta nesse caminho — desde o lote
@@ -84,7 +86,8 @@
 //!   ([`conferir_a_acao`], [`as_invariantes_na_acao`]) — desde o lote A13,
 //!   cada passo dela só com as chaves que a leitura lê nele, sem `if:`,
 //!   `continue-on-error:` nem `env:` a mais
-//!   ([`linhas_que_o_passo_da_acao_nao_le`]) —; e o canário, o
+//!   ([`linhas_que_o_passo_da_acao_nao_le`]), e, desde o lote A14, cada um
+//!   o item de `runs.steps` com o `id` dele, e não o texto de um bloco —; e o canário, o
 //!   único que sobrepõe — ele
 //!   testa o candidato —, não roda nos pushes, não usa o cache da CI, não
 //!   publica proveniência e repete os comandos do job de lints;
@@ -264,6 +267,16 @@ const PASSO_DO_EXECUTOR: &str = "executor";
 /// depois (o I2 dele). O passo recusa todo submódulo do commit, pelo modo
 /// do índice — o repositório não tem nenhum —, e, no caminho de um
 /// diretório de saída, o que existe e não é pasta.
+///
+/// # O canal que o passo `conferir` devolve, desde o lote A14
+///
+/// O `outputs.canal` da ação é a saída `canal` do passo `conferir`
+/// ([`forma_da_acao`]), e o passo a escreve com o canal que conferiu e
+/// instalou — a linha é uma marca dele: com um valor fixo, no
+/// `outputs.canal` ou no `echo` do passo, toda chave de cache levaria o
+/// mesmo texto em todo compilador, e "um cache é do compilador que o encheu"
+/// deixaria de valer, com o `cargo xtask invariantes` passando (o M2 do
+/// adversário do lote A13, e o N3 do revisor da rodada 6).
 const PASSOS_DA_ACAO: [(&str, &str, &[&str]); 4] = [
     (
         "ambiente",
@@ -294,6 +307,7 @@ const PASSOS_DA_ACAO: [(&str, &str, &[&str]); 4] = [
             "git diff --quiet HEAD -- rust-toolchain.toml sdk/modelo/rust-toolchain.toml",
             "export RUSTUP_TOOLCHAIN=\"$canal\"",
             "sysroot=$(rustc --print sysroot)",
+            "echo \"canal=$canal\" >> \"$GITHUB_OUTPUT\"",
         ],
     ),
     (
@@ -395,6 +409,13 @@ const CHAVES_DO_PASSO_DA_ACAO: [&str; 4] = ["name", "id", "uses", "with"];
 /// ([`linhas_que_o_passo_da_acao_nao_le`]). Desde o lote A13 (o M4 do
 /// adversário do lote A12).
 const CHAVES_DOS_PASSOS_DA_ACAO: [&str; 3] = ["name", "id", "shell"];
+
+/// As chaves de cima da ação do compilador, o que o runner lê nela: o nome,
+/// a descrição, as entradas, as saídas e os passos ([`forma_da_acao`]).
+/// Outra — o runner aceita qualquer uma, e não a roda — reprova: os passos
+/// postos nela passavam por eles (o M2 do adversário do lote A13). Desde o
+/// lote A14.
+const CHAVES_DA_ACAO: [&str; 5] = ["name", "description", "inputs", "outputs", "runs"];
 
 /// O workflow do canário: o único que sobrepõe o compilador.
 const CANARIO: &str = ".github/workflows/canario.yml";
@@ -1520,6 +1541,10 @@ struct Linha<'a> {
     recuo: usize,
     texto: &'a str,
     escalar: bool,
+    /// O número da linha no texto, a partir de 0, sem o BOM do começo: a
+    /// linha crua, com os comentários e o recuo — desde o lote A14, o
+    /// script de um passo da ação sai dela ([`passo_da_acao`]).
+    numero: usize,
 }
 
 /// As linhas de código de um YAML, sem os comentários de linha inteira nem
@@ -1533,8 +1558,9 @@ fn linhas_de_codigo(texto: &str) -> Vec<Linha<'_>> {
         .strip_prefix('\u{feff}')
         .unwrap_or(texto)
         .lines()
-        .filter(|l| !l.trim_start().starts_with('#'))
-        .map(|l| {
+        .enumerate()
+        .filter(|(_, l)| !l.trim_start().starts_with('#'))
+        .map(|(numero, l)| {
             let recuo = l.len() - l.trim_start().len();
             let texto = l.trim();
             let escalar = bloco.is_some_and(|coluna| texto.is_empty() || recuo > coluna);
@@ -1545,6 +1571,7 @@ fn linhas_de_codigo(texto: &str) -> Vec<Linha<'_>> {
                 recuo,
                 texto,
                 escalar,
+                numero,
             }
         })
         .collect()
@@ -2358,8 +2385,159 @@ fn chaves_de_cache<'a>(linhas: &[Linha<'a>]) -> Vec<&'a str> {
     chaves
 }
 
-/// A ação do compilador — `texto`, o [`ACAO_DO_COMPILADOR`] — tem os passos
-/// de [`PASSOS_DA_ACAO`], na ordem, cada um com o `shell:` dele, só com as
+/// A forma da ação do compilador — `linhas`, as de código dela —, fora do
+/// conteúdo dos blocos: as chaves de cima, as de [`CHAVES_DA_ACAO`], cada
+/// uma uma vez; a entrada `invariantes`, só ela, com a descrição, o
+/// `required` e o `default`; a saída `canal`, só ela, com a descrição e o
+/// valor do passo `conferir`; e o `runs:` com `using: composite` e os
+/// `steps:` — os passos de [`PASSOS_DA_ACAO`], na ordem, e só eles. Devolve
+/// o que não confere e, de cada item de `runs.steps`, o `id` e a linha dele.
+///
+/// # Por quê, desde o lote A14
+///
+/// [`conferir_a_acao`] achava cada passo pela primeira linha `id:` do
+/// arquivo, onde quer que ela estivesse, e não conferia o resto: os quatro
+/// passos numa chave a mais da raiz — que o runner aceita e não roda —,
+/// com o `runs.steps` de outro passo, ou com o `runs.using` de um programa
+/// em JavaScript; um quinto passo, entre o do executor e o das invariantes;
+/// e o `outputs.canal` com um valor fixo, que tira o compilador da chave de
+/// todo cache, passavam pelo `cargo xtask invariantes` (o M2 do adversário
+/// do lote A13). A ação continua a raiz da confiança: o script de um passo,
+/// com a revisão.
+fn forma_da_acao(linhas: &[Linha<'_>]) -> (Vec<String>, Vec<(String, usize)>) {
+    /// As linhas de dentro do valor da chave da linha `k` — ou do arquivo,
+    /// sem ela —: as de código, fora do conteúdo dos blocos, mais recuadas
+    /// que ela, até a primeira que não é; e, delas, as da coluna da
+    /// primeira, cada uma com a chave e o valor — nenhum, se não é uma
+    /// chave.
+    fn filhos<'a>(
+        linhas: &[Linha<'a>],
+        k: Option<usize>,
+    ) -> Vec<(usize, Option<(&'a str, &'a str)>)> {
+        let dentro: Vec<usize> = (k.map_or(0, |k| k + 1)..linhas.len())
+            .filter(|&j| !linhas[j].escalar && !linhas[j].texto.is_empty())
+            .take_while(|&j| k.is_none_or(|k| linhas[j].recuo > linhas[k].recuo))
+            .collect();
+        let Some(coluna) = dentro.first().map(|&j| linhas[j].recuo) else {
+            return Vec::new();
+        };
+        dentro
+            .into_iter()
+            .filter(|&j| linhas[j].recuo == coluna)
+            .map(|j| (j, chave_e_valor(linhas[j].texto)))
+            .collect()
+    }
+    /// As chaves de dentro de `k`, que são exatamente as `esperadas`, cada
+    /// uma uma vez — ou o erro em `fora`, com `onde` —, com a linha e o valor
+    /// de cada uma.
+    fn exatas<'a>(
+        linhas: &[Linha<'a>],
+        k: Option<usize>,
+        onde: &str,
+        esperadas: &[&str],
+        fora: &mut Vec<String>,
+    ) -> Vec<(usize, &'a str, &'a str)> {
+        let mut chaves = Vec::new();
+        for (j, chave) in filhos(linhas, k) {
+            match chave {
+                Some((c, v)) => chaves.push((j, c, v)),
+                None => fora.push(format!(
+                    "{ACAO_DO_COMPILADOR}: `{}` em {onde}, que a forma da ação não lê",
+                    linhas[j].texto
+                )),
+            }
+        }
+        let mut nomes: Vec<&str> = chaves.iter().map(|&(_, c, _)| c).collect();
+        nomes.sort_unstable();
+        let mut certas = esperadas.to_vec();
+        certas.sort_unstable();
+        if nomes != certas {
+            fora.push(format!(
+                "{ACAO_DO_COMPILADOR}: {onde} tem as chaves {nomes:?}, e não {certas:?} — o \
+                 runner leria a ação de outra forma que a das regras daqui"
+            ));
+        }
+        chaves
+    }
+    let mut fora = Vec::new();
+    let mut passos = Vec::new();
+    let topo = exatas(linhas, None, "a raiz", &CHAVES_DA_ACAO, &mut fora);
+    let de = |nome: &str| {
+        topo.iter()
+            .find(|&&(_, c, _)| c == nome)
+            .map(|&(j, _, _)| j)
+    };
+    if let Some(k) = de("inputs") {
+        for (j, _, _) in exatas(linhas, Some(k), "`inputs`", &["invariantes"], &mut fora) {
+            let esperadas = ["description", "required", "default"];
+            exatas(
+                linhas,
+                Some(j),
+                "`inputs.invariantes`",
+                &esperadas,
+                &mut fora,
+            );
+        }
+    }
+    if let Some(k) = de("outputs") {
+        for (j, _, _) in exatas(linhas, Some(k), "`outputs`", &["canal"], &mut fora) {
+            let esperadas = ["description", "value"];
+            for (_, c, v) in exatas(linhas, Some(j), "`outputs.canal`", &esperadas, &mut fora) {
+                if c == "value" && sem_aspas(v) != "${{ steps.conferir.outputs.canal }}" {
+                    fora.push(format!(
+                        "{ACAO_DO_COMPILADOR}: `outputs.canal` vale `{v}`, e não o canal do \
+                         passo `conferir` (`${{{{ steps.conferir.outputs.canal }}}}`): a chave de \
+                         todo cache leva o canal do compilador que a encheu"
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(k) = de("runs") {
+        for (j, c, v) in exatas(linhas, Some(k), "`runs`", &["using", "steps"], &mut fora) {
+            if c == "using" && sem_aspas(v) != "composite" {
+                fora.push(format!(
+                    "{ACAO_DO_COMPILADOR}: `runs.using` é `{v}`, e não `composite`: o runner \
+                     rodaria outro programa no lugar dos passos"
+                ));
+            }
+            if c != "steps" {
+                continue;
+            }
+            for (item, _) in filhos(linhas, Some(j)) {
+                let l = &linhas[item];
+                let id = (l.texto == "-" || l.texto.starts_with("- "))
+                    .then(|| chaves_do_item(linhas, item))
+                    .and_then(|chaves| chaves.into_iter().find(|c| c.chave == "id"));
+                match id {
+                    Some(c) => passos.push((sem_aspas(c.valor).to_string(), c.linha)),
+                    None => fora.push(format!(
+                        "{ACAO_DO_COMPILADOR}: `{}` em `runs.steps`, que não é um passo com \
+                         `id:`",
+                        l.texto
+                    )),
+                }
+            }
+        }
+    }
+    let ids: Vec<&str> = passos.iter().map(|(id, _)| id.as_str()).collect();
+    let esperados = PASSOS_DA_ACAO.map(|(id, _, _)| id);
+    if ids != esperados {
+        fora.push(format!(
+            "{ACAO_DO_COMPILADOR}: os passos de `runs.steps` são {ids:?}, e não {esperados:?}: \
+             um passo a mais, ou noutro lugar, faz o que nenhuma regra daqui lê"
+        ));
+    }
+    (fora, passos)
+}
+
+/// A ação do compilador — `texto`, o [`ACAO_DO_COMPILADOR`] — tem a forma
+/// que o runner lê como a ação — desde o lote A14 ([`forma_da_acao`]): as
+/// chaves de cima, a entrada, o `outputs.canal` do passo `conferir`, o
+/// `runs.using: composite` e o `runs.steps` só com os passos daqui — e os
+/// passos de [`PASSOS_DA_ACAO`], na ordem — cada um, desde o lote A14, o
+/// item de `runs.steps` com o `id` dele, e não o texto de um bloco —, cada
+/// um com o `shell:` dele, só com as
 /// chaves que a leitura lê nele ([`linhas_que_o_passo_da_acao_nao_le`],
 /// desde o lote A13) e com cada marca dele numa linha de código do script;
 /// nos dois em Python, a tupla
@@ -2392,14 +2570,12 @@ fn chaves_de_cache<'a>(linhas: &[Linha<'a>]) -> Vec<&'a str> {
 /// qualquer linha: o `""` da raiz aparecia noutra linha do script, e tirar
 /// a raiz da tupla não se acusava (o E5 do revisor do lote A9).
 fn conferir_a_acao(texto: &str) -> Vec<String> {
-    let mut fora = Vec::new();
     let linhas = linhas_de_codigo(texto);
-    let posicao = |id: &str| {
-        linhas.iter().position(|l| {
-            chave_e_valor(l.texto)
-                .is_some_and(|(chave, valor)| chave == "id" && sem_aspas(valor) == id)
-        })
-    };
+    // Desde o lote A14: a forma da ação, e cada passo, o item de
+    // `runs.steps` com o `id` dele — e não a primeira linha `id:` do
+    // arquivo, que podia ser o texto de um bloco ([`forma_da_acao`]).
+    let (mut fora, passos) = forma_da_acao(&linhas);
+    let posicao = |id: &str| passos.iter().find(|(p, _)| p == id).map(|&(_, k)| k);
     let mut anterior: Option<(&str, usize)> = None;
     for (id, shell_esperado, marcas) in PASSOS_DA_ACAO {
         let Some(aqui) = posicao(id) else {
@@ -2487,18 +2663,26 @@ fn conferir_a_acao(texto: &str) -> Vec<String> {
             }
         }
     }
-    // A entrada das invariantes, e o passo só com ela, no toolchain fixado.
+    // A entrada das invariantes, e o passo só com ela, no toolchain fixado —
+    // desde o lote A14, pelas chaves do passo, e não por uma linha qualquer
+    // do texto dele, que podia ser a do script.
     let entrada = linhas.windows(2).any(|par| {
-        chave_e_valor(par[0].texto) == Some(("inputs", ""))
+        !par[0].escalar
+            && par[0].recuo == 0
+            && chave_e_valor(par[0].texto) == Some(("inputs", ""))
             && chave_e_valor(par[1].texto) == Some(("invariantes", ""))
     });
-    let do_passo = passo_cru(texto, "invariantes");
+    let do_passo = posicao("invariantes")
+        .map(|k| chaves_do_item(&linhas, k))
+        .unwrap_or_default();
     let so_com_a_entrada = do_passo
         .iter()
-        .any(|l| l.trim() == "if: inputs.invariantes == 'true'");
+        .any(|c| c.chave == "if" && c.valor == "inputs.invariantes == 'true'");
     let no_canal_fixado = do_passo
         .iter()
-        .any(|l| l.trim() == "RUSTUP_TOOLCHAIN: ${{ steps.conferir.outputs.canal }}");
+        .filter(|c| c.chave == "env")
+        .flat_map(|c| chaves_de_dentro(&linhas, c))
+        .any(|c| c.chave == "RUSTUP_TOOLCHAIN" && c.valor == "${{ steps.conferir.outputs.canal }}");
     if !entrada || !so_com_a_entrada || !no_canal_fixado {
         fora.push(format!(
             "{ACAO_DO_COMPILADOR}: a entrada `invariantes`, logo no começo das `inputs:`, e o passo \
@@ -2740,58 +2924,49 @@ fn as_invariantes_na_acao(ci: &str) -> Vec<String> {
     }
 }
 
-/// As linhas do passo `id` de uma ação composta — `acao`, o texto do
-/// `action.yml` —: do item de lista que o contém — a linha com o `- ` no
-/// recuo dos passos — ao item seguinte, ou ao que tiver recuo menor. Nenhuma,
-/// sem o passo.
-fn passo_cru<'a>(acao: &'a str, id: &str) -> Vec<&'a str> {
-    let linhas: Vec<&str> = acao.lines().collect();
-    let recuo = |l: &str| l.len() - l.trim_start().len();
-    let Some(do_id) = linhas.iter().position(|l| {
-        let t = l.trim();
-        chave_e_valor(t).is_some_and(|(chave, valor)| chave == "id" && sem_aspas(valor) == id)
-    }) else {
-        return Vec::new();
-    };
-    // O item do passo: o `- ` no id, ou na linha de cima mais próxima com
-    // recuo menor.
-    let Some(comeco) = (0..=do_id)
-        .rev()
-        .find(|&i| linhas[i].trim_start().starts_with("- "))
-    else {
-        return Vec::new();
-    };
-    let recuo_do_item = recuo(linhas[comeco]);
-    let fim = (comeco + 1..linhas.len())
-        .find(|&i| {
-            let l = linhas[i];
-            !l.trim().is_empty()
-                && (recuo(l) < recuo_do_item
-                    || (recuo(l) == recuo_do_item && l.trim_start().starts_with("- ")))
-        })
-        .unwrap_or(linhas.len());
-    linhas[comeco..fim].to_vec()
-}
-
 /// O passo `id` de uma ação composta — `acao`, o texto do `action.yml` —: o
-/// `shell:` e o script do `run: |`, sem o recuo dele. O passo é o de
-/// [`passo_cru`]; o script, das linhas mais recuadas que o `run:`, as vazias
-/// inclusive.
+/// `shell:` e o script do `run: |`, sem o recuo dele. O passo é o item de
+/// `runs.steps` com o `id` ([`forma_da_acao`]); o `shell:` e o `run:`, as
+/// chaves dele ([`chaves_do_item`]); e o script, o conteúdo do bloco do
+/// `run:`, cru — as linhas mais recuadas que ele, as vazias inclusive.
+///
+/// # O item, e as chaves dele, desde o lote A14
+///
+/// O passo era o texto do arquivo da primeira linha `id:` ao item seguinte,
+/// e o `shell:`, a primeira linha dele com a chave: uma cópia do passo como
+/// o texto de um bloco de um passo anterior — uma string do Python, um
+/// heredoc —, ou um `shell: bash` como texto no começo do script, com o
+/// `shell:` de verdade depois do bloco, eram o passo para as regras; e o de
+/// verdade rodava `/bin/true {0}`, ou voltava a aceitar o `if:`, o
+/// `continue-on-error:` e o `env:` que o lote A13 recusou (o M1 do
+/// adversário do lote A13).
 fn passo_da_acao(acao: &str, id: &str) -> Option<(String, String)> {
     let recuo = |l: &str| l.len() - l.trim_start().len();
-    let passo = passo_cru(acao, id);
-    let valor_de = |chave: &str| {
-        passo
-            .iter()
-            .find_map(|l| chave_e_valor(l.trim()).filter(|(c, _)| *c == chave))
-            .map(|(_, v)| v.to_string())
-    };
-    let shell = valor_de("shell")?;
-    let run = passo.iter().position(|l| {
-        chave_e_valor(l.trim()).is_some_and(|(c, v)| c == "run" && (v == "|" || v == "|-"))
-    })?;
-    let recuo_do_run = recuo(passo[run]);
-    let corpo: Vec<&str> = passo[run + 1..]
+    let linhas = linhas_de_codigo(acao);
+    let cruas: Vec<&str> = acao
+        .strip_prefix('\u{feff}')
+        .unwrap_or(acao)
+        .lines()
+        .collect();
+    let (_, passos) = forma_da_acao(&linhas);
+    let &(_, do_id) = passos.iter().find(|(p, _)| p == id)?;
+    let chaves = chaves_do_item(&linhas, do_id);
+    let shell = chaves
+        .iter()
+        .find(|c| c.chave == "shell")?
+        .valor
+        .to_string();
+    let run = chaves
+        .iter()
+        .find(|c| c.chave == "run" && (c.valor == "|" || c.valor == "|-"))?;
+    // O conteúdo do bloco: as linhas cruas da do `run:` à primeira de código
+    // fora dele.
+    let de = linhas[run.linha].numero;
+    let ate = (run.linha + 1..linhas.len())
+        .find(|&k| !linhas[k].escalar)
+        .map_or(cruas.len(), |k| linhas[k].numero);
+    let recuo_do_run = recuo(cruas[de]);
+    let corpo: Vec<&str> = cruas[de + 1..ate]
         .iter()
         .copied()
         .take_while(|l| l.trim().is_empty() || recuo(l) > recuo_do_run)
@@ -5688,6 +5863,171 @@ jobs:
              - uses: b\n\n      - run: c\n        with:\n          - uses: d\n",
         );
         assert_eq!(passos_do_job(&job), vec![6, 8]);
+    }
+
+    /// A forma da ação, e cada passo pelo item dele (no lote A14, o M1 e o
+    /// M2 do adversário do lote A13). Passavam: uma cópia de um passo, como
+    /// o texto de um bloco de um passo anterior — uma string do Python, um
+    /// heredoc —,
+    /// com o de verdade com `if: false`, `continue-on-error: true` ou um
+    /// embrulho no `env:`; o `shell:` de verdade depois do bloco, com o
+    /// esperado como texto no começo do script; o `env:` das invariantes só
+    /// como texto; os quatro passos numa chave a mais da raiz, com o
+    /// `runs.steps` de outro passo, ou com o `runs.using` de um programa; o
+    /// `runs.using` de outro tipo, com os passos; um
+    /// quinto passo; o `outputs.canal` fixo, ou o canal fixo no `echo` do
+    /// passo `conferir` — o N3 do revisor da rodada 6 —; e uma chave a mais
+    /// na entrada, com um `id:`. Cada um reprova. A ação do repositório
+    /// passa — também
+    /// com o CRLF e o BOM do começo —, e o passo é o item de `runs.steps`.
+    #[test]
+    fn adversario_a13_a_forma_da_acao_e_os_passos_pelo_item() {
+        assert_eq!(conferir_a_acao(ACAO), Vec::<String>::new());
+        assert_eq!(
+            conferir_a_acao(&ACAO.replace('\n', "\r\n")),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            conferir_a_acao(&format!("\u{feff}{ACAO}")),
+            Vec::<String>::new()
+        );
+        let (shell, script) = passo_da_acao(ACAO, "conferir").expect("o passo");
+        assert_eq!(shell, "bash");
+        assert!(script.starts_with("set -euo pipefail\n"), "{script}");
+        let no_ambiente = "        erros = []\n        # O ambiente do job, pela lista fechada.\n";
+        let no_executor = "        erros = []\n        for diretorio in DIRETORIOS:\n";
+        let do_conferir = "    - id: conferir\n      shell: bash\n      run: |\n";
+        assert_eq!(ACAO.matches(no_ambiente).count(), 1);
+        assert_eq!(ACAO.matches(no_executor).count(), 1);
+        assert_eq!(ACAO.matches(do_conferir).count(), 1);
+        // As cópias, como o texto de uma string do Python: as linhas que as
+        // regras de antes liam.
+        let copia_do_conferir = "        NOTA = \"\"\"\n            - id: conferir\n              shell: \
+                                 bash\n              run: |\n                git diff --quiet HEAD -- \
+                                 rust-toolchain.toml sdk/modelo/rust-toolchain.toml\n                \
+                                 export RUSTUP_TOOLCHAIN=\"$canal\"\n                sysroot=$(rustc \
+                                 --print sysroot)\n        \"\"\"\n";
+        let copia_das_invariantes = "        NOTA = \"\"\"\n            - id: invariantes\n              \
+                                     if: inputs.invariantes == 'true'\n              shell: bash\n              \
+                                     env:\n                RUSTUP_TOOLCHAIN: ${{ \
+                                     steps.conferir.outputs.canal }}\n              run: |\n                \
+                                     cargo xtask invariantes\n        \"\"\"\n";
+        let com = |onde: &str, copia: &str| ACAO.replacen(onde, &format!("{copia}{onde}"), 1);
+        let entrada = "      if: inputs.invariantes == 'true'\n";
+        let canal = "        RUSTUP_TOOLCHAIN: ${{ steps.conferir.outputs.canal }}\n";
+        let fim_do_conferir = "        echo \"canal=$canal\" >> \"$GITHUB_OUTPUT\"\n";
+        let runs = "runs:\n  using: composite\n  steps:\n";
+        let um_passo = "    - id: conferir\n      shell: bash\n      run: |\n        echo \
+                        \"canal=nightly-2026-11-15\" >> \"$GITHUB_OUTPUT\"\n";
+        let (antes_de_runs, de_runs) = ACAO.split_at(ACAO.find(runs).expect("o runs"));
+        let passos = &de_runs["runs:\n  using: composite\n".len()..];
+        let casos: Vec<(&str, String)> = vec![
+            (
+                "o conferir com if: false, e uma copia no ambiente",
+                com(no_ambiente, copia_do_conferir).replacen(
+                    "\n    - id: conferir\n",
+                    "\n    - id: conferir\n      if: false\n",
+                    1,
+                ),
+            ),
+            (
+                "as invariantes com continue-on-error, e uma copia no executor",
+                com(no_executor, copia_das_invariantes).replacen(
+                    &format!("\n    - id: invariantes\n{entrada}"),
+                    &format!("\n    - id: invariantes\n{entrada}      continue-on-error: true\n"),
+                    1,
+                ),
+            ),
+            (
+                "as invariantes com um embrulho no env, e uma copia no executor",
+                com(no_executor, copia_das_invariantes).replacen(
+                    &format!("      env:\n{canal}"),
+                    &format!("      env:\n{canal}        RUSTC_WRAPPER: ./x\n"),
+                    1,
+                ),
+            ),
+            (
+                "o shell do conferir depois do bloco, e o esperado como texto",
+                ACAO.replacen(
+                    do_conferir,
+                    "    - id: conferir\n      run: |\n        : <<'NOTA'\n        shell: bash\n        \
+                     NOTA\n",
+                    1,
+                )
+                .replacen(
+                    fim_do_conferir,
+                    &format!("{fim_do_conferir}      shell: /bin/true {{0}}\n"),
+                    1,
+                ),
+            ),
+            (
+                "o env das invariantes so como texto",
+                ACAO.replacen(
+                    &format!("      env:\n{canal}      run: |\n"),
+                    &format!("      run: |\n        : <<'NOTA'\n{canal}        NOTA\n"),
+                    1,
+                ),
+            ),
+            (
+                "os passos numa chave a mais da raiz",
+                format!("{antes_de_runs}copia:\n{passos}{runs}{um_passo}"),
+            ),
+            (
+                "o runs de um programa em JavaScript",
+                format!("{antes_de_runs}runs:\n  using: node20\n  main: x.js\ncopia:\n{passos}"),
+            ),
+            (
+                "o runs.using de outro tipo, com os passos",
+                ACAO.replacen("  using: composite\n", "  using: node20\n", 1),
+            ),
+            (
+                "um quinto passo",
+                ACAO.replacen(
+                    "    - id: invariantes\n",
+                    "    - id: depois\n      shell: bash\n      run: |\n        echo x\n\n    - id: \
+                     invariantes\n",
+                    1,
+                ),
+            ),
+            (
+                "o canal fixo",
+                ACAO.replacen(
+                    "    value: ${{ steps.conferir.outputs.canal }}\n",
+                    "    value: nightly-2026-11-15\n",
+                    1,
+                ),
+            ),
+            (
+                "o canal fixo no echo do conferir",
+                ACAO.replacen(
+                    fim_do_conferir,
+                    "        echo \"canal=nightly-2026-11-15\" >> \"$GITHUB_OUTPUT\"\n",
+                    1,
+                ),
+            ),
+            (
+                "uma chave a mais na entrada, com um id",
+                ACAO.replacen(
+                    "    default: 'false'\n",
+                    "    default: 'false'\n    id: ambiente\n",
+                    1,
+                ),
+            ),
+        ];
+        let mut cegos = Vec::new();
+        for (rotulo, texto) in &casos {
+            assert_ne!(texto, ACAO, "{rotulo}");
+            if conferir_a_acao(texto).is_empty() {
+                cegos.push(*rotulo);
+            }
+        }
+        assert!(
+            cegos.is_empty(),
+            "a conferência da ação não acusou: {cegos:?}"
+        );
+        // O passo é o de verdade: o `shell:` dele, e não o do texto.
+        let (shell, _) = passo_da_acao(&casos[3].1, "conferir").expect("o passo");
+        assert_eq!(shell, "/bin/true {0}");
     }
 
     /// O passo da ação como o texto de um bloco (no lote A13, o M2 do
