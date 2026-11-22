@@ -11,7 +11,9 @@
 # ambiente conferido, sem nada do repositório antes.
 #
 # Roda logo depois do checkout, antes do cache e de qualquer `cargo` (o
-# `cargo xtask invariantes` confere a ordem), em quatro passos:
+# `cargo xtask invariantes` confere a ordem, e, desde o lote A11, que o
+# passo que a usa não tem `if:` nem `continue-on-error:`, que a deixariam
+# sem rodar ou o job seguir com ela reprovada), em quatro passos:
 #
 # 1. `ambiente`, em Python — o do sistema, `/usr/bin/python3`, e não o do
 #    PATH, que é o que ele confere —, antes de qualquer programa do
@@ -19,8 +21,9 @@
 #    - o ambiente do job, por uma lista fechada: dos nomes que o cargo, o
 #      rustc, o rustdoc, o rustfmt e o rustup leem — os que começam por
 #      `CARGO`, `RUST` ou `__CARGO` —, só os que a CI põe (a cor do
-#      terminal e o `RUST_BACKTRACE`) e os da imagem do runner (o
-#      `CARGO_HOME` e o `RUSTUP_HOME`); um nome de fora é erro, com o nome:
+#      terminal e o `RUST_BACKTRACE`) e os que a imagem do runner pode pôr
+#      (o `CARGO_HOME` e o `RUSTUP_HOME`, fora do repositório); um nome de
+#      fora é erro, com o nome:
 #      os rustflags, o rustdoc, o rustfmt, os ligadores e os executores do
 #      ambiente escolhem o programa que roda no lugar do do toolchain;
 #    - o `CARGO_HOME` e o `RUSTUP_HOME` fora do repositório: os toolchains
@@ -34,8 +37,8 @@
 #      —, um nightly com data, o mesmo canal nos dois;
 #    - nenhum `Cargo.toml` da árvore com `cargo-features`, e nenhum perfil
 #      com `rustflags` nem `codegen-backend`: o `profile-rustflags` do
-#      manifesto da raiz escolhia o ligador de tudo o que o perfil compila,
-#      o `xtask` das invariantes inclusive;
+#      manifesto da raiz escolheria o ligador de tudo o que o perfil
+#      compila, o `xtask` das invariantes inclusive;
 #    - e nenhum arquivo do commit num diretório de saída do cargo (o
 #      `target/` de cada diretório de build): o cargo tomaria um artefato
 #      do commit pelo que ele compilou.
@@ -67,7 +70,8 @@
 #      alinhamento dos laços). O resto — o `[env]`, o `[host]`, o
 #      `[unstable]`, o `[profile]`, o `paths`, o `[source]`, o `[patch]` e
 #      os rustflags que escolhem o ligador, por qualquer opção — é erro.
-# 4. `invariantes`, só com a entrada `invariantes: true` — o job de lints —:
+# 4. `invariantes`, só com a entrada `invariantes: true`, no `with:` do
+#    passo — o job de lints —:
 #    o `cargo xtask invariantes`, com o toolchain fixado, logo depois das
 #    conferências, antes do cache e de todo outro `cargo` do job. Nada do
 #    repositório roda antes dele — nem os testes do hospedeiro, nem os
@@ -92,7 +96,7 @@
 # confere que estes passos estão aqui (`xtask/src/compilador.rs`). A ação
 # não escreve no ambiente dos passos seguintes.
 name: O compilador oficial
-description: Confere o ambiente, o PATH, os rust-toolchain e os manifestos antes de todo cargo, instala e confere o compilador do rust-toolchain.toml com o toolchain fixado, recusa o executor, o ligador e o apelido do config do cargo, roda as invariantes no job de lints e devolve o canal para a chave do cache.
+description: Confere o ambiente, o PATH, os rust-toolchain e os manifestos antes de todo cargo, instala e confere o compilador do rust-toolchain.toml com o toolchain fixado, recusa o executor, o ligador e o apelido do config do cargo e o config fora da lista, roda as invariantes no job de lints e devolve o canal para a chave do cache.
 inputs:
   invariantes:
     description: true só no job de lints — roda o `cargo xtask invariantes` logo depois das conferências, antes de todo outro `cargo` do job.
@@ -118,8 +122,9 @@ runs:
         # A raiz do checkout, onde a ação roda.
         RAIZ = os.path.realpath(os.getcwd())
         # A lista fechada do ambiente: dos nomes que o cargo, o rustc, o
-        # rustdoc, o rustfmt e o rustup leem, só os que a CI põe e os da
-        # imagem do runner. Um novo muda a lista, e a mudança é revisada.
+        # rustdoc, o rustfmt e o rustup leem, só os que a CI põe e os que a
+        # imagem do runner pode pôr (o CARGO_HOME e o RUSTUP_HOME, fora do
+        # repositório). Um novo muda a lista, e a mudança é revisada.
         LEEM = ("CARGO", "RUST", "__CARGO")
         PERMITIDAS = ("CARGO_HOME", "CARGO_TERM_COLOR", "RUSTUP_HOME", "RUST_BACKTRACE")
         # Os programas do toolchain que a CI chama pelo nome.

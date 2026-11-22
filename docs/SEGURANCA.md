@@ -167,13 +167,23 @@ pontos onde acontece — não num canal paralelo:
   workflows e as ações —, e quem a protege é a revisão; abaixo dela, a ação
   que confere o compilador recusa, antes de todo `cargo` que compila ou
   roda, um executor ou um apelido do cargo que o trocassem (o lote A9), e,
-  desde o lote A10, o ambiente do job fora de uma lista fechada, o PATH e
-  as casas do cargo e do rustup dentro do repositório, um `rust-toolchain`
-  fora dos dois oficiais ou com `path`, um manifesto com `cargo-features` ou
-  um perfil com `rustflags`, e o config de um diretório de build fora da
-  lista; roda todo `cargo` dela no toolchain fixado pelo canal; e
+  desde o lote A10, o ambiente do job fora de uma lista fechada, o PATH com
+  entrada relativa ou do repositório, as casas do cargo e do rustup dentro
+  dele, um `rust-toolchain` fora dos dois oficiais ou com `path`, um
+  manifesto com `cargo-features` ou um perfil com `rustflags` ou
+  `codegen-backend`, um arquivo do commit num diretório de saída, e o config
+  de um diretório de build fora da lista — na raiz, outro que o apelido —;
+  roda todo `cargo` dela no toolchain fixado pelo canal — uma exceção à
+  letra do 4.1 do `CLAUDE.md`, que proíbe o `RUSTUP_TOOLCHAIN` no projeto,
+  proposta ao dono do projeto: se ele preferir a letra, a fixação sai, e a
+  guarda fica nos `rust-toolchain` que o passo do ambiente confere —; e
   roda as invariantes, no job de lints, antes do cache e de todo outro
-  `cargo`, sem nada do repositório antes. O que as guardas de texto do
+  `cargo`, sem nada do repositório antes. Desde o lote A11, o `cargo xtask
+  invariantes` confere também que o passo dela, em todo workflow oficial,
+  não tem `if:` nem `continue-on-error:`, que a deixariam sem rodar ou o
+  job seguir com ela reprovada, e que a entrada das invariantes está no
+  `with:` do passo do job de lints; e o `xtask` aceita na raiz só o
+  apelido, como ela. O que as guardas de texto do
   `xtask` não fecham — quem escreve no kernel para contorná-las de
   propósito — e a definição da CI ficam com a revisão ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)).
   E as recusas das perguntas sobre quem

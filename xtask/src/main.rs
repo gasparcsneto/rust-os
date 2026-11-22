@@ -9963,9 +9963,12 @@ fn e_biblioteca(tipos: &[&str]) -> bool {
 ///   coisa;
 /// - uma dependência direta de fora de [`DEPENDENCIAS_DO_KERNEL`], de outra
 ///   origem — um `[patch]`, um `git`, outra pasta — ou de macros
-///   procedurais; uma da lista que sumiu: a lista velha; e, desde o lote A9,
-///   uma renomeada, que o kernel alcança por outro nome que o da biblioteca
-///   dela — o `core`, o `alloc` ([`PACOTES_DAS_MACROS_DA_CARGA`]);
+///   procedurais; uma da lista que sumiu: a lista velha; desde o lote A9,
+///   uma renomeada, que o kernel alcança por outro nome que o do pacote — o
+///   `core`, o `alloc` ([`PACOTES_DAS_MACROS_DA_CARGA`]) —; e, desde o lote
+///   A10, uma cuja biblioteca tem outro nome que o do pacote — um `[lib]
+///   name` —, ou que chega ao kernel com o nome de um pacote do sysroot
+///   ([`PACOTES_DO_SYSROOT`]);
 /// - um pacote de macros procedurais do grafo de fora de
 ///   [`MACROS_PROCEDURAIS_DO_GRAFO`], ou usado por outro pacote; e um da lista
 ///   que sumiu;
@@ -15213,8 +15216,9 @@ mod testes_dos_nomes_protegidos {
     }
 
     // ---------------------------------------------------------------------
-    // Os testes do adversário do lote A9, integrados no lote A10: cada um
-    // reprovava no `f77c674`, com a lista do que não se acusou, e passa com
+    // Os testes do adversário do lote A9, integrados no lote A10: cada um,
+    // menos o da M1, reprovava no `f77c674`, com a lista do que não se
+    // acusou — o da M1 reprova com a mutação dele —, e passa com
     // a guarda que fecha a fonte — o I, pelo `mod` nos tokens de uma macro
     // (`onde_traz_outro_arquivo`); o G, pelo nome do pacote de cada direta
     // (`dependencias_fora`); o H, pelo `set_var`, pela linha de comando com o

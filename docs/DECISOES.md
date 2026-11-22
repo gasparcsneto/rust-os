@@ -2155,7 +2155,8 @@ pendência #298.
     `cargo run` do `xtask`, e um executor no config da raiz que
     respondesse `invariantes` com sucesso fazia o passo das invariantes da
     CI passar sem guarda nenhuma. A ação que confere o compilador ganhou o
-    passo do executor, antes de todo `cargo` da CI — pela consulta do
+    passo do executor, antes de todo `cargo` da CI que compila ou roda —
+    pela consulta do
     próprio cargo, o `[alias]` só o oficial e nenhuma tabela `target` com
     executor nem ligador em todo diretório de build, a raiz só com o
     apelido, e nenhum
@@ -2280,15 +2281,19 @@ pendência #298.
     de qualquer programa do toolchain: o ambiente do job por uma lista
     fechada dos nomes que o cargo, o rustc, o rustdoc, o rustfmt e o rustup
     leem; as casas do cargo e do rustup e o PATH fora do repositório, e o
-    `cargo` e o `rustc` do PATH os proxies do rustup; nenhum
-    `rust-toolchain` fora dos dois oficiais, e os dois só com as chaves do
-    oficial; nenhum arquivo do commit num diretório de saída do cargo. E
-    todo `cargo` da ação no toolchain fixado pelo canal, e não no que o
-    diretório escolhe;
+    `cargo`, o `rustc`, o `rustdoc` e o `rustfmt` do PATH os proxies do
+    rustup, ou os do toolchain oficial; nenhum `rust-toolchain` fora dos
+    dois oficiais, e os dois só com as chaves do oficial; nenhum arquivo do
+    commit num diretório de saída do cargo. E todo `cargo` da ação no
+    toolchain fixado pelo canal, e não no que o diretório escolhe — a letra
+    do 4.1 do `CLAUDE.md` proíbe o `RUSTUP_TOOLCHAIN` no projeto, e a
+    exceção para a ação foi proposta ao dono do projeto: se ele preferir a
+    letra, a fixação sai, e a guarda fica nos `rust-toolchain` que o passo
+    do ambiente confere, só os dois oficiais e só com as chaves do oficial;
   - as invariantes como o último passo da ação, que só o job de lints
-    liga: antes do cache e de todo outro `cargo` do job — a formatação, os
-    testes do hospedeiro e o clippy rodam código do repositório —, no
-    ambiente que a ação conferiu (o IN3);
+    liga: antes do cache e de todo outro `cargo` do job — os testes do
+    hospedeiro e o clippy rodam código do repositório —, no ambiente que a
+    ação conferiu (o IN3);
   - o config de cada diretório de build fechado ao que os configs do
     repositório usam — o apelido, o alvo e os rustflags nas formas de hoje
     —, na ação e no `xtask`: o `[env] PATH`, o `[host] linker` e os
@@ -2305,14 +2310,17 @@ pendência #298.
   - a conferência da ação lê cada diretório de build como um item da tupla
     — a raiz também (o E5 do revisor) —, e o teste que roda a ação, com o
     proxy do rustup no PATH, como no runner, monta um executor em cada um
+    fora da raiz — o da raiz já estava em `a_acao_roda_como_no_runner` —
     (a M1);
   - o caso do desfecho dentro de um comando confere que o controle do
     gancho é o do `user.run` do caso, pela decisão que ele cita (o IN1);
   - o achado do lote: o `profile-rustflags` de um manifesto — o
-    `cargo-features` e os `rustflags` de um perfil — fazia o cargo do
-    canal ligar o `xtask` das invariantes com um programa do repositório;
-    o passo do ambiente recusa o `cargo-features` em todo manifesto, e os
-    `rustflags` e o `codegen-backend` em todo perfil.
+    `cargo-features` e os `rustflags` de um perfil — faria o cargo do canal
+    ligar o `xtask` das invariantes com um programa do repositório — num
+    experimento fora da árvore, o ligador do perfil montou o binário de um
+    workspace como o da raiz —; o passo do ambiente recusa o
+    `cargo-features` em todo manifesto, e os `rustflags` e o
+    `codegen-backend` em todo perfil.
 
   Fica a definição da CI, com a revisão — um passo novo, o `env:` de um
   passo, o script da ação —; as variáveis genéricas do processo, como o
@@ -2323,6 +2331,35 @@ pendência #298.
   adversário, dois deles adaptados ao arnês que roda a ação como no runner
   —, dois reescritos e cinco reforçados, e as mutações do lote (*As do lote
   A10*, no [README](../README.md#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
+
+  O lote A11, [B], fez os achados do adversário e do revisor do lote A10,
+  nas regras dos workflows e da raiz do `xtask` e no texto, sem
+  autoridade, regra de acesso, registro, identidade, persistência ou
+  semântica de auditoria novos:
+  - a regra das variáveis do cargo na CI pula as linhas de comentário, como
+    as irmãs dela — um comentário que citava o `RUSTDOCFLAGS` reprovava a
+    CI sem defeito (o achado 1 do adversário) —; fora delas, a menção — o
+    nome de um passo, um `echo` num `run:` — reprova como a definição, porque
+    a regra não lê o shell, e um `echo` para o `$GITHUB_ENV` põe a variável;
+  - a entrada das invariantes é uma chave do `with:` do passo da ação no
+    job de lints: num `env:`, a entrada ficava no padrão, e as invariantes
+    não rodavam sem nada acusar (o E6 do revisor);
+  - o passo da ação, em todo workflow oficial, não tem `if:` nem
+    `continue-on-error:`, que a deixariam sem rodar ou o job seguir com ela
+    reprovada (uma nota do revisor);
+  - na raiz, onde o `xtask` se compila e roda, o config só com o apelido,
+    no `xtask` como na ação — a lista aceitava ali o `-C link-arg=-T…`, cujo
+    script pode trazer objetos à ligação (a outra nota) —; nenhum uso de
+    hoje quebra;
+  - o texto, pelos erros de fato e pelas precisões do revisor, e a fixação
+    do `RUSTUP_TOOLCHAIN` na ação descrita como a exceção à letra do 4.1 do
+    `CLAUDE.md` que espera o dono do projeto.
+
+  Fica o que fica do lote A10, e o que uma regra por texto não vê nos
+  workflows — o nome montado em pedaços, o `if:` de um job inteiro —, com a
+  revisão. Três testes novos no hospedeiro e dois reforçados, e as
+  mutações do lote (*As do lote A11*, no
+  [README](../README.md#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
 
 ### I7
 

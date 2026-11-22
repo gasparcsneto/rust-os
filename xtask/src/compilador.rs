@@ -40,9 +40,11 @@
 //!     lista ([`desvios_da_configuracao`]) — o que os configs do repositório
 //!     usam: o apelido, o `build.target` e os rustflags de cada alvo nas
 //!     formas de hoje ([`FORMAS_DOS_RUSTFLAGS`]) —, a mesma regra que a ação
-//!     aplica fora da raiz; e os dois `rust-toolchain.toml` só com as chaves
-//!     do oficial ([`desvios_dos_toolchains`]): um `path` faria o rustup
-//!     rodar o `cargo` de uma pasta.
+//!     aplica fora da raiz, e, desde o lote A11, na raiz, onde o `xtask` se
+//!     compila e roda, só o apelido, como na ação ([`TABELAS_DA_RAIZ`]); e
+//!     os dois `rust-toolchain.toml` só com as chaves do oficial
+//!     ([`desvios_dos_toolchains`]): um `path` faria o rustup rodar o
+//!     `cargo` de uma pasta.
 //!
 //!   Um desvio recusa o comando, a menos que `DUKE_OUTRO_COMPILADOR=1`
 //!   declare a execução **não oficial**: aí ela roda com um aviso, e a
@@ -57,16 +59,19 @@
 //!   data, é o mesmo nos dois arquivos, com as chaves do oficial, e o
 //!   `CLAUDE.md` o cita; não há outro `rust-toolchain` no repositório; o
 //!   config do cargo dos diretórios com `.cargo/` não troca o compilador,
-//!   nem o executor, nem o apelido, e fora da raiz fica na lista; o `xtask`
-//!   não chama o cargo nem o rustc com outro toolchain; os workflows
-//!   oficiais só usam as ações de [`ACOES_OFICIAIS`], não sobrepõem o
-//!   toolchain e conferem o compilador — a ação `.github/actions/compilador`
-//!   — depois de cada checkout, antes do cache e de qualquer `cargo`, com o
-//!   canal em toda chave de cache; a ação tem os passos que conferem, fora
-//!   do cargo, o ambiente, o PATH, os `rust-toolchain` e o config do cargo
-//!   — o do executor desde o lote A9, os outros desde o lote A10 —, e o das
-//!   invariantes, que o job de lints liga ([`conferir_a_acao`],
-//!   [`as_invariantes_na_acao`]); e o canário, o único que sobrepõe — ele
+//!   nem o executor, nem o apelido, e fica na lista — na raiz, só o
+//!   apelido, como na ação —; o `xtask` não chama o cargo nem o rustc com
+//!   outro toolchain; os workflows oficiais só usam as ações de
+//!   [`ACOES_OFICIAIS`], não sobrepõem o toolchain e conferem o compilador
+//!   — a ação `.github/actions/compilador`, num passo sem `if:` nem
+//!   `continue-on-error:` — depois de cada checkout, antes do cache e de
+//!   qualquer `cargo`, com o canal em toda chave de cache; a ação tem os
+//!   passos que conferem, fora do cargo, o ambiente, o PATH, os
+//!   `rust-toolchain` e o config do cargo — o do executor desde o lote A9,
+//!   os outros desde o lote A10 —, e o das invariantes, que o job de lints
+//!   liga pela entrada `invariantes: true` no `with:` do passo dela
+//!   ([`conferir_a_acao`], [`as_invariantes_na_acao`]); e o canário, o
+//!   único que sobrepõe — ele
 //!   testa o candidato —, não roda nos pushes, não usa o cache da CI, não
 //!   publica proveniência e repete os comandos do job de lints;
 //! - **no `cargo xtask compilador`** ([`relatar`]): o canal, o toolchain
@@ -116,7 +121,8 @@ const DIRETORIOS_DOS_BUILDS: [&str; 6] = [
 /// houver —, e o `cargo doc` também: um doctest compilado por outro
 /// `rustdoc` passava em silêncio numa validação oficial (o IN6 do
 /// adversário do lote A9). O `rustdoc` é um compilador do toolchain como o
-/// `rustc`, e as três entram aqui.
+/// `rustc`: as duas variáveis entram aqui, e a chave, em
+/// [`CHAVES_QUE_TROCAM`].
 const VARIAVEIS_QUE_TROCAM: [&str; 8] = [
     "RUSTC",
     "RUSTC_WRAPPER",
@@ -214,8 +220,10 @@ const PASSO_DO_EXECUTOR: &str = "executor";
 ///
 /// Um `Cargo.toml` com `cargo-features = ["profile-rustflags"]` liga os
 /// `rustflags` de um perfil: com `[profile.dev] rustflags = ["-C",
-/// "linker=…"]` no da raiz, o cargo do canal liga o `xtask` das invariantes
-/// com o programa do repositório — rodado num experimento, fora da árvore.
+/// "linker=…"]` no da raiz, o cargo do canal ligaria o `xtask` das
+/// invariantes com o programa do repositório — num experimento fora da
+/// árvore, com o mesmo cargo, o ligador do perfil montou o binário de um
+/// workspace como o da raiz.
 /// É o F1 do adversário do lote A9 por outra fonte, e a regra só vale fora
 /// do `xtask`: dentro dele chegaria tarde, com o binário já montado pelo
 /// ligador do perfil. O passo do ambiente recusa o `cargo-features` em
@@ -775,9 +783,11 @@ fn desvios_do_config(dir: &Path, rotulo: &str, na_raiz: bool) -> Vec<String> {
 /// Fora da raiz, a ação só lia, do config, o apelido, o executor, o ligador
 /// e a `[build]` que troca o compilador: o `[env] PATH` dos programas — que
 /// faz o `rustc` ligar os `build.rs` com o `cc` de uma pasta —, o `[host]
-/// linker` e o `-C linker=` nos rustflags passavam, e o clippy dos programas
-/// ligava com eles, no job de lints, antes das invariantes (o F3 do
-/// adversário do lote A9). Pela lista do que os configs do repositório
+/// linker` e o `-C linker=` nos rustflags passavam. O clippy dos programas
+/// ligava os `build.rs` e as macros procedurais com os dois primeiros, no
+/// job de lints, antes das invariantes, e o terceiro ligaria os programas
+/// que a suíte e as bancadas rodam nos outros jobs (o F3 do adversário do
+/// lote A9). Pela lista do que os configs do repositório
 /// usam, e não pelos nomes do ligador, que são muitos: a mesma regra da
 /// ação, aqui no começo de todo comando e no `invariantes`, em todo
 /// diretório de build — o config da raiz, só com o apelido na ação, vale
@@ -1975,13 +1985,13 @@ fn itens_da_tupla(script: &str, nome: &str) -> Vec<String> {
 ///
 /// # Por quê, desde o lote A10
 ///
-/// No job de lints, a formatação, os testes do hospedeiro — com os
-/// doctests — e o clippy rodavam antes das invariantes, e eles rodam código
-/// do repositório: os `build.rs` e as macros procedurais dos grafos, os
-/// testes. Esse código podia mudar a árvore que as invariantes leem, ou
-/// plantar um executor no config do `CARGO_HOME`, depois da ação e antes
-/// delas (o IN3 do adversário do lote A9). Na ação, nada do repositório
-/// roda entre a conferência e elas, nem o cache.
+/// No job de lints, os testes do hospedeiro — com os doctests — e o clippy
+/// rodam código do repositório — os `build.rs` e as macros procedurais dos
+/// grafos, os testes —, e rodavam antes das invariantes, depois da
+/// formatação, que só lê o código. Esse código podia mudar a árvore que as
+/// invariantes leem, ou plantar um executor no config do `CARGO_HOME`,
+/// depois da ação e antes delas (o IN3 do adversário do lote A9). Na ação,
+/// nada do repositório roda entre a conferência e elas, nem o cache.
 fn as_invariantes_na_acao(ci: &str) -> Vec<String> {
     let linhas = linhas_de_codigo(ci);
     let cabecalho = format!("{JOB_DE_LINTS}:");

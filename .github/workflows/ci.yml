@@ -66,13 +66,14 @@ jobs:
       # começa assim; ver "O compilador" no CLAUDE.md e
       # `.github/actions/compilador`.
       #
-      # E, só aqui, as invariantes de fonte, pela entrada da ação: o
-      # `cargo xtask invariantes` roda dentro dela, logo depois das
-      # conferências do ambiente, do toolchain e do config do cargo, antes
-      # do cache e de todo outro `cargo` do job — a formatação, os testes do
-      # hospedeiro, os doctests e o clippy rodam código do repositório (os
-      # `build.rs`, os testes), que poderia mudar a árvore que ele lê, ou o
-      # config que decide o que ele roda (o lote A10). Sem o cache, o
+      # E, só aqui, as invariantes de fonte, pela entrada da ação — no
+      # `with:` do passo, que não tem `if:` nem `continue-on-error:` (o
+      # lote A11) —: o `cargo xtask invariantes` roda dentro dela, logo
+      # depois das conferências do ambiente, do toolchain e do config do
+      # cargo, antes do cache e de todo outro `cargo` do job — os testes do
+      # hospedeiro, com os doctests, e o clippy rodam código do repositório
+      # (os `build.rs`, os testes), que poderia mudar a árvore que ele lê, ou
+      # o config que decide o que ele roda (o lote A10). Sem o cache, o
       # `xtask` se compila do zero nesse passo: é o custo de nada vir antes
       # dele.
       #
