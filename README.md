@@ -17665,6 +17665,28 @@ kernel) e o ARM a -1 ppm (2056 s em 2056), os dois dentro da guarda. O
 esperou 39,8 minutos na fila e rodou 24,6; o maior, a persistência do x86,
 parte 2/3, com 53,8.
 
+A CI 539 (`e84c2cd`, o lote A12 e os parágrafos das CIs 537 e 538) passou
+verde, 48 de 48, na primeira tentativa, em 69,1 minutos e 1090 de máquina.
+Foi a primeira rodada no runner do passo do ambiente com a regra dos
+links — nenhum no commit, nenhum no caminho de um diretório de saída —, e
+ele passou nos 48 jobs: a ação levou de 14 a 21 s em 46 deles, e 55 s na
+persistência do x86, parte 1/3, fora da curva. No job de lints, a ação com
+as invariantes levou 64 s. O holdover da bancada de tempo, na parte 3/3: o
+x86 a -57 ppm (2056 s em 2056) e o ARM a +0 ppm (2056 s em 2056), os dois
+dentro da guarda. O último job foi o do SDK da malha entre dispositivos
+(x86_64 e aarch64), que esperou 39,8 minutos na fila e rodou 23,4; o
+maior, a persistência do x86, parte 1/3, com 51,4.
+
+A CI 540 (`55aa179`, o lote EXECUTADO) passou verde, 48 de 48, na primeira
+tentativa, em 90,3 minutos e 1104 de máquina — esperou os runners da CI
+539. As fumaças passaram com as esperas pelo `executado:` que reprovam com
+a recusa do mesmo comando, e o caso novo da suíte passou nas partes. O
+holdover da bancada de tempo, na parte 3/3: o x86 a -127 ppm (2057 s em
+2057) e o ARM a -2 ppm (2056 s em 2056), os dois dentro da guarda. O
+último job foi o dos fluxos entre dispositivos (mesma arquitetura), que
+esperou 35,5 minutos na fila e rodou 30,3; o maior, a bancada de tempo do
+x86, parte 3/3, com 47,2.
+
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na
 508 e 58 na 509 —, e o que sobra até o piso é a ordem da fila, que não se
