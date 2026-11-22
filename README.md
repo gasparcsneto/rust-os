@@ -1637,8 +1637,9 @@ entrada compartilhada derrubava a tradução velha no leitor com ou sem o da
 remoção, e a remoção com o `tlbi` só deste núcleo (a M-RL dele) passava na
 parte da paginação inteira. No hardware, outro núcleo continuaria traduzindo
 um frame que já voltou ao alocador — a pilha de um fio morto, uma
-superfície, o MMIO. O lote ICACHE-3, [B], fez o caso discriminar a difusão,
-nas duas arquiteturas:
+superfície, o MMIO. O lote ICACHE-3, [B], fez o caso ver a remoção que não
+difunde — a que invalida só neste núcleo —, nas duas arquiteturas (a que
+não invalida em núcleo nenhum, no x86, só desde o lote ICACHE-4, abaixo):
 
 - o remapeamento não invalida nada: no ARM, por
   `mmu::mapear_frame_sem_invalidar_de_teste`, só da suíte, em que a entrada
@@ -1675,6 +1676,48 @@ núcleo: com as interrupções ligadas — a troca de espaço da carga roda assi
 entraria na conta de outro (o achado 4 do adversário, teórico). `invalidar`
 e `invalidar_tudo` mascaram as interrupções da anotação ao fim do `tlbi`,
 só com `modo-teste`.
+
+**A remoção que não invalida em núcleo nenhum.** O adversário do lote
+ICACHE-3 achou o que esse desenho ainda deixava passar, no x86: a remoção da
+página do caso sem o `invlpg` deste núcleo e sem o aviso aos outros. O caso
+escrevia o conteúdo novo pela página depois da troca, e a escrita ia, pela
+tradução velha deste núcleo, ao frame **antigo**; o leitor, pela dele, o lia
+de lá, e o veredito aprovava — 6 de 6 no x86, com o frame novo, que ninguém
+escreveu, nos zeros do remapeamento. Tirar só o aviso reprovava (a
+M-RL-X86-PAGINA), e só o `invlpg` reprovaria, pela leitura do adversário;
+os dois juntos, não. No ARM a mesma mutação reprovou por acaso do emulador:
+a TLB deste núcleo já não tinha a tradução quando ele escreveu. E
+o caso lia de um núcleo só: no x86, a remoção que avisasse só o núcleo do
+leitor passaria. O lote ICACHE-4, [B], só na suíte:
+
+- o conteúdo novo entra no frame novo pelo mapa da memória física, antes de
+  ele ser mapeado: depois da troca ninguém escreve pela página, e quem lê o
+  conteúdo novo leu o frame novo;
+- este núcleo lê a página também, já mascarado, antes da remoção — a
+  tradução dele está na TLB na hora dela —, e de novo depois dos leitores, e
+  tem de ver o conteúdo novo: "este nucleo continuou lendo o frame antigo: a
+  remocao nao invalidou nele";
+- um leitor mascarado em cada núcleo secundário, com o mesmo aperto por
+  fases, e todos têm de ler o conteúdo novo. Todo núcleo ligado fica na
+  janela: no ARM não sobra núcleo de fora que difunda um `tlbi` nela, e a
+  rodada sai limpa. A rodada, com três leitores, levou de 110 a 160 ms sem
+  mutação, na parte da paginação e na varredura, e de 90 a 260 ms com elas
+  — o caso inteiro, com um leitor, ia de uns 50 a 80 ms entre as linhas do
+  log, nas rodadas do lote ICACHE-3.
+
+As mutações, em depuração com quatro núcleos, contra a parte da paginação,
+uma de cada vez, em toda remoção da página do caso: sem invalidação nenhuma
+— o ataque do adversário —, o caso reprova nas duas arquiteturas, com os
+três leitores e este núcleo lendo 0xaaaaaaaaaaaaaaaa; a M-RL, no ARM, e o
+x86 sem o aviso aos outros núcleos continuam reprovando, com os leitores no
+frame antigo e este núcleo no novo; no x86, a remoção que avisa só o núcleo
+1 reprova — ele leu 0xbbbbbbbbbbbbbbbb, e os núcleos 2 e 3,
+0xaaaaaaaaaaaaaaaa —; e a que avisa os outros sem o `invlpg` deste núcleo
+reprova pela leitura dele: "este nucleo continuou lendo o frame antigo: a
+remocao nao invalidou nele". Em cada uma, só o caso reprova, 47 de 48. Sem
+elas, 48 de 48 nas duas, com todos lendo 0xbbbbbbbbbbbbbbbb e o veredito na
+rodada 1. No ARM não há a remoção que avise só parte dos núcleos: o
+`tlbi … is` alcança o domínio inteiro.
 
 **As travas são justas.** O `spin::Mutex` é um teste-e-troca: ganha quem
 chegar primeiro naquele instante, e um núcleo que solta e pede de novo ganha
@@ -1979,6 +2022,16 @@ não compila.
   raiz do processo antes —; só casos da suíte, que não leem a página de
   outro núcleo. O ARM separa os dois casos (`mmu::privada_de_um_processo`)
   e difunde toda remoção.
+- No x86, os casos que repetem a rodada até uma limpa dão toda rodada por
+  limpa, sem conta: a NMI de descarte de outro núcleo só invalida um
+  endereço do kernel. Mas, no QEMU sem aceleração, um `invlpg` de um
+  endereço na região das páginas grandes que a TLB da CPU virtual já viu
+  esvazia a TLB inteira (de memória, sem a fonte do QEMU; não medido), e um
+  descarte de outro núcleo na janela — de uma página do MMIO, por exemplo —
+  derrubaria a tradução velha numa rodada dada por limpa. O caso da remoção
+  não tem mais núcleo de fora da janela — um leitor mascarado em cada
+  secundário, desde o lote ICACHE-4 —; as duas metades do caso da marca e o
+  da página privada, sim (o informativo 1 do adversário do lote ICACHE-3).
 - As entradas de topo das regiões do kernel nascem na raiz que está ativa
   quando a primeira página da região é mapeada, e nada garante que seja a
   do kernel; e um espaço copia as do kernel quando nasce, e não vê as que
@@ -16103,15 +16156,15 @@ vez, pelo `memcpy` do `compiler_builtins`, que vem otimizado com o `core` em
 qualquer perfil: 1,8 ms no x86 e 2,3 no ARM, em depuração; em release, de
 1,5 para 1,1 ms no x86, e de 3,5 para 1,5 no ARM — no QEMU 8.2 de onde a
 correção foi medida. No QEMU 10.2 da CI, o x86 fica perto disso, de 1,4 a
-1,7 ms, e o ARM custa perto de três vezes mais: de 6,3 a 7,0 ms em
-depuração, e 4,9 em release (as CIs 532, 534 e 535). Com o `guardar` lançado
-logo antes da porta e o console cheio, o núcleo dos dispositivos ficava de
-470 a 780 ms mascarado na janela, e passou a ficar de 80 a 190; com o
-hospedeiro ocupado como o runner da CI, o ping chegou a 1559 ms antes, e não
-passou de 263 depois. O caso `tela: apresentar nao regrediu em ordem de
-grandeza` mede a cada rodada — menos na máquina da `virtio-gpu`, onde quem
-apresenta é o dispositivo —, contra a mesma cópia para o mesmo framebuffer,
-e reprova em depuração a volta a pixel a pixel.
+1,7 ms, e o ARM custa de duas a três vezes mais: de 5,4 a 7,0 ms em
+depuração, e 4,9 em release (as CIs 532 a 536; o release, da 535). Com o
+`guardar` lançado logo antes da porta e o console cheio, o núcleo dos
+dispositivos ficava de 470 a 780 ms mascarado na janela, e passou a ficar de
+80 a 190; com o hospedeiro ocupado como o runner da CI, o ping chegou a
+1559 ms antes, e não passou de 263 depois. O caso `tela: apresentar nao
+regrediu em ordem de grandeza` mede a cada rodada — menos na máquina da
+`virtio-gpu`, onde quem apresenta é o dispositivo —, contra a mesma cópia
+para o mesmo framebuffer, e reprova em depuração a volta a pixel a pixel.
 
 **O caso julga pelo bloco mais rápido.** A primeira versão dele julgava pela
 razão das somas de três pares de blocos, de duas telas cada, e reprovava sem
@@ -16150,7 +16203,7 @@ nas quatro medidas, de 156% a 186%, e uma regressão que poupasse qualquer
 das quatro faixas passaria; e a cópia de referência, da mesma linha do
 padrão, deixava na tela o que a apresentação deixaria, e a conferência do
 último pixel não via uma apresentação que não escrevesse nada (o adversário
-do lote FUMAÇA-2). Agora:
+do lote FUMAÇA-2). Agora, pelas medidas desta máquina, no QEMU 8.2:
 
 - o caso tem um segundo juiz, a mediana de cada lado — o bloco do meio —,
   com um teto folgado, dez vezes: os três quartos da tela pixel a pixel
@@ -16182,9 +16235,9 @@ do lote FUMAÇA-2). Agora:
   cinco no ARM da CI.
 
 A premissa de que um quarto da tela cabe numa vez do fio é do QEMU 8.2
-desta máquina. No QEMU 10.2 da CI, uma tela do ARM custa de 6,3 a 7,0 ms em
-depuração, e uma faixa perto de um milissegundo e meio; a CI 535 passou com
-o hospedeiro quieto, a 104% no ARM e a 113% no x86.
+desta máquina. No QEMU 10.2 da CI, uma tela do ARM custa de 5,4 a 7,0 ms em
+depuração (as CIs 532 a 536), e uma faixa perto de um milissegundo e meio; a
+CI 535 passou com o hospedeiro quieto, a 104% no ARM e a 113% no x86.
 
 Duas coisas sobem junto com o texto. A grade de caracteres, para a árvore
 semântica continuar descrevendo o que está na tela. E a linha de comando: o
@@ -17354,19 +17407,21 @@ defeito é antigo, de isolamento entre casos, e a falha, determinística: não
 se rodou de novo. A correção fecha a classe do shift apertado, e não a do
 estado global que um caso muda e o seguinte da mesma parte herda: o
 executor confere o que cada caso devolve (`estado_da_suite_devolvido`) — o
-coletor e o journal desde a CI 509, o shift desde esta, e o registro de
-identidade desde o lote ICACHE-3 (abaixo) —, o caso do HID solta o shift e
+coletor e o journal desde a CI 509, o shift desde esta, o registro de
+identidade desde o lote ICACHE-3, e a política em vigor e o registro de
+pessoas desde o lote ICACHE-4 (abaixo) —, o caso do HID solta o shift e
 confere a minúscula, e um caso no fim da tabela é o controle da
-conferência. O resto do estado global — as filas, o histórico e os cursores
-do teclado, entre outros — continua com a disciplina de cada caso. As
-mutações, no ARM, com a suíte filtrada aos casos do teclado, do HID, do
-pareamento e do executor: a conferência sem o shift, ou o executor sem
-soltá-lo, reprovam o caso de controle; o HID sem soltar reprova o próprio
-caso do HID, e o do pareamento passa. O holdover da bancada de tempo, na
-parte 3/3: o x86 a -133 ppm (2056 s em 2056) e o ARM a -3 ppm (2056 s em
-2056), os dois dentro da guarda. O último job foi o dos fluxos entre
-dispositivos (x86_64 e aarch64), que esperou 48,3 minutos na fila e rodou
-29,6; o maior, a atualização do ARM, com 49,9.
+conferência — da função; que o laço do executor a chama depois de cada
+caso, prova outro, desde o lote ICACHE-4. O resto do estado global — as
+filas, o histórico e os cursores do teclado, entre outros — continua com a
+disciplina de cada caso. As mutações, no ARM, com a suíte filtrada aos casos
+do teclado, do HID, do pareamento e do executor: a conferência sem o shift,
+ou o executor sem soltá-lo, reprovam o caso de controle; o HID sem soltar
+reprova o próprio caso do HID, e o do pareamento passa. O holdover da
+bancada de tempo, na parte 3/3: o x86 a -133 ppm (2056 s em 2056) e o ARM
+a -3 ppm (2056 s em 2056), os dois dentro da guarda. O último job foi o dos
+fluxos entre dispositivos (x86_64 e aarch64), que esperou 48,3 minutos na
+fila e rodou 29,6; o maior, a atualização do ARM, com 49,9.
 
 O adversário do lote ICACHE-2 achou mais um estado global que a conferência
 do executor não via: o registro de identidade. `energia: quem nao pode ouve
@@ -17384,20 +17439,22 @@ administradores, os editores, as fontes de hora e as lápides
 fica de fora) — e a compara depois de cada caso; o caso que o deixa mudado
 reprova ("o caso deixou o registro de identidade mudado"), e o executor
 devolve o da imagem, as lápides esquecidas antes da leitura dos arquivos.
-A varredura — a suíte inteira, nas duas arquiteturas, em depuração, pelas
-partes da CI — achou, antes das correções, 32 casos no ARM que deixavam o
-registro mudado — e, na parte 1/3 do x86, os mesmos 17 da parte 1/3 do
-ARM —, por três causas: os invólucros `com_grupo` e `com_chaves`
-esqueciam os registrados, e não as lápides — as revogações por quórum dos
-casos do grupo, e as que o journal reposto trazia nos das chaves —; os
-casos que terminam num boot de teste — a persistência reaberta, ou o
-journal reposto —, da identidade, da compactação, do armazém, da adoção e
-da coleta, deixavam o registro como o journal o diz: os agentes que os
-casos de antes registraram, e as lápides; e os da bancada que anulam uma
-chave no meio de uma chamada, e o de cada chave ser um principal,
-registravam um agente sem devolvê-lo. Os invólucros terminam agora por
-`registro_da_imagem` — as lápides esquecidas, e os arquivos lidos de
-novo, nessa ordem —, e cada um dos outros casos, por
+A varredura — a suíte inteira, em depuração, pelas partes da CI; antes das
+correções, as três partes do ARM e a 1/3 do x86, e as outras duas do x86 só
+depois delas — achou 32 casos no ARM que deixavam o registro mudado — e, na
+parte 1/3 do x86, os mesmos 17 da parte 1/3 do ARM —, por três causas: os
+invólucros `com_grupo` e `com_chaves` esqueciam os registrados, e não as
+lápides — as revogações por quórum dos casos do grupo, e as que o journal
+reposto trazia nos das chaves —; os casos que terminam num boot de teste
+— a persistência reaberta, ou o journal reposto —, da identidade, da
+compactação, do armazém, da adoção e da coleta, deixavam o registro como o
+journal o diz: os agentes que os casos de antes registraram, e as lápides
+(e a política e as pessoas também, que o lote ICACHE-4 devolve, abaixo);
+e os da bancada que anulam uma chave no meio de uma chamada, e o de cada
+chave ser um principal, registravam um agente sem devolvê-lo. Os
+invólucros terminam agora por `registro_da_imagem` — as lápides
+esquecidas, e os arquivos lidos de novo, nessa ordem —, e cada um dos
+outros casos, por
 `com_o_registro_devolvido`, que roda o corpo do caso e devolve o registro
 depois das conferências dele — também um irmão do mesmo molde que a
 varredura não pegou (`adocao: o journal com poucos registros`). Depois
@@ -17420,6 +17477,117 @@ ficou mudado"), e o caso seguinte reprova com o registro que ficou; e os três
 casos sem a devolução que o lote lhes deu reprovam, cada um com "o caso deixou
 o registro de identidade mudado". Sem elas, 10 de 10 no ARM e 11 de 11 no x86.
 
+O adversário do lote ICACHE-3 achou mais duas partes do estado global que
+vazavam caladas entre os casos, e que a conferência não via: a política em
+vigor e o registro de pessoas. O caso que termina num boot de teste repõe o
+journal, e a reposição põe em vigor a última política que um caso de antes
+da mesma parte escreveu nele: na varredura dele, `identidade: o selo no TPM
+abre a chave…` deixou a de `politica: ninguem se da mais do que tem`, e os
+quatro casos seguintes rodaram com ela. E `hora: o ponto de commit da
+rodada` deixava registrada a pessoa da rodada — a sessão de teste a
+registra, e encerrar a sessão não a tira —, e sete casos rodaram com ela.
+Nada reprovava: a política que vazou só acrescentava um papel que nenhum
+deles usava, e nenhum contava as pessoas. O lote ICACHE-4, [B], só na
+suíte:
+
+- o executor guarda a política em vigor e o registro de pessoas antes do
+  primeiro caso, e os compara depois de cada um: a política, campo a campo;
+  as pessoas, pela ordem, e cada uma pelo nome, o papel, o estado e a
+  credencial, e pelo identificador, menos a pessoa padrão da suíte, que
+  nasce de novo, com outro, a cada devolução. O caso que deixa uma delas
+  mudada reprova ("o caso deixou a politica em vigor mudada", "o caso
+  deixou o registro de pessoas mudado"), e o executor devolve a da imagem —
+  a política lida de novo do disco, depois do registro de identidade, e as
+  pessoas também, com a pessoa padrão de volta ao console — e diz no log o
+  que achou;
+- `com_o_registro_devolvido` devolve também a política e as pessoas, e o
+  caso da hora tira a pessoa que registra;
+- dois controles, no fim da tabela, mudam uma coisa de cada vez e conferem
+  que o executor vê e devolve cada uma: na política, um papel a mais, as
+  permissões e a taxa de um papel, o papel da serial e os apertos; nas
+  pessoas, uma a mais, o papel, o estado, a credencial e o identificador
+  de uma da imagem, a credencial da pessoa padrão e a ordem — e que o
+  identificador novo da pessoa padrão não conta.
+
+A varredura — a suíte inteira, em depuração, pelas partes da CI, nas duas
+arquiteturas, com a conferência nova e as duas correções acima — achou um
+caso só, o mesmo nas duas: `consoles: reabrir encerra a sessao` entra uma
+pessoa no console físico pela sessão de teste, que a registra, e o console
+reaberto encerra a sessão sem tirá-la do registro. Ele a tira agora. Nenhum
+outro caso deixou a política ou as pessoas mudadas — nem os que terminam
+num boot de teste, com a devolução nova de `com_o_registro_devolvido`.
+Antes da correção, no ARM, 360 de 360, 359 de 359 e 358 de 359; no x86, 365
+de 365, 365 de 365 e 363 de 364; depois dela, a parte 3/3, a do caso nas
+duas, passou inteira, com 359 de 359 no ARM e 364 de 364 no x86 — as outras
+partes não o rodam, e a correção não muda mais nada. O caso da remoção deu
+o veredito na rodada 1 nas duas, e os controles passaram cada um na parte em
+que cai: o da política na 1/3 do ARM e na 2/3 do x86, o das pessoas na 2/3 e
+na 3/3.
+
+As mutações, em depuração com quatro núcleos, nas duas arquiteturas, com a
+suíte filtrada aos controles do executor e aos casos das correções: sem a
+comparação da política, ou sem a devolução dela, o controle da política
+reprova — sem a devolução, a política mudada fica, e todo caso seguinte
+reprova com ela —; o mesmo nas pessoas; a comparação reduzida às contas — o
+número de papéis, o de pessoas — não vê as mudanças que não as mudam, e o
+controle reprova, dizendo quais; e, sem as duas correções pontuais,
+`identidade: o selo no TPM…` reprova com a política que `politica: ninguem
+se da mais do que tem` escreveu no journal — um papel `leitor` a mais —, a
+reconstrução, na cauda, também, e `hora: o ponto de commit da rodada`, com
+a pessoa da rodada. Sem elas, 16 de 16 no ARM e 17 de 17 no x86.
+
+E o executor tem agora os controles dele mesmo (os achados 3 e 4 do
+adversário). Os controles da conferência chamam `estado_da_suite_devolvido`
+eles mesmos: provam a função, e não que o laço a chama depois de cada caso —
+com o laço sem a chamada, todos passavam, e o caso que deixasse o estado
+mudado também. O laço conta agora os casos que começa e as conferências que
+faz, e `suite: o executor confere o estado depois de cada caso`, no fim da
+tabela, exige uma conferência por caso começado antes dele. E o controle do
+registro só registrava um administrador, o que muda a conta deles: uma
+impressão reduzida às contas passaria nele e na suíte inteira. `suite: a
+impressao do registro ve cada campo, e o executor o devolve` muda, um de
+cada vez, o papel de um agente, uma lápide, a ordem dos administradores, as
+fontes de hora e os editores. Nas mesmas rodadas, o laço sem a conferência
+faz só o controle novo reprovar — "10 caso(s) comecado(s), 0
+conferencia(s) do executor" —, e a impressão do registro reduzida às
+contas, só o estendido, que diz o que ela não viu: o papel de um agente e a
+ordem dos administradores. Na varredura, o controle do laço contou 354 casos
+e 353 conferências na parte 1/3 do ARM, e 358 e 357 na 2/3 do x86.
+
+O boot de teste repõe o que os casos de antes da mesma parte gravaram no
+journal pelo caminho com prova — os agentes, as lápides, a política, as
+pessoas, os dispositivos —, como o boot de verdade repõe a história da
+máquina. Dentro de um caso que termina num, o registro, a política e as
+pessoas dependem então da ordem da parte, e um caso novo no meio da tabela
+muda a parte e a ordem de todos os de depois. A devolução vale para os casos
+seguintes, e não para dentro do caso: nenhum dos casos de hoje confere o
+registro, a política ou as pessoas depois do boot de teste, e por isso eles
+passam em qualquer ordem; um caso novo que os confira ali tem de conferir só
+o que ele mesmo gravou, ou dizer o que espera de qualquer journal (o
+informativo 3 do adversário do lote ICACHE-3).
+
+O que a conferência do executor não devolve, de propósito ou por enquanto:
+
+- a chave do Duke e a situação dela, que a impressão do registro deixa de
+  fora: só a leitura da imagem e o selo as mudam, e na suíte a imagem traz
+  a chave — na varredura do adversário, nenhum dos 448 casos as mudou;
+- o relógio civil, que cada caso da bancada de hora reancora no segundo
+  seguinte ao civil de agora, e nunca para trás: na varredura do
+  adversário, a distância do civil ao RTC foi de 0 a 120 s, e ficou em 95 s
+  depois do último caso de hora. Nenhum caso de depois depende disso hoje
+  — os casos do IC vêm antes dos de hora na tabela —, e um caso do IC
+  depois de vários de hora na mesma parte ficaria perto da borda dos cinco
+  minutos que o IC aceita no futuro (não conferido);
+- os dispositivos depois da reconstrução, na cauda: duas relações e cinco
+  lápides, as do journal, que os casos de depois dela não usam;
+- as conexões TCP que fecham, que ficam alguns casos depois dos de rede e se
+  esvaziam sozinhas;
+- as sessões e as janelas de tentativas do registro de pessoas, que a
+  conferência das pessoas não compara;
+- e o resto do estado global — as filas, o histórico e os cursores do
+  teclado, o armazém, as filas da rede, a taxa dos papéis, o NSF por dentro
+  —, que continua com a disciplina de cada caso.
+
 A CI 533 (`c3acd71`, o lote ICACHE-2 e os parágrafos das CIs 530 e 531)
 passou 47 de 48 na primeira tentativa, em 76,2 minutos e 1071 de máquina.
 Reprovou só a parte 3/3 da suíte do ARM, 356 de 357, no mesmo caso do
@@ -17435,7 +17603,7 @@ dispositivos (mesma arquitetura), que esperou 41,0 minutos na fila e rodou
 
 A CI 534 (`9d1b067`, a correção do shift e o parágrafo da CI 532) passou
 verde, 48 de 48, na primeira tentativa, em 104,4 minutos e 1124 de máquina
-— esperou os runners das CIs 532 e 533. A parte 3/3 do ARM passou com o
+— esperou os runners da CI 533. A parte 3/3 do ARM passou com o
 caso do pareamento, e o caso de controle do shift, no fim da tabela,
 passou nas duas arquiteturas. O holdover da bancada de tempo, na parte
 3/3: o x86 a -148 ppm (2057 s em 2057) e o ARM a -3 ppm (2056 s em 2056),
@@ -17444,7 +17612,7 @@ os dois dentro da guarda. O último job foi o dos fluxos entre dispositivos
 maior, a persistência do x86, parte 2/3, com 54,4.
 
 A CI 535 (`f500cdb`, o lote FUMAÇA-2) passou verde, 48 de 48, na primeira
-tentativa, em 69,8 minutos e 1099 de máquina. As fumaças passaram com as
+tentativa, em 69,9 minutos e 1099 de máquina. As fumaças passaram com as
 esperas que leem só o que entrou no anel depois do pedido e com a sonda da
 rede de cronômetro no retrato. O caso da tela, pelo bloco mais rápido, deu
 113% da cópia no x86 (1699 contra 1496 µs por tela; pelas somas, 101%) e
@@ -17453,23 +17621,23 @@ QEMU 10.2.1, uma tela do ARM custa três vezes e meia a da máquina de
 desenvolvimento, com o 8.2.2. O holdover da bancada de tempo, na parte
 3/3: o x86 a -127 ppm (2056 s em 2056) e o ARM a -3 ppm (2056 s em 2056),
 os dois dentro da guarda. O último job foi o do iniciador do ARM, parte
-1/2, que esperou 30,5 minutos na fila e rodou 28,6; o maior, a persistência
+1/2, que esperou 30,5 minutos na fila e rodou 28,7; o maior, a persistência
 do x86, parte 2/3, com 53,9.
 
 A CI 536 (`ea1cb6e`, o lote A10) passou verde, 48 de 48, na primeira
 tentativa, em 109,6 minutos e 1118 de máquina — esperou os runners da CI
 535. Foi a primeira rodada no runner de verdade do passo do ambiente da
 ação do compilador: ele passou nos 48 jobs, e a ação inteira levou de 15 a
-22 s em cada um, contra 14 a 23 s na CI 535 — a imagem não pôs variável do
-cargo ou do rustup fora da lista fechada, e o PATH e os proxies
-conferiram. No job de lints, a ação com as invariantes dentro levou 78 s,
-com o `xtask` compilado sem o cache, contra uns 16 s da ação e 30 do passo
-das invariantes na CI 535; o job inteiro, 6,8 minutos. O caso da tela deu
-116% no x86 e 105% no ARM. O holdover da bancada de tempo, na parte 3/3: o
-x86 a -137 ppm (2057 s em 2057) e o ARM a -3 ppm (2056 s em 2056), os dois
-dentro da guarda. O último job foi o do SDK da malha entre dispositivos
-(mesma arquitetura), que esperou 47,9 minutos na fila e rodou 23,4; o
-maior, a atualização do ARM, com 50,6.
+22 s em cada um dos outros 47, contra 14 a 23 s na CI 535 — a imagem não
+pôs variável do cargo ou do rustup fora da lista fechada, e o PATH e os
+proxies conferiram. No job de lints, a ação com as invariantes dentro levou
+78 s, com o `xtask` compilado sem o cache, contra uns 16 s da ação e 30 do
+passo das invariantes na CI 535; o job inteiro, 6,8 minutos. O caso da tela
+deu 116% no x86 e 105% no ARM. O holdover da bancada de tempo, na parte
+3/3: o x86 a -137 ppm (2057 s em 2057) e o ARM a -3 ppm (2056 s em 2056),
+os dois dentro da guarda. O último job foi o do SDK da malha entre
+dispositivos (mesma arquitetura), que esperou 47,9 minutos na fila e rodou
+23,4; o maior, a atualização do ARM, com 50,7.
 
 A CI 537 (`fa4fa2b`, o lote A11 e os parágrafos das CIs 533 a 536) passou
 verde, 48 de 48, na primeira tentativa, em 77,1 minutos e 1084 de máquina.

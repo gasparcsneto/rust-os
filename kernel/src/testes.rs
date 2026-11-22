@@ -2764,11 +2764,12 @@ fn medir_o_desenho(tela: &crate::tela::Tela) -> Resultado {
 /// Em depuração, o bloco mais rápido da apresentação vai até o triplo do da
 /// cópia, e o bloco do meio de cada lado, até dez vezes. Pixel a pixel, os
 /// dois ficam dezenas de vezes acima; em três quartos da tela, o do meio.
-/// O que passa: uma regressão de menos que o triplo — a cópia feita duas
-/// vezes por linha passa sempre, de 180% a 245%; três vezes fica no teto,
-/// de 250% a 309%, e passou nas quatro medidas do x86 e em uma das quatro
-/// do ARM —; a que poupe metade da tela — ver "Por que também a mediana"
-/// —; e a de um quarto da tela. Em release, ver "Em release".
+/// O que passa, medido no QEMU 8.2 desta máquina: uma regressão de menos
+/// que o triplo — a cópia feita duas vezes por linha passa sempre, de 180%
+/// a 245%; três vezes fica no teto, de 250% a 309%, e passou nas quatro
+/// medidas do x86 e em uma das quatro do ARM —; a que poupe metade da tela
+/// — ver "Por que também a mediana" —; e a de um quarto da tela. Em
+/// release, ver "Em release".
 ///
 /// E a apresentação tem de escrever: a cópia de referência leva a cada linha
 /// da tela a linha de baixo do padrão, e o último pixel só tem o do padrão
@@ -2853,9 +2854,9 @@ fn medir_o_desenho(tela: &crate::tela::Tela) -> Resultado {
 /// das mesmas rodadas chegaram a 798% e a 559%.
 ///
 /// A premissa é do QEMU 8.2. No QEMU 10.2 da CI, uma tela do ARM custa de
-/// 6,3 a 7,0 ms em depuração, perto de três vezes a daqui, e uma faixa
-/// perto de um milissegundo e meio; a CI 535 passou com o hospedeiro
-/// quieto, a 104%.
+/// 5,4 a 7,0 ms em depuração (as CIs 532 a 536), umas três vezes a daqui, e
+/// uma faixa perto de um milissegundo e meio; a CI 535 passou com o
+/// hospedeiro quieto, a 104%.
 ///
 /// # Por que quinze pares
 ///

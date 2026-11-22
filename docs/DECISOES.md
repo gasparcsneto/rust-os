@@ -2265,8 +2265,9 @@ pendência #298.
     que dizem conferir" e "A tabela nova chega zerada a quem a liga"). A
     marca não chegou a todo lugar nele: o mecanismo do QEMU ficou sem ela
     no Userspace do README, neste dossiê e no caso da carga, e o percurso
-    não especulativo do QEMU, no caso da tabela nova; e, de antes, do
-    trabalho arm-tlbi, o manual da Arm e o percorredor do QEMU. O lote
+    não especulativo do QEMU, no caso da tabela nova; o x86 pelo manual da
+    Intel, no Userspace do README; e, de antes, do trabalho arm-tlbi, o
+    manual da Arm e o percorredor do QEMU. O lote
     ICACHE-3 as marcou (o E1 do revisor do lote ICACHE-2).
 
   O lote A10, [B], fez os achados do adversário do lote A9 — os dois altos,
@@ -2372,11 +2373,13 @@ pendência #298.
   do revisor do lote ICACHE-2 e da correção do shift, sem autoridade,
   regra, registro, identidade, persistência ou semântica de auditoria
   novos:
-  - `smp: desmapear do kernel vale em todo nucleo` discrimina a difusão da
-    remoção, nas duas arquiteturas: o remapeamento não invalida nada — no
-    aarch64, por `mmu::mapear_frame_sem_invalidar_de_teste`, só da suíte —,
-    o leitor e o fio do caso ficam mascarados na janela, com o aperto por
-    fases, e a rodada que viu um `tlbi` de fora se repete. No aarch64, o
+  - `smp: desmapear do kernel vale em todo nucleo` vê a remoção que não
+    difunde — a que invalida só neste núcleo —, nas duas arquiteturas (a que
+    não invalida em núcleo nenhum, no x86, só desde o lote ICACHE-4, abaixo):
+    o remapeamento não invalida nada — no aarch64, por
+    `mmu::mapear_frame_sem_invalidar_de_teste`, só da suíte —, o leitor e o
+    fio do caso ficam mascarados na janela, com o aperto por fases, e a
+    rodada que viu um `tlbi` de fora se repete. No aarch64, o
     `tlbi` do mapeamento novo cobria a remoção com o `tlbi` só deste núcleo,
     que passava; no x86, uma troca de `CR3` no núcleo do leitor podia
     esconder a falta do aviso;
@@ -2386,9 +2389,11 @@ pendência #298.
     caso que o deixa mudado reprova. A varredura achou 32 casos que o
     deixavam — os invólucros `com_grupo` e `com_chaves` não esqueciam as
     lápides, os casos que terminam num boot de teste deixavam o registro
-    como o journal o diz, e os da bancada que anulam uma chave
-    registravam um agente sem devolvê-lo —, e cada um o devolve agora: a
-    suíte inteira passa nas duas arquiteturas, pelas partes da CI;
+    como o journal o diz (e a política e as pessoas também, que só o lote
+    ICACHE-4 devolve), e os da bancada que anulam uma chave no meio de uma
+    chamada, e o de cada chave ser um principal, registravam um agente sem
+    devolvê-lo —, e cada um o devolve agora: a suíte inteira passa nas duas
+    arquiteturas, pelas partes da CI;
   - na suíte, a conta dos `tlbi` de fora e o `tlbi` saem do mesmo núcleo,
     com as interrupções mascaradas entre os dois; e, no x86, uma barreira
     do compilador entre os zeros da tabela nova e a entrada que a liga;
@@ -2432,6 +2437,36 @@ pendência #298.
   testes novos no hospedeiro e um reforçado, e as mutações do lote (*As do
   lote A12*, no
   [README](../README.md#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
+
+  Depois do lote A12, o lote ICACHE-4, [B], fez os achados do adversário
+  do lote ICACHE-3 e os itens do revisor da rodada 4 — menos os do lote
+  A11 e a linha `executado:` do interpretador, que são dos lotes A12 e
+  EXECUTADO —, sem
+  autoridade, regra, registro, identidade, persistência ou semântica de
+  auditoria novos, e só na suíte:
+  - `smp: desmapear do kernel vale em todo nucleo` vê também a remoção que
+    não invalida em núcleo nenhum — no x86 ela passava: o caso escrevia o
+    conteúdo novo pela tradução velha deste núcleo, no frame antigo, e o
+    leitor o lia de lá — e a que avisa só parte dos núcleos: o conteúdo
+    novo entra pelo mapa da memória física antes do mapeamento, este
+    núcleo lê a página antes e depois da troca, e há um leitor mascarado
+    em cada núcleo secundário;
+  - o executor confere também a política em vigor e o registro de pessoas,
+    e devolve os da imagem: o caso que termina num boot de teste deixava
+    em vigor a última política que um caso de antes da mesma parte
+    escreveu no journal, e o do ponto de commit da hora deixava registrada
+    a pessoa da rodada. A varredura achou mais um caso, o mesmo nas duas
+    arquiteturas — `consoles: reabrir encerra a sessao`, que deixava
+    registrada a pessoa que entrou —, e ele a tira agora;
+  - os controles do executor provam o laço — ele conta as conferências, e
+    um caso no fim da tabela exige uma por caso começado — e cada campo da
+    impressão do registro, um de cada vez;
+  - o texto: o que o caso da remoção discrimina; que o boot de teste repõe
+    também a política, as pessoas e os dispositivos, e o que isso diz da
+    ordem dos casos; o que a conferência não devolve; e os erros de fato e
+    as precisões do revisor nas CIs 533 a 536, no lote ICACHE-3 e no lote
+    FUMAÇA-3 ([README](../README.md#vários-núcleos), "A remoção que não
+    invalida em núcleo nenhum", e [Testes](../README.md#testes)).
 
 ### I7
 

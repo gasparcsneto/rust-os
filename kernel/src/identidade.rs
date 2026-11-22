@@ -1000,10 +1000,13 @@ pub fn esquecer_registrados() {
 /// administradora, por exemplo (o achado 2 do adversário do lote ICACHE-2).
 ///
 /// É o FNV-1a de 64 bits de cada campo, na ordem do registro, com o
-/// tamanho antes de cada campo de tamanho variável: a ordem conta, porque a
-/// busca por chave e por nome acha a primeira. A chave do Duke fica de fora:
-/// ela não é do registro de quem entra, e nem um resumo dela sai daqui. A
-/// impressão serve só para comparar, e não vai para log nenhum.
+/// tamanho antes de cada campo de tamanho variável — menos as fontes de
+/// hora, que entram inteiras pela forma de depuração —: a ordem conta,
+/// porque a busca por chave e por nome acha a primeira. A chave do Duke fica
+/// de fora, e a situação dela também: ela não é do registro de quem entra,
+/// nem um resumo dela sai daqui; e só a leitura da imagem e o selo as mudam
+/// — na suíte, a imagem traz a chave. A impressão serve só para comparar, e
+/// não vai para log nenhum.
 #[cfg(feature = "modo-teste")]
 pub fn impressao_do_registro_de_teste() -> u64 {
     /// O FNV-1a de 64 bits, que também recebe texto formatado.

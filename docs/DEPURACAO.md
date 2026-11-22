@@ -362,7 +362,8 @@ foram uma medida com os sete blocos da apresentação pelo menos uma vez e
 meia acima do de costume, e um da cópia no de costume; e, sem carga, uma
 medida a 91% foi o espelho, com a cópia inteira mais lenta. Mais pares
 encurtam isso: um trecho lento do hospedeiro cobria às vezes os sete pares
-inteiros, e com quinze o caso ficou de 113% a 135%, com e sem carga.
+inteiros, e com quinze o caso ficou de 113% a 135% em depuração, nesta
+máquina, com e sem carga.
 
 E o mínimo só filtra o ruído entre repetições do mesmo trabalho. Entre
 partes diferentes da tela, ele escolhe também a mais barata, e uma
@@ -374,7 +375,7 @@ revisão: a referência de uma medida não pode deixar o mesmo rastro que a
 coisa medida — com a cópia de referência escrevendo o mesmo padrão, a
 conferência do fim não via uma apresentação que não escrevesse nada —; e o
 número de uma medida é do emulador em que foi tirado: no QEMU da CI, uma
-tela do ARM custa perto de três vezes a desta máquina.
+tela do ARM custa de três a três vezes e meia a desta máquina.
 
 ### Quando a lente não acha nada
 
