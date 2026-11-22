@@ -151,6 +151,11 @@ pub(crate) const APELIDO_DO_XTASK: (&str, &str) = ("xtask", "run --quiet --packa
 /// se compila, e é desvio. Uma nova muda a lista, e a mudança é revisada.
 const TABELAS_DO_CONFIG: [&str; 3] = ["alias", "build", "target"];
 
+/// As tabelas do config do cargo na raiz do repositório, onde o `xtask` se
+/// compila e roda ([`desvios_da_configuracao`]): só o apelido, como a ação
+/// do compilador aceita ali — desde o lote A11.
+const TABELAS_DA_RAIZ: [&str; 1] = ["alias"];
+
 /// Os alvos do projeto, os do `rust-toolchain.toml` da raiz: o
 /// `build.target` de um diretório de build é um deles — um alvo de um
 /// arquivo (`alvo.json`) escolhe o ligador ([`desvios_da_configuracao`]).
@@ -314,6 +319,15 @@ const ACOES_OFICIAIS: [&str; 4] = [
 /// As do canário: sem o cache da CI nem a conferência do oficial.
 const ACOES_DO_CANARIO: [&str; 2] = ["actions/checkout", "actions/upload-artifact"];
 
+/// As chaves que o passo da conferência do compilador não tem, num workflow
+/// oficial ([`conferir_os_workflows`]): com o `if:`, a conferência pode não
+/// rodar — um `if: false`, um `if: github.event_name == 'push'` —, e o job
+/// segue sem ela; com o `continue-on-error:`, o job segue com ela
+/// reprovada, e todo `cargo` dele roda depois de uma conferência que
+/// recusou. Desde o lote A11 (a nota do revisor do lote A10): nenhuma regra
+/// as lia.
+const CHAVES_FORA_DO_PASSO_DA_ACAO: [&str; 2] = ["if", "continue-on-error"];
+
 /// O workflow do canário: o único que sobrepõe o compilador.
 const CANARIO: &str = ".github/workflows/canario.yml";
 
@@ -461,7 +475,7 @@ fn observar() -> Compilador {
         },
     )));
     for (rotulo, dir) in &diretorios {
-        desvios.extend(desvios_do_config(dir, rotulo));
+        desvios.extend(desvios_do_config(dir, rotulo, *dir == raiz));
     }
 
     let cargo = Command::new(env!("CARGO"))
@@ -717,10 +731,12 @@ fn desvios_do_ambiente_do_cargo(
 /// escrever cada chave. As variáveis do ambiente, que a consulta não soma, são de
 /// [`desvios_das_variaveis`] e de [`desvios_do_ambiente_do_cargo`]. A
 /// consulta é a do cargo nightly (`-Zunstable-options config get`); o
-/// canário diz se ela mudar.
-fn desvios_do_config(dir: &Path, rotulo: &str) -> Vec<String> {
+/// canário diz se ela mudar. `na_raiz`: `dir` é a raiz do repositório, onde
+/// o `xtask` se compila e roda, e o config é só o apelido
+/// ([`TABELAS_DA_RAIZ`]).
+fn desvios_do_config(dir: &Path, rotulo: &str, na_raiz: bool) -> Vec<String> {
     match config_inteiro(dir) {
-        Ok(config) => desvios_da_configuracao(&config)
+        Ok(config) => desvios_da_configuracao(&config, na_raiz)
             .into_iter()
             .map(|d| format!("em `{rotulo}`, {d}"))
             .collect(),
@@ -771,21 +787,47 @@ fn desvios_do_config(dir: &Path, rotulo: &str) -> Vec<String> {
 /// declara a execução não oficial. O config do kernel tem, além desta, a
 /// conferência exata do `invariantes` (`config_do_kernel_fora`, no
 /// `main.rs`).
-fn desvios_da_configuracao(config: &str) -> Vec<String> {
+///
+/// # A raiz, desde o lote A11
+///
+/// Na raiz, onde o `xtask` se compila e roda, a ação só aceita o apelido, e
+/// esta lista aceitava ali também o `build.target` e os rustflags nas formas
+/// dela — o `-C link-arg=-T…` inclusive, cujo script pode trazer objetos à
+/// ligação do `xtask` (o `INPUT`) —, a outra nota do revisor do lote A10.
+/// Com `na_raiz`, a lista é a de [`TABELAS_DA_RAIZ`], como na ação. Nenhum
+/// uso de hoje quebra: o config da raiz só tem o apelido, e os diretórios
+/// de baixo, que também o leem, têm o alvo e os rustflags nos configs
+/// deles.
+fn desvios_da_configuracao(config: &str, na_raiz: bool) -> Vec<String> {
     let config = Json(config.trim().as_bytes());
     let mut desvios = Vec::new();
     let mut tabelas = Vec::new();
     config.para_cada_chave(|tabela| tabelas.push(tabela));
+    let lista: &[&str] = if na_raiz {
+        &TABELAS_DA_RAIZ
+    } else {
+        &TABELAS_DO_CONFIG
+    };
     for tabela in tabelas
         .iter()
-        .filter(|t| !TABELAS_DO_CONFIG.contains(&chave_legivel(t).as_str()))
+        .filter(|t| !lista.contains(&chave_legivel(t).as_str()))
     {
-        desvios.push(format!(
-            "o config do cargo tem `{}`, fora da lista ({TABELAS_DO_CONFIG:?}): o `[env]`, o \
-             `[host]`, o `[unstable]`, o `[profile]`, o `paths`, o `[source]` e o `[patch]` \
-             escolhem o programa que roda, ou o código que se compila",
-            chave_legivel(tabela)
-        ));
+        desvios.push(if na_raiz {
+            format!(
+                "o config do cargo tem `{}`, na raiz, onde o `xtask` se compila e roda: ali, só o \
+                 apelido oficial ({TABELAS_DA_RAIZ:?}), como na ação do compilador — o alvo, os \
+                 rustflags e o script do ligador do hospedeiro mudariam o `xtask` antes de ele \
+                 conferir qualquer coisa",
+                chave_legivel(tabela)
+            )
+        } else {
+            format!(
+                "o config do cargo tem `{}`, fora da lista ({TABELAS_DO_CONFIG:?}): o `[env]`, o \
+                 `[host]`, o `[unstable]`, o `[profile]`, o `paths`, o `[source]` e o `[patch]` \
+                 escolhem o programa que roda, ou o código que se compila",
+                chave_legivel(tabela)
+            )
+        });
     }
     if let Some(build) = config.member("build") {
         let trocam = chaves_que_trocam(build.raw_str().unwrap_or(""));
@@ -1298,7 +1340,7 @@ pub(crate) fn conferir_o_canal() -> Result<ExitCode, String> {
     }
     for dir in &com_config {
         let rotulo = if dir.is_empty() { "./" } else { dir.as_str() };
-        fora.extend(desvios_do_config(&raiz.join(dir), rotulo));
+        fora.extend(desvios_do_config(&raiz.join(dir), rotulo, dir.is_empty()));
     }
     fora.extend(conferir_os_workflows(&workflows));
     let texto_de = |nome: &str| {
@@ -1440,11 +1482,114 @@ fn nome_da_acao(valor: &str) -> &str {
     valor.split('@').next().unwrap_or(valor)
 }
 
+/// A linha usa a ação do compilador: `uses: ./.github/actions/compilador`,
+/// também como a primeira chave de um item (`- uses: …`).
+fn usa_a_acao_do_compilador(l: &Linha<'_>) -> bool {
+    chave_e_valor(l.texto).is_some_and(|(chave, valor)| {
+        chave == "uses" && nome_da_acao(valor) == "./.github/actions/compilador"
+    })
+}
+
+/// Uma chave de um mapa de YAML, numa linha de código: o índice da linha,
+/// a coluna da chave, a chave e o valor.
+struct Chave<'a> {
+    linha: usize,
+    coluna: usize,
+    chave: &'a str,
+    valor: &'a str,
+}
+
+/// As chaves do item de lista de `linhas` — as de código de um YAML — que
+/// tem a linha `i`, um passo: o item começa no `-` mais próximo acima, de
+/// recuo menor que o da linha — ou nela mesma — e acaba na primeira linha
+/// de recuo igual ou menor que o do `-`. As chaves dele são a que vem
+/// depois do `-`, na mesma linha, e as das linhas na coluna dela; as de
+/// dentro do valor de uma chave — um `with:`, um `env:`, um bloco `|` — não.
+/// Nenhuma, se a linha não está num item.
+fn chaves_do_item<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<Chave<'a>> {
+    let item = |l: &Linha<'_>| l.texto == "-" || l.texto.starts_with("- ");
+    let Some(comeco) = (0..=i)
+        .rev()
+        .find(|&j| item(&linhas[j]) && (j == i || linhas[j].recuo < linhas[i].recuo))
+    else {
+        return Vec::new();
+    };
+    let traco = &linhas[comeco];
+    let fim = (comeco + 1..linhas.len())
+        .find(|&k| !linhas[k].texto.is_empty() && linhas[k].recuo <= traco.recuo)
+        .unwrap_or(linhas.len());
+    let depois = traco.texto[1..].trim_start();
+    let mut chaves = Vec::new();
+    let coluna = if depois.is_empty() {
+        linhas[comeco + 1..fim]
+            .iter()
+            .find(|l| !l.texto.is_empty())
+            .map(|l| l.recuo)
+    } else {
+        let coluna = traco.recuo + traco.texto.len() - depois.len();
+        if let Some((chave, valor)) = chave_e_valor(depois) {
+            chaves.push(Chave {
+                linha: comeco,
+                coluna,
+                chave,
+                valor,
+            });
+        }
+        Some(coluna)
+    };
+    for (k, l) in linhas.iter().enumerate().take(fim).skip(comeco + 1) {
+        if Some(l.recuo) == coluna
+            && !l.texto.is_empty()
+            && let Some((chave, valor)) = chave_e_valor(l.texto)
+        {
+            chaves.push(Chave {
+                linha: k,
+                coluna: l.recuo,
+                chave,
+                valor,
+            });
+        }
+    }
+    chaves
+}
+
+/// As chaves de dentro do valor de `chave` — um mapa em bloco, nas linhas
+/// abaixo dela, mais recuadas que ela —: as da coluna da primeira, como
+/// em [`chaves_do_item`]. Nenhuma, se o valor está na linha da chave.
+fn chaves_de_dentro<'a>(linhas: &[Linha<'a>], chave: &Chave<'a>) -> Vec<Chave<'a>> {
+    if !chave.valor.is_empty() {
+        return Vec::new();
+    }
+    let dentro: Vec<(usize, &Linha<'a>)> = linhas
+        .iter()
+        .enumerate()
+        .skip(chave.linha + 1)
+        .filter(|(_, l)| !l.texto.is_empty())
+        .take_while(|(_, l)| l.recuo > chave.coluna)
+        .collect();
+    let Some(coluna) = dentro.first().map(|(_, l)| l.recuo) else {
+        return Vec::new();
+    };
+    dentro
+        .into_iter()
+        .filter(|(_, l)| l.recuo == coluna)
+        .filter_map(|(k, l)| {
+            chave_e_valor(l.texto).map(|(c, valor)| Chave {
+                linha: k,
+                coluna,
+                chave: c,
+                valor,
+            })
+        })
+        .collect()
+}
+
 /// Os workflows: os oficiais só usam as ações de [`ACOES_OFICIAIS`], não
 /// sobrepõem o compilador e o conferem — `./.github/actions/compilador`,
 /// com `id: compilador` — depois de cada checkout, antes do cache e de
-/// qualquer `cargo`; e toda chave de cache, a principal e as de
-/// restauração, leva o canal. Nada em estilo de fluxo (`{ ... }`), que
+/// qualquer `cargo`, num passo sem as chaves de
+/// [`CHAVES_FORA_DO_PASSO_DA_ACAO`]; e toda chave de cache, a principal e as
+/// de restauração, leva o canal. Nada em estilo de fluxo (`{ ... }`), que
 /// esconderia as chaves desta leitura, e nenhum `uses:` em várias linhas. O
 /// canário sobrepõe, mas não roda nos pushes, não usa o cache nem publica a
 /// proveniência. As ações locais seguem as regras dos workflows oficiais,
@@ -1517,6 +1662,24 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
                     "{nome}: `{}` escreve num rust-toolchain — o canal é o do commit",
                     l.texto
                 ));
+            }
+        }
+        // O passo da conferência roda sempre, e o job para com ela
+        // reprovada.
+        for (i, _) in linhas
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| usa_a_acao_do_compilador(l))
+        {
+            for c in chaves_do_item(&linhas, i) {
+                if CHAVES_FORA_DO_PASSO_DA_ACAO.contains(&c.chave) {
+                    fora.push(format!(
+                        "{nome}: `{}: {}` no passo da conferência do compilador — com um `if:`, \
+                         ela pode não rodar, e o job segue sem ela; com um `continue-on-error:`, \
+                         o job segue com ela reprovada",
+                        c.chave, c.valor
+                    ));
+                }
             }
         }
         if nome.starts_with(".github/actions/") {
@@ -1796,10 +1959,19 @@ fn itens_da_tupla(script: &str, nome: &str) -> Vec<String> {
 }
 
 /// O job de lints da CI oficial — `ci`, o [`CI`] — liga as invariantes na
-/// ação do compilador: o passo dela, no job [`JOB_DE_LINTS`], com
-/// `invariantes: true` no `with:`. As invariantes rodam ali, logo depois das
-/// conferências de fora do cargo, antes do cache e de todo outro `cargo` do
-/// job.
+/// ação do compilador: o primeiro passo do job [`JOB_DE_LINTS`] que a usa
+/// tem `invariantes: true` no `with:` — uma chave do mapa do `with:` do
+/// passo, e não uma linha qualquer dele. As invariantes rodam ali, logo
+/// depois das conferências de fora do cargo, antes do cache e de todo outro
+/// `cargo` do job.
+///
+/// # O `with:`, desde o lote A11
+///
+/// Valia qualquer linha `invariantes: true` do passo, depois do `uses:`: um
+/// `env:` com ela passava, a entrada da ação ficava no padrão, `'false'`, e
+/// as invariantes não rodavam, sem nada acusar (o E6 do revisor do lote
+/// A10). As chaves do passo e as do `with:` se leem pelo recuo
+/// ([`chaves_do_item`], [`chaves_de_dentro`]), em qualquer ordem.
 ///
 /// # Por quê, desde o lote A10
 ///
@@ -1811,50 +1983,39 @@ fn itens_da_tupla(script: &str, nome: &str) -> Vec<String> {
 /// delas (o IN3 do adversário do lote A9). Na ação, nada do repositório
 /// roda entre a conferência e elas, nem o cache.
 fn as_invariantes_na_acao(ci: &str) -> Vec<String> {
-    let cabecalho = format!("  {JOB_DE_LINTS}:");
-    let mut dentro = false;
-    let mut no_passo = false;
-    let mut ligada = false;
-    for linha in ci.lines() {
-        if !dentro {
-            dentro = linha == cabecalho;
-            continue;
-        }
-        if linha.starts_with("  ")
-            && !linha.starts_with("   ")
-            && linha.trim_end().ends_with(':')
-            && !linha.trim_start().starts_with('#')
-        {
-            break;
-        }
-        let t = linha.trim();
-        if t.starts_with('#') {
-            continue;
-        }
-        if linha.starts_with("      - ") {
-            no_passo = false;
-        }
-        if chave_e_valor(t).is_some_and(|(chave, valor)| {
-            chave == "uses" && nome_da_acao(valor) == "./.github/actions/compilador"
-        }) {
-            no_passo = true;
-        }
-        if no_passo
-            && chave_e_valor(t).is_some_and(|(chave, valor)| {
-                chave == "invariantes" && ["true", "'true'", "\"true\""].contains(&valor)
-            })
-        {
-            ligada = true;
-        }
-    }
+    let linhas = linhas_de_codigo(ci);
+    let cabecalho = format!("{JOB_DE_LINTS}:");
+    // O job: da linha dele, no recuo dos jobs, à próxima de recuo igual ou
+    // menor.
+    let ligada = linhas
+        .iter()
+        .position(|l| l.recuo == 2 && l.texto == cabecalho)
+        .is_some_and(|comeco| {
+            let fim = (comeco + 1..linhas.len())
+                .find(|&k| !linhas[k].texto.is_empty() && linhas[k].recuo <= 2)
+                .unwrap_or(linhas.len());
+            let job = &linhas[comeco..fim];
+            job.iter()
+                .position(|l| usa_a_acao_do_compilador(l))
+                .is_some_and(|uso| {
+                    chaves_do_item(job, uso)
+                        .iter()
+                        .filter(|c| c.chave == "with")
+                        .flat_map(|c| chaves_de_dentro(job, c))
+                        .any(|c| {
+                            c.chave == "invariantes"
+                                && ["true", "'true'", "\"true\""].contains(&c.valor)
+                        })
+                })
+        });
     if ligada {
         Vec::new()
     } else {
         vec![format!(
             "{CI}: o job `{JOB_DE_LINTS}` não liga as invariantes na ação do compilador \
-             (`invariantes: true` no `with:` dela): elas rodam ali, antes do cache e de todo outro \
-             `cargo` do job — a formatação, os testes do hospedeiro e o clippy rodam código do \
-             repositório"
+             (`invariantes: true` no `with:` do primeiro passo do job que a usa — num `env:`, ou \
+             noutro passo, não vale): elas rodam ali, antes do cache e de todo outro `cargo` do \
+             job — os testes do hospedeiro e o clippy rodam código do repositório"
         )]
     }
 }
@@ -2231,7 +2392,7 @@ mod testes {
             assert!(VARIAVEIS_QUE_TROCAM.contains(&nome), "{nome}");
         }
         let dir = com_config("rustdoc", "[build]\nrustdoc = \"ferramentas/rustdoc\"\n");
-        let desvios = desvios_do_config(&dir, "rustdoc");
+        let desvios = desvios_do_config(&dir, "rustdoc", false);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(
             desvios.len() == 1 && desvios[0].contains("`build.rustdoc`: troca o compilador"),
@@ -2328,7 +2489,7 @@ mod testes {
             ),
         ] {
             let dir = com_config_cru(nome, &texto);
-            let desvios = desvios_do_config(&dir, nome);
+            let desvios = desvios_do_config(&dir, nome, false);
             let _ = std::fs::remove_dir_all(&dir);
             assert!(
                 desvios.len() == 1
@@ -2346,7 +2507,7 @@ mod testes {
             ),
         ] {
             let dir = com_config_cru(nome, &texto);
-            let desvios = desvios_do_config(&dir, nome);
+            let desvios = desvios_do_config(&dir, nome, false);
             let _ = std::fs::remove_dir_all(&dir);
             assert_eq!(desvios, Vec::<String>::new(), "{nome}");
         }
@@ -2371,7 +2532,7 @@ mod testes {
             ("modelo", ler("sdk/modelo/.cargo/config.toml")),
         ] {
             let dir = com_config(&format!("lista-{nome}"), &texto);
-            let desvios = desvios_do_config(&dir, nome);
+            let desvios = desvios_do_config(&dir, nome, false);
             let _ = std::fs::remove_dir_all(&dir);
             assert_eq!(desvios, Vec::<String>::new(), "{nome}");
         }
@@ -2496,7 +2657,7 @@ mod testes {
         for (nome, texto, esperado) in &casos {
             assert_ne!(texto, &programas, "{nome}");
             let dir = com_config(&format!("lista-{nome}"), texto);
-            let desvios = desvios_do_config(&dir, nome);
+            let desvios = desvios_do_config(&dir, nome, false);
             let _ = std::fs::remove_dir_all(&dir);
             if !desvios.iter().any(|d| d.contains(esperado)) {
                 cegos.push(format!("{nome}: {desvios:?}"));
@@ -3561,13 +3722,39 @@ mod testes {
     /// O job de lints liga as invariantes na ação (no lote A10, o IN3 do
     /// adversário do lote A9): o de verdade passa; sem o `with:`, com
     /// `false`, ou com a entrada noutro passo do job — o do cache — ou noutro
-    /// job, reprova.
+    /// job, reprova. E, desde o lote A11 (o E6 do revisor do lote A10), a
+    /// entrada é uma chave do `with:` do passo: num `env:` do passo, ou mais
+    /// funda dentro do `with:`, reprova; o `with:` antes do `uses:`, ou com
+    /// um comentário dentro, passa.
     #[test]
     fn o_job_de_lints_liga_as_invariantes_na_acao() {
         let ci = include_str!("../../.github/workflows/ci.yml");
         assert_eq!(as_invariantes_na_acao(ci), Vec::<String>::new());
         let ligada = "        with:\n          invariantes: true\n";
         assert_eq!(ci.matches(ligada).count(), 1);
+        let uso = "        id: compilador\n        uses: ./.github/actions/compilador\n";
+        assert!(ci.contains(&format!("{uso}{ligada}")));
+        for (rotulo, texto) in [
+            (
+                "o with antes do uses",
+                ci.replacen(&format!("{uso}{ligada}"), &format!("{ligada}{uso}"), 1),
+            ),
+            (
+                "um comentario no with",
+                ci.replacen(
+                    ligada,
+                    "        with:\n          # so no job de lints\n          invariantes: 'true'\n",
+                    1,
+                ),
+            ),
+        ] {
+            assert_ne!(texto, ci, "{rotulo}");
+            assert_eq!(
+                as_invariantes_na_acao(&texto),
+                Vec::<String>::new(),
+                "{rotulo}"
+            );
+        }
         let do_cache = "          restore-keys: lints-${{ steps.compilador.outputs.canal }}-\n";
         assert_eq!(ci.matches(do_cache).count(), 1);
         for (rotulo, texto) in [
@@ -3575,6 +3762,18 @@ mod testes {
             (
                 "com false",
                 ci.replacen(ligada, "        with:\n          invariantes: false\n", 1),
+            ),
+            (
+                "num env do passo",
+                ci.replacen(ligada, "        env:\n          invariantes: true\n", 1),
+            ),
+            (
+                "fundo no with",
+                ci.replacen(
+                    ligada,
+                    "        with:\n          outra:\n            invariantes: true\n",
+                    1,
+                ),
             ),
             (
                 "noutro passo do job",
@@ -3649,7 +3848,7 @@ mod testes {
             ("pontuada", "build . rustc = \"/opt/rustc\"\n"),
         ] {
             let dir = com_config(nome, texto);
-            let desvios = desvios_do_config(&dir, nome);
+            let desvios = desvios_do_config(&dir, nome, false);
             let _ = std::fs::remove_dir_all(&dir);
             assert_eq!(desvios.len(), 1, "{nome}: {desvios:?}");
             assert!(
@@ -3658,7 +3857,7 @@ mod testes {
             );
         }
         let dir = com_config("sem", "[build]\ntarget = \"x86_64-unknown-none\"\n");
-        let desvios = desvios_do_config(&dir, "sem");
+        let desvios = desvios_do_config(&dir, "sem", false);
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(desvios, Vec::<String>::new());
     }
@@ -3668,10 +3867,49 @@ mod testes {
         // A consulta falha fechada: um config que o cargo não lê — ou uma
         // resposta que mudasse num nightly novo — não passa calado.
         let dir = com_config("quebrado", "[build\nrustc-wrapper = \"sccache\"\n");
-        let desvios = desvios_do_config(&dir, "quebrado");
+        let desvios = desvios_do_config(&dir, "quebrado", false);
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(desvios.len(), 1, "{desvios:?}");
         assert!(desvios[0].contains("não respondeu"), "{desvios:?}");
+    }
+
+    /// A raiz só com o apelido (no lote A11, a outra nota do revisor do lote
+    /// A10), como na ação: o alvo e os rustflags nas formas da lista — o
+    /// script do ligador inclusive — passam fora da raiz, e na raiz cada
+    /// tabela além do `[alias]` se acusa, uma vez; o config da raiz de
+    /// verdade passa.
+    #[test]
+    fn a_raiz_so_com_o_apelido() {
+        for (nome, texto, tabela) in [
+            (
+                "raiz-script",
+                "[target.x86_64-unknown-linux-gnu]\nrustflags = [\"-C\", \"link-arg=-Tligar.ld\"]\n",
+                "`target`",
+            ),
+            (
+                "raiz-cfg",
+                "[target.'cfg(unix)']\nrustflags = [\"--cfg\", \"duke\"]\n",
+                "`target`",
+            ),
+            (
+                "raiz-alvo",
+                "[build]\ntarget = \"x86_64-unknown-none\"\n",
+                "`build`",
+            ),
+        ] {
+            let dir = com_config(nome, texto);
+            let fora_da_raiz = desvios_do_config(&dir, nome, false);
+            let na_raiz = desvios_do_config(&dir, nome, true);
+            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(fora_da_raiz, Vec::<String>::new(), "{nome}");
+            assert!(
+                na_raiz.len() == 1
+                    && na_raiz[0].contains(&format!("o config do cargo tem {tabela}, na raiz")),
+                "{nome}: {na_raiz:?}"
+            );
+        }
+        let raiz = super::super::raiz_do_projeto();
+        assert_eq!(desvios_do_config(&raiz, "./", true), Vec::<String>::new());
     }
 
     #[test]
@@ -3679,7 +3917,7 @@ mod testes {
         let raiz = super::super::raiz_do_projeto();
         for dir in ["", "kernel", "programas", "sdk/modelo"] {
             assert_eq!(
-                desvios_do_config(&raiz.join(dir), dir),
+                desvios_do_config(&raiz.join(dir), dir, dir.is_empty()),
                 Vec::<String>::new(),
                 "{dir}"
             );
@@ -3879,6 +4117,88 @@ jobs:
         assert_ne!(seguidos, OFICIAL);
         let fora = um(".github/workflows/ci.yml", &seguidos);
         assert!(sem_conferencia(&fora), "{fora:?}");
+    }
+
+    /// O passo da conferência sem `if:` nem `continue-on-error:` (no lote
+    /// A11, a nota do revisor do lote A10): com um `if:` — depois do `uses:`,
+    /// antes dele ou como a primeira chave do item —, a conferência pode não
+    /// rodar; com um `continue-on-error:`, o job segue com ela reprovada. Cada
+    /// um reprova, com a chave dele, também numa ação local que a usa. Os
+    /// mesmos noutro passo, ou um `if` dentro do `with:` da ação, não; e os
+    /// workflows de verdade passam.
+    #[test]
+    fn o_passo_da_conferencia_sem_if_nem_continue_on_error() {
+        let passo = "      - name: O compilador\n        id: compilador\n        uses: ./.github/actions/compilador\n";
+        assert_eq!(OFICIAL.matches(passo).count(), 1);
+        for (rotulo, novo, chave) in [
+            (
+                "if depois do uses",
+                format!("{passo}        if: false\n"),
+                "`if: false`",
+            ),
+            (
+                "if antes do uses",
+                passo.replacen(
+                    "        id: compilador\n",
+                    "        if: github.event_name == 'push'\n        id: compilador\n",
+                    1,
+                ),
+                "`if: github.event_name == 'push'`",
+            ),
+            (
+                "if no traco",
+                passo.replacen(
+                    "      - name: O compilador\n",
+                    "      - if: ${{ false }}\n        name: O compilador\n",
+                    1,
+                ),
+                "`if: ${{ false }}`",
+            ),
+            (
+                "continue-on-error",
+                format!("{passo}        continue-on-error: true\n"),
+                "`continue-on-error: true`",
+            ),
+        ] {
+            let texto = OFICIAL.replacen(passo, &novo, 1);
+            assert_ne!(texto, OFICIAL, "{rotulo}");
+            let fora = um(".github/workflows/ci.yml", &texto);
+            assert!(
+                fora.len() == 1
+                    && fora[0].contains(chave)
+                    && fora[0].contains("no passo da conferência do compilador"),
+                "{rotulo}: {fora:?}"
+            );
+        }
+        let local = "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/compilador\n      continue-on-error: true\n";
+        assert_eq!(um(".github/actions/outra/action.yml", local).len(), 1);
+        for texto in [
+            OFICIAL.replacen(
+                "      - name: Testes\n",
+                "      - name: Testes\n        if: false\n        continue-on-error: true\n",
+                1,
+            ),
+            OFICIAL.replacen(
+                passo,
+                &format!("{passo}        with:\n          if: false\n"),
+                1,
+            ),
+        ] {
+            assert_ne!(texto, OFICIAL);
+            assert_eq!(um(".github/workflows/ci.yml", &texto), Vec::<String>::new());
+        }
+        for (nome, texto) in [
+            (
+                ".github/workflows/ci.yml",
+                include_str!("../../.github/workflows/ci.yml"),
+            ),
+            (
+                ".github/workflows/rede-principal.yml",
+                include_str!("../../.github/workflows/rede-principal.yml"),
+            ),
+        ] {
+            assert_eq!(um(nome, texto), Vec::<String>::new(), "{nome}");
+        }
     }
 
     #[test]
