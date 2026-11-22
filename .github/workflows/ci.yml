@@ -65,9 +65,43 @@ jobs:
       # caches novos, e nenhum se restaura de outro compilador. Todo job
       # começa assim; ver "O compilador" no CLAUDE.md e
       # `.github/actions/compilador`.
-      - name: O compilador
+      #
+      # E, só aqui, as invariantes de fonte, pela entrada da ação: o
+      # `cargo xtask invariantes` roda dentro dela, logo depois das
+      # conferências do ambiente, do toolchain e do config do cargo, antes
+      # do cache e de todo outro `cargo` do job — a formatação, os testes do
+      # hospedeiro, os doctests e o clippy rodam código do repositório (os
+      # `build.rs`, os testes), que poderia mudar a árvore que ele lê, ou o
+      # config que decide o que ele roda (o lote A10). Sem o cache, o
+      # `xtask` se compila do zero nesse passo: é o custo de nada vir antes
+      # dele.
+      #
+      # As regras que o projeto segue e ninguém fiscalizava. A primeira:
+      # todo bloco `unsafe` declara a invariante de que depende. É seguida
+      # em todos os blocos do projeto. Um `unsafe` sem invariante escrita é
+      # um `unsafe` cuja invariante ninguém conferiu, e num kernel isso volta
+      # como corrupção em outro lugar.
+      #
+      # A segunda: um comando do agente é descrito em três lugares — o
+      # `ParamSpec` que declara o parâmetro, o `member(...)` que o handler
+      # lê, e a linha da tabela do README — e os três têm de dizer o mesmo.
+      # Quando divergem, nada quebra e nada avisa: o parâmetro ou não faz
+      # efeito, ou é recusado antes de chegar ao handler que o usaria; e um
+      # comando fora da tabela é um comando que ninguém descobre. Seis já
+      # tinham escapado dela quando esta conferência entrou.
+      #
+      # A terceira: a árvore de arquivos do README é a árvore que existe.
+      # Quando esta conferência entrou, um terço dos arquivos do projeto não
+      # aparecia lá e a árvore listava um que já não existia. Um mapa errado
+      # é pior que nenhum mapa.
+      #
+      # As três são de fonte, não precisam de alvo nem de emulador, e por
+      # isso moram aqui.
+      - name: O compilador e as invariantes de fonte
         id: compilador
         uses: ./.github/actions/compilador
+        with:
+          invariantes: true
 
       - name: Cache do cargo
         uses: actions/cache@v4
@@ -139,31 +173,6 @@ jobs:
             cargo clippy --target "$alvo" -- -D warnings
             cargo clippy --target "$alvo" --features modo-teste -- -D warnings
           done
-
-      # As regras que o projeto segue e ninguém fiscalizava.
-      #
-      # A primeira: todo bloco `unsafe` declara a invariante de que depende.
-      # É seguida em todos os blocos do projeto. Um `unsafe` sem invariante
-      # escrita é um `unsafe` cuja invariante ninguém conferiu, e num kernel
-      # isso volta como corrupção em outro lugar.
-      #
-      # A segunda: um comando do agente é descrito em três lugares — o
-      # `ParamSpec` que declara o parâmetro, o `member(...)` que o handler lê,
-      # e a linha da tabela do README — e os três têm de dizer o mesmo. Quando
-      # divergem, nada quebra e nada avisa: o parâmetro ou não faz efeito, ou
-      # é recusado antes de chegar ao handler que o usaria; e um comando fora
-      # da tabela é um comando que ninguém descobre. Seis já tinham escapado
-      # dela quando esta conferência entrou.
-      #
-      # A terceira: a árvore de arquivos do README é a árvore que existe.
-      # Quando esta conferência entrou, um terço dos arquivos do projeto não
-      # aparecia lá e a árvore listava um que já não existia. Um mapa errado é
-      # pior que nenhum mapa.
-      #
-      # As três são de fonte, não precisam de alvo nem de emulador, e por isso
-      # moram aqui.
-      - name: Invariantes de fonte
-        run: cargo xtask invariantes
 
       # Os links da documentação, que é onde o apodrecimento não dói até doer.
       #

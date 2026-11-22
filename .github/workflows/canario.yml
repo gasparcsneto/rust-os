@@ -183,6 +183,19 @@ jobs:
       # inteiro do que o candidato quebra numa rodada só, e não o primeiro
       # defeito. E o `continue-on-error` deixa as outras conferências
       # rodarem — quem reprova a execução é o último passo.
+      #
+      # As invariantes primeiro, como no job de lints, onde elas rodam na
+      # ação do compilador, antes de todo outro `cargo`. O canário não roda
+      # a ação — ele instala outro compilador —: o `xtask` roda com o
+      # candidato graças ao `DUKE_OUTRO_COMPILADOR` do ambiente do job, e
+      # avisa que a execução não é oficial.
+      - name: Invariantes de fonte
+        id: invariantes
+        if: steps.instalacao.outcome == 'success'
+        continue-on-error: true
+        run: |
+          cargo xtask invariantes 2>&1 | tee "$REGISTROS/invariantes.log"
+
       - name: Formatação
         id: formatacao
         if: steps.instalacao.outcome == 'success'
@@ -290,15 +303,6 @@ jobs:
             done
             exit "$falhou"
           } 2>&1 | tee "$REGISTROS/clippy_kernel.log"
-
-      # O `xtask` roda com o candidato graças ao `DUKE_OUTRO_COMPILADOR` do
-      # ambiente do job, e avisa que a execução não é oficial.
-      - name: Invariantes de fonte
-        id: invariantes
-        if: steps.instalacao.outcome == 'success'
-        continue-on-error: true
-        run: |
-          cargo xtask invariantes 2>&1 | tee "$REGISTROS/invariantes.log"
 
       - name: Documentação
         id: documentacao
@@ -726,6 +730,7 @@ jobs:
           # que não esteja aqui aparece na tabela pelo `id`.
           CONFERENCIAS = [
               ("instalacao", "Instalação do compilador candidato"),
+              ("invariantes", "Invariantes de fonte"),
               ("formatacao", "Formatação"),
               ("ferramentas", "O TPM e o servidor HTTP/2 dos testes (apt)"),
               ("testes", "Testes no hospedeiro"),
@@ -733,7 +738,6 @@ jobs:
               ("clippy_iniciador", "Clippy do iniciador, nos dois alvos UEFI"),
               ("clippy_programas", "Clippy dos programas, nas duas arquiteturas"),
               ("clippy_kernel", "Clippy do kernel, nas duas arquiteturas, com e sem modo-teste"),
-              ("invariantes", "Invariantes de fonte"),
               ("documentacao", "Documentação"),
               ("sdk_fora", "SDK fora do repositório: o modelo e o clippy da cópia"),
               ("kernel_x86_64", "Kernel x86_64, nas cinco configurações, sem SIMD"),

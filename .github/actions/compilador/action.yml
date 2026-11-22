@@ -2,53 +2,102 @@
 # compilador" no CLAUDE.md e `xtask/src/compilador.rs`, que confere o mesmo
 # no começo de todo `cargo xtask`.
 #
+# Onde a confiança começa, desde o lote A10: a definição da CI — os
+# workflows e esta ação — é a raiz da confiança, e quem a protege é a
+# revisão. Um passo novo, o `env:` de um passo ou o script daqui mudam o
+# que a CI faz, e nada abaixo deles os confere. Abaixo dela, esta ação
+# garante que o primeiro `cargo` que roda o código do repositório — o
+# `cargo xtask invariantes`, no job de lints — é o do toolchain oficial, no
+# ambiente conferido, sem nada do repositório antes.
+#
 # Roda logo depois do checkout, antes do cache e de qualquer `cargo` (o
-# `cargo xtask invariantes` confere a ordem):
+# `cargo xtask invariantes` confere a ordem), em quatro passos:
 #
-# - lê o canal do `rust-toolchain.toml` como o rustup o lê (é TOML) e
-#   confere que é um nightly com data, e que o arquivo — e o do modelo do
-#   SDK — é o do commit;
-# - recusa as variáveis com que o rustup e o cargo trocam ou embrulham o
-#   compilador;
-# - instala o canal — o proxy do rustup instala o toolchain do arquivo, com
-#   os componentes e os alvos, na primeira chamada — e imprime a versão
-#   completa, o `rustc -Vv` e o `cargo -V`, no log do job;
-# - confere que o `rustc` do PATH é o do canal com o host, pelo sysroot
-#   dele, e que o `cargo` do PATH é o do mesmo sysroot;
-# - devolve o canal, que entra na chave de todo cache: um cache é do
-#   compilador que o encheu, uma promoção começa caches novos, e nenhum se
-#   restaura do compilador anterior.
-#
-# Ela confere o ambiente do job uma vez; um passo seguinte que o mudasse é
-# o que a regra dos workflows do `cargo xtask invariantes` recusa, e todo
-# `cargo xtask` confere de novo.
-#
-# E, desde o lote A9, o passo do executor, em Python, logo depois: o que o
-# config do cargo faz rodar no lugar do que o toolchain rodaria, lido fora
-# do cargo — pela consulta do próprio cargo (`config get`), que lê todo
-# arquivo de config que vale em cada diretório de build, em toda forma, e
-# não roda nada:
-#
-# - em todo diretório de build, o `[alias]` é só o oficial, o do `xtask`;
-#   nenhuma tabela `target` tem executor (`runner`) nem ligador (`linker`);
-#   e a `[build]` não troca o compilador;
-# - na raiz, onde o `xtask` se compila e roda, o config é só o apelido
-#   oficial: os rustflags do hospedeiro escolhem o ligador também
-#   (`-C linker=`), e o `[env]` muda o ambiente do `xtask`;
-# - e nenhum `CARGO_ALIAS_*`, `CARGO_TARGET_*_RUNNER` ou
-#   `CARGO_TARGET_*_LINKER` no ambiente do job.
+# 1. `ambiente`, em Python — o do sistema, `/usr/bin/python3`, e não o do
+#    PATH, que é o que ele confere —, antes de qualquer programa do
+#    toolchain:
+#    - o ambiente do job, por uma lista fechada: dos nomes que o cargo, o
+#      rustc, o rustdoc, o rustfmt e o rustup leem — os que começam por
+#      `CARGO`, `RUST` ou `__CARGO` —, só os que a CI põe (a cor do
+#      terminal e o `RUST_BACKTRACE`) e os da imagem do runner (o
+#      `CARGO_HOME` e o `RUSTUP_HOME`); um nome de fora é erro, com o nome:
+#      os rustflags, o rustdoc, o rustfmt, os ligadores e os executores do
+#      ambiente escolhem o programa que roda no lugar do do toolchain;
+#    - o `CARGO_HOME` e o `RUSTUP_HOME` fora do repositório: os toolchains
+#      e os proxies moram neles;
+#    - o PATH sem entrada relativa nem pasta do repositório, e o `cargo`, o
+#      `rustc`, o `rustdoc` e o `rustfmt` dele os proxies do rustup do
+#      `CARGO_HOME` — ou os binários do toolchain oficial;
+#    - na árvore, nenhum `rust-toolchain` nem `rust-toolchain.toml` fora
+#      dos dois oficiais, e os dois só com as chaves do `[toolchain]` que o
+#      oficial usa — um `path` faria o rustup rodar o `cargo` de uma pasta
+#      —, um nightly com data, o mesmo canal nos dois;
+#    - nenhum `Cargo.toml` da árvore com `cargo-features`, e nenhum perfil
+#      com `rustflags` nem `codegen-backend`: o `profile-rustflags` do
+#      manifesto da raiz escolhia o ligador de tudo o que o perfil compila,
+#      o `xtask` das invariantes inclusive;
+#    - e nenhum arquivo do commit num diretório de saída do cargo (o
+#      `target/` de cada diretório de build): o cargo tomaria um artefato
+#      do commit pelo que ele compilou.
+# 2. `conferir`: o canal do `rust-toolchain.toml`, lido como o rustup o lê
+#    (é TOML), um nightly com data, e o arquivo — e o do modelo do SDK — o
+#    do commit; a instalação — o proxy do rustup instala o toolchain do
+#    arquivo da raiz, que o passo 1 conferiu, com os componentes e os
+#    alvos, na primeira chamada —; e, daí em diante, o toolchain fixado pelo
+#    canal (`RUSTUP_TOOLCHAIN`), e não o que o diretório escolhe: a versão
+#    completa no log, o `rustc -Vv` e o `cargo -V`, o `rustc` o do canal com
+#    o host, pelo sysroot dele, e o `cargo` o do mesmo sysroot. Devolve o
+#    canal, que entra na chave de todo cache: um cache é do compilador que
+#    o encheu, uma promoção começa caches novos, e nenhum se restaura do
+#    compilador anterior.
+# 3. `executor`, em Python, com o toolchain fixado: o que o config do cargo
+#    faz rodar no lugar do que o toolchain rodaria, lido pela consulta do
+#    próprio cargo (`config get`), que lê todo arquivo de config que vale em
+#    cada diretório de build, em toda forma, e não roda nada:
+#    - em todo diretório de build, o `[alias]` é só o oficial, o do
+#      `xtask`; nenhuma tabela `target` tem executor (`runner`) nem ligador
+#      (`linker`); e a `[build]` não troca o compilador nem o rustdoc;
+#    - na raiz, onde o `xtask` se compila e roda, o config é só o apelido
+#      oficial;
+#    - fora da raiz, o config fechado ao que os configs do repositório
+#      usam: o `[alias]`, o `build.target` — um dos alvos do
+#      `rust-toolchain.toml` — e os `rustflags` de cada tabela `target`,
+#      nas formas de hoje (o `--cfg`, e o `-C` com o script do ligador, o
+#      `--no-pie`, o tamanho da página, o modelo de relocação e o
+#      alinhamento dos laços). O resto — o `[env]`, o `[host]`, o
+#      `[unstable]`, o `[profile]`, o `paths`, o `[source]`, o `[patch]` e
+#      os rustflags que escolhem o ligador, por qualquer opção — é erro.
+# 4. `invariantes`, só com a entrada `invariantes: true` — o job de lints —:
+#    o `cargo xtask invariantes`, com o toolchain fixado, logo depois das
+#    conferências, antes do cache e de todo outro `cargo` do job. Nada do
+#    repositório roda antes dele — nem os testes do hospedeiro, nem os
+#    `build.rs` deles, nem a formatação —, e o cache, que vem depois, não
+#    lhe traz artefato nenhum.
 #
 # Por quê: o `cargo xtask` é o `cargo run` do `xtask`, e o `cargo run` passa
 # o binário pelo executor. Um executor do repositório que respondesse
 # `invariantes` com sucesso faria o passo das invariantes passar sem guarda
-# nenhuma, e o mesmo com o `cargo test -p xtask` (o A8 do adversário do
-# lote A8); um apelido é o mesmo ponto; e o ligador da raiz roda ao ligar o
-# próprio `xtask`. Uma guarda de dentro do `xtask` não vê o executor que
-# nunca o chama: ela mora aqui, antes de todo `cargo`. O `xtask` vê o que
+# nenhuma (o A8 do adversário do lote A8); um apelido é o mesmo ponto; o
+# ligador da raiz roda ao ligar o próprio `xtask`. E o que escolhe o
+# programa que roda no lugar do do toolchain não está só no config: o
+# ambiente do job — os rustflags, o rustdoc, o rustfmt — e o toolchain de um
+# diretório — um `rust-toolchain.toml` com `path`, o PATH do job — faziam a
+# própria ação rodar o `cargo` do repositório, ou o ligador do repositório
+# montar o binário do `xtask` (o F1 e o F2 do adversário do lote A9); e o
+# perfil do manifesto da raiz, com o `profile-rustflags`, o mesmo (o achado
+# do lote A10). Uma
+# guarda de dentro do `xtask` não vê o que nunca o chama, nem o que monta o
+# binário dela: ela mora aqui, antes de todo `cargo`. O `xtask` vê o que
 # ainda o chama, no começo de todo comando, e o `cargo xtask invariantes`
-# confere que este passo está aqui (`xtask/src/compilador.rs`).
+# confere que estes passos estão aqui (`xtask/src/compilador.rs`). A ação
+# não escreve no ambiente dos passos seguintes.
 name: O compilador oficial
-description: Instala e confere o compilador do rust-toolchain.toml, imprime a versão e devolve o canal para a chave do cache.
+description: Confere o ambiente, o PATH, os rust-toolchain e os manifestos antes de todo cargo, instala e confere o compilador do rust-toolchain.toml com o toolchain fixado, recusa o executor, o ligador e o apelido do config do cargo, roda as invariantes no job de lints e devolve o canal para a chave do cache.
+inputs:
+  invariantes:
+    description: true só no job de lints — roda o `cargo xtask invariantes` logo depois das conferências, antes de todo outro `cargo` do job.
+    required: false
+    default: 'false'
 outputs:
   canal:
     description: O canal do rust-toolchain.toml, nightly-AAAA-MM-DD.
@@ -56,6 +105,227 @@ outputs:
 runs:
   using: composite
   steps:
+    - id: ambiente
+      shell: /usr/bin/python3 -I {0}
+      run: |
+        import os
+        import re
+        import shutil
+        import subprocess
+        import sys
+        import tomllib
+
+        # A raiz do checkout, onde a ação roda.
+        RAIZ = os.path.realpath(os.getcwd())
+        # A lista fechada do ambiente: dos nomes que o cargo, o rustc, o
+        # rustdoc, o rustfmt e o rustup leem, só os que a CI põe e os da
+        # imagem do runner. Um novo muda a lista, e a mudança é revisada.
+        LEEM = ("CARGO", "RUST", "__CARGO")
+        PERMITIDAS = ("CARGO_HOME", "CARGO_TERM_COLOR", "RUSTUP_HOME", "RUST_BACKTRACE")
+        # Os programas do toolchain que a CI chama pelo nome.
+        PROGRAMAS = ("cargo", "rustc", "rustdoc", "rustfmt")
+        # Os dois rust-toolchain do repositório, e as chaves que o oficial usa.
+        OFICIAIS = ("rust-toolchain.toml", "sdk/modelo/rust-toolchain.toml")
+        CHAVES = ("channel", "components", "targets", "profile")
+        # As chaves de um perfil de um manifesto que escolhem o programa que
+        # compila ou liga: os `rustflags` (o `-C linker=`) e o backend.
+        PERFIL_FORA = ("rustflags", "codegen-backend")
+        # Os diretórios de build do `xtask` (`DIRETORIOS_DOS_BUILDS`, em
+        # `xtask/src/compilador.rs`): o `target/` de cada um é de saída.
+        DIRETORIOS = (
+            "",
+            "kernel",
+            "programas",
+            "iniciador",
+            "sdk/modelo",
+            "target/sdk-fora/projeto",
+        )
+
+        def no_repositorio(caminho):
+            real = os.path.realpath(caminho)
+            return real == RAIZ or real.startswith(RAIZ + os.sep)
+
+        def manifesto_fora(arquivo):
+            """O que um `Cargo.toml` tem que escolhe o programa que compila ou
+            liga: um `cargo-features`, que liga as opções instáveis do
+            manifesto, e um perfil com uma chave de `PERFIL_FORA`, em
+            qualquer tabela dele — o pacote, o `build-override`. Lido como
+            o cargo o lê (é TOML), com os escapes das chaves resolvidos."""
+            try:
+                with open(arquivo, "rb") as aberto:
+                    manifesto = tomllib.load(aberto)
+            except (OSError, ValueError) as e:
+                return [f"{arquivo}: não se lê como TOML: {e}"]
+            achados = []
+            if "cargo-features" in manifesto:
+                achados.append(
+                    f"{arquivo}: cargo-features {manifesto['cargo-features']!r}: liga as opções "
+                    "instáveis do manifesto, como os rustflags de um perfil, que escolhem o ligador "
+                    "de tudo o que o perfil compila — o xtask das invariantes inclusive"
+                )
+            pendentes = [("profile", manifesto.get("profile"))]
+            while pendentes:
+                caminho, tabela = pendentes.pop()
+                if not isinstance(tabela, dict):
+                    continue
+                for chave, valor in sorted(tabela.items()):
+                    if chave in PERFIL_FORA:
+                        achados.append(
+                            f"{arquivo}: {caminho}.{chave}: um perfil escolhe o programa que "
+                            "compila ou liga"
+                        )
+                    pendentes.append((f"{caminho}.{chave}", valor))
+            return achados
+
+        erros = []
+        # O ambiente do job, pela lista fechada.
+        for nome in sorted(os.environ):
+            if nome.startswith(LEEM) and nome not in PERMITIDAS:
+                erros.append(
+                    f"a variável {nome} está no ambiente do job, fora da lista fechada da ação "
+                    f"({', '.join(PERMITIDAS)}): o cargo, o rustc, o rustdoc, o rustfmt e o rustup "
+                    "a leem, e ela pode escolher o programa que roda no lugar do do toolchain — os "
+                    "rustflags, o rustdoc, o rustfmt, o ligador, o executor. Se é da imagem do "
+                    "runner, a lista ganha o nome, revisada"
+                )
+        # As casas do cargo e do rustup, fora do repositório.
+        casa = os.path.expanduser("~")
+        cargo_home = os.environ.get("CARGO_HOME") or os.path.join(casa, ".cargo")
+        rustup_home = os.environ.get("RUSTUP_HOME") or os.path.join(casa, ".rustup")
+        for nome, valor in (("CARGO_HOME", cargo_home), ("RUSTUP_HOME", rustup_home)):
+            if not os.path.isabs(valor) or no_repositorio(valor):
+                erros.append(
+                    f"o {nome} é {valor}, dentro do repositório ou relativo: os toolchains e os "
+                    "proxies que o cargo roda morariam numa pasta do commit"
+                )
+        # O PATH: nenhuma entrada relativa, nenhuma pasta do repositório.
+        for entrada in os.environ.get("PATH", "").split(os.pathsep):
+            if not entrada or not os.path.isabs(entrada):
+                erros.append(
+                    f"o PATH tem a entrada relativa {entrada!r}: ela se resolve no diretório de "
+                    "cada passo, dentro do repositório"
+                )
+            elif no_repositorio(entrada):
+                erros.append(
+                    f"o PATH tem {entrada}, uma pasta do repositório: um programa dela rodaria no "
+                    "lugar do do toolchain"
+                )
+        # Com o PATH ou as casas fora do lugar, nenhum programa roda daqui.
+        if erros:
+            for erro in erros:
+                print(f"::error::{erro}")
+            sys.exit(1)
+
+        # Os dois rust-toolchain oficiais: só as chaves do oficial, o mesmo
+        # canal, um nightly com data.
+        canais = []
+        for arquivo in OFICIAIS:
+            try:
+                with open(arquivo, "rb") as aberto:
+                    dados = tomllib.load(aberto)
+            except (OSError, ValueError) as e:
+                erros.append(f"o {arquivo} não se lê como TOML: {e}")
+                continue
+            tabela = dados.get("toolchain")
+            if set(dados) != {"toolchain"} or not isinstance(tabela, dict):
+                erros.append(
+                    f"o {arquivo} tem {sorted(dados)}, e não só a tabela [toolchain] do oficial"
+                )
+                continue
+            for chave in sorted(set(tabela) - set(CHAVES)):
+                erros.append(
+                    f"o {arquivo} tem toolchain.{chave}, fora das chaves do oficial "
+                    f"({', '.join(CHAVES)}): um `path` faria o rustup rodar o cargo de uma pasta"
+                )
+            canais.append(tabela.get("channel"))
+        canal = None
+        if len(canais) == 2:
+            if isinstance(canais[0], str) and re.fullmatch(r"nightly-\d{4}-\d{2}-\d{2}", canais[0]):
+                canal = canais[0]
+            else:
+                erros.append(
+                    f"o canal {canais[0]!r} do rust-toolchain.toml não é um nightly com data"
+                )
+            if canais[1] != canais[0]:
+                erros.append(
+                    f"o canal {canais[1]!r} do sdk/modelo/rust-toolchain.toml não é o da raiz, "
+                    f"{canais[0]!r}"
+                )
+        # A árvore: nenhum outro rust-toolchain, nenhum manifesto que escolha
+        # o programa que compila ou liga, e nada do commit num diretório de
+        # saída do cargo.
+        lista = subprocess.run(
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            capture_output=True,
+        )
+        if lista.returncode != 0:
+            erros.append(
+                "o git não listou a árvore: os rust-toolchain e os diretórios de saída não se "
+                f"conferem ({lista.stderr.decode(errors='replace').strip()})"
+            )
+        saidas = tuple(f"{d}/target/" if d else "target/" for d in DIRETORIOS)
+        arquivos = [a for a in lista.stdout.decode(errors="replace").split("\0") if a]
+        if os.path.lexists("rust-toolchain"):
+            arquivos.append("rust-toolchain")
+        for arquivo in sorted(set(arquivos)):
+            nome = arquivo.rsplit("/", 1)[-1]
+            if nome in ("rust-toolchain", "rust-toolchain.toml") and arquivo not in OFICIAIS:
+                erros.append(
+                    f"{arquivo}: outro rust-toolchain na árvore — o rustup escolheria por ele o "
+                    "toolchain do diretório, e com um `path`, um cargo do repositório"
+                )
+            if nome == "Cargo.toml" and os.path.isfile(arquivo):
+                erros.extend(manifesto_fora(arquivo))
+            if arquivo.startswith(saidas):
+                erros.append(
+                    f"{arquivo}: um arquivo do commit num diretório de saída do cargo — o cargo o "
+                    "tomaria pelo que ele compilou"
+                )
+        # O cargo, o rustc, o rustdoc e o rustfmt do PATH: os proxies do rustup
+        # do CARGO_HOME, ou os binários do toolchain oficial.
+        proxies = os.path.realpath(os.path.join(cargo_home, "bin"))
+        rustup = os.path.join(proxies, "rustup")
+        toolchains = os.path.realpath(os.path.join(rustup_home, "toolchains"))
+
+        def do_rustup(achado):
+            if os.path.realpath(os.path.dirname(os.path.abspath(achado))) != proxies:
+                return False
+            if not os.path.isfile(rustup):
+                return False
+            if os.path.samefile(achado, rustup):
+                return True
+            with open(achado, "rb") as a, open(rustup, "rb") as b:
+                return a.read() == b.read()
+
+        def do_toolchain_oficial(achado):
+            pasta = os.path.realpath(os.path.dirname(os.path.abspath(achado)))
+            de_cima, ultima = os.path.split(pasta)
+            return (
+                canal is not None
+                and ultima == "bin"
+                and os.path.dirname(de_cima) == toolchains
+                and os.path.basename(de_cima).startswith(f"{canal}-")
+            )
+
+        for programa in PROGRAMAS:
+            achado = shutil.which(programa)
+            if achado is None:
+                erros.append(f"o {programa} não está no PATH")
+            elif not (do_rustup(achado) or do_toolchain_oficial(achado)):
+                erros.append(
+                    f"o {programa} do PATH é {achado}, e não o proxy do rustup do CARGO_HOME "
+                    f"({proxies}) nem o do toolchain oficial: outro programa rodaria no lugar dele"
+                )
+        for erro in erros:
+            print(f"::error::{erro}")
+        if erros:
+            sys.exit(1)
+        print(
+            "o ambiente, o PATH, os rust-toolchain e os manifestos: só as variáveis da lista, os "
+            "proxies do rustup fora do repositório, os dois rust-toolchain oficiais, e nenhum "
+            "manifesto com cargo-features nem perfil que escolha o programa que compila ou liga"
+        )
+
     - id: conferir
       shell: bash
       run: |
@@ -69,13 +339,13 @@ runs:
           echo "::error file=rust-toolchain.toml::o rust-toolchain.toml difere do commit: vale o do commit"
           exit 1
         fi
-        for variavel in RUSTUP_TOOLCHAIN RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER \
-          CARGO_BUILD_RUSTC CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER; do
-          if [ -n "${!variavel:-}" ]; then
-            echo "::error::a variável $variavel está definida: ela troca o compilador"
-            exit 1
-          fi
-        done
+        # A instalação: o proxy do rustup instala o toolchain do
+        # `rust-toolchain.toml` da raiz — que o passo `ambiente` conferiu —,
+        # com os componentes e os alvos, na primeira chamada.
+        rustc -V > /dev/null
+        # Daqui em diante, o toolchain fixado pelo canal, e não o que o
+        # diretório escolhe.
+        export RUSTUP_TOOLCHAIN="$canal"
         rustc -Vv
         cargo -V
         host=$(rustc -Vv | sed -n 's/^host: //p')
@@ -93,12 +363,13 @@ runs:
         echo "canal=$canal" >> "$GITHUB_OUTPUT"
 
     - id: executor
-      shell: python3 -I {0}
+      shell: /usr/bin/python3 -I {0}
       run: |
         import json
         import os
         import subprocess
         import sys
+        import tomllib
 
         # O apelido oficial, e os diretórios de build: os do `xtask`
         # (`DIRETORIOS_DOS_BUILDS`, em `xtask/src/compilador.rs`).
@@ -111,27 +382,54 @@ runs:
             "sdk/modelo",
             "target/sdk-fora/projeto",
         )
-        TROCAM = ("rustc", "rustc-wrapper", "rustc-workspace-wrapper")
+        TROCAM = ("rustc", "rustc-wrapper", "rustc-workspace-wrapper", "rustdoc")
+        # Fora da raiz, o config fechado ao que os configs do repositório usam:
+        # as tabelas, as chaves de cada uma e as formas dos rustflags — o
+        # `--cfg`, e o `-C` com estes valores, ou com o script do ligador.
+        TABELAS = ("alias", "build", "target")
+        FORMAS = (
+            "link-arg=--no-pie",
+            "link-arg=-zmax-page-size=4096",
+            "relocation-model=static",
+            "llvm-args=-align-loops=128",
+        )
+        SCRIPT_DO_LIGADOR = "link-arg=-T"
+
+        with open("rust-toolchain.toml", "rb") as aberto:
+            toolchain = tomllib.load(aberto)["toolchain"]
+        ALVOS = tuple(toolchain["targets"])
+        # Todo `cargo` daqui no toolchain fixado pelo canal, e não no que o
+        # diretório escolhe.
+        ambiente = dict(os.environ, RUSTUP_TOOLCHAIN=toolchain["channel"])
+
+        def rustflag_fora(flags):
+            """O primeiro rustflag fora das formas da lista, ou None."""
+            if isinstance(flags, str):
+                flags = flags.split()
+            if not isinstance(flags, list) or not all(isinstance(f, str) for f in flags):
+                return json.dumps(flags)
+            i = 0
+            while i < len(flags):
+                par = flags[i : i + 2]
+                if len(par) == 2 and (
+                    par[0] == "--cfg"
+                    or (par[0] == "-C" and (par[1] in FORMAS or par[1].startswith(SCRIPT_DO_LIGADOR)))
+                ):
+                    i += 2
+                    continue
+                return " ".join(par)
+            return None
 
         erros = []
-        for nome in sorted(os.environ):
-            if not os.environ[nome]:
-                continue
-            if nome.startswith("CARGO_ALIAS_") or (
-                nome.startswith("CARGO_TARGET_") and nome.endswith(("_RUNNER", "_LINKER"))
-            ):
-                erros.append(
-                    f"a variável {nome} está definida: troca o que o cargo roda no lugar do "
-                    "toolchain, ou o que o `cargo xtask` roda"
-                )
         for diretorio in DIRETORIOS:
             lugar = diretorio or "."
             if not os.path.isdir(lugar):
                 continue
-            rotulo = f"{lugar}/"
+            rotulo = f"{diretorio}/" if diretorio else "./"
             consulta = subprocess.run(
                 ["cargo", "-Zunstable-options", "config", "get", "--format", "json-value"],
                 cwd=lugar,
+                env=ambiente,
                 capture_output=True,
                 text=True,
             )
@@ -140,7 +438,7 @@ runs:
             except ValueError:
                 config = None
             if not isinstance(config, dict):
-                linha = (consulta.stderr.strip().splitlines() or [""])[0]
+                linha = (consulta.stderr.strip().splitlines() or ["(nada)"])[0]
                 erros.append(f"em {rotulo}, o cargo não respondeu à consulta do config: {linha}")
                 continue
             if config.get("alias") != APELIDO:
@@ -148,27 +446,77 @@ runs:
                     f"em {rotulo}, o [alias] do config do cargo é {json.dumps(config.get('alias'))}, "
                     "e não só o oficial: um apelido decide o que o `cargo xtask` roda"
                 )
-            for alvo, tabela in sorted(config.get("target", {}).items()):
+            alvos = config.get("target", {})
+            alvos = alvos if isinstance(alvos, dict) else {"?": alvos}
+            alvos = {a: t if isinstance(t, dict) else {"?": t} for a, t in alvos.items()}
+            for alvo, tabela in sorted(alvos.items()):
                 for chave in ("runner", "linker"):
                     if chave in tabela:
                         erros.append(
                             f"em {rotulo}, o config do cargo define target.{alvo}.{chave}: um "
                             "programa no lugar do que o toolchain rodaria"
                         )
+            build = config.get("build", {})
+            build = build if isinstance(build, dict) else {"?": build}
             for chave in TROCAM:
-                if chave in config.get("build", {}):
+                if chave in build:
                     erros.append(
                         f"em {rotulo}, o config do cargo define build.{chave}: troca o compilador"
                     )
-            a_mais = sorted(set(config) - {"alias"})
-            if not diretorio and a_mais:
+            if not diretorio:
+                a_mais = sorted(set(config) - {"alias"})
+                if a_mais:
+                    erros.append(
+                        f"na raiz, onde o xtask se compila e roda, o config do cargo tem {a_mais}, "
+                        "além do apelido oficial: os rustflags e o ligador do hospedeiro, o [env] e "
+                        "o resto mudam o xtask antes de ele conferir qualquer coisa"
+                    )
+                continue
+            # Fora da raiz, a lista fechada.
+            for tabela in sorted(set(config) - set(TABELAS)):
                 erros.append(
-                    f"na raiz, onde o xtask se compila e roda, o config do cargo tem {a_mais}, além "
-                    "do apelido oficial: os rustflags e o ligador do hospedeiro, o [env] e o resto "
-                    "mudam o xtask antes de ele conferir qualquer coisa"
+                    f"em {rotulo}, o config do cargo tem {tabela}, fora da lista "
+                    f"({', '.join(TABELAS)}): o [env], o [host], o [unstable], o [profile], o "
+                    "paths, o [source] e o [patch] escolhem o programa que roda ou o código que se "
+                    "compila"
                 )
+            for chave in sorted(set(build) - {"target"} - set(TROCAM)):
+                erros.append(
+                    f"em {rotulo}, o config do cargo define build.{chave}, fora da lista (só o "
+                    "build.target)"
+                )
+            if "target" in build and build["target"] not in ALVOS:
+                erros.append(
+                    f"em {rotulo}, o build.target é {json.dumps(build['target'])}, e não um dos "
+                    f"alvos do rust-toolchain.toml ({', '.join(ALVOS)}): um alvo de um arquivo "
+                    "escolhe o ligador"
+                )
+            for alvo, tabela in sorted(alvos.items()):
+                for chave in sorted(set(tabela) - {"rustflags", "runner", "linker"}):
+                    erros.append(
+                        f"em {rotulo}, o config do cargo define target.{alvo}.{chave}, fora da "
+                        "lista (só os rustflags)"
+                    )
+                fora = rustflag_fora(tabela.get("rustflags", []))
+                if fora is not None:
+                    erros.append(
+                        f"em {rotulo}, os rustflags de target.{alvo} têm `{fora}`, fora das formas "
+                        "da lista: um rustflag escolhe o ligador — o -C linker, o -fuse-ld e o -B "
+                        "de um link-arg — e o que se compila"
+                    )
         for erro in erros:
             print(f"::error::{erro}")
         if erros:
             sys.exit(1)
-        print("o executor, o ligador e o apelido do cargo: só o apelido oficial, em todo diretório de build")
+        print(
+            "o executor, o ligador e o apelido do cargo: só o apelido oficial, em todo diretório de "
+            "build, e fora da raiz só o alvo e os rustflags da lista"
+        )
+
+    - id: invariantes
+      if: inputs.invariantes == 'true'
+      shell: bash
+      env:
+        RUSTUP_TOOLCHAIN: ${{ steps.conferir.outputs.canal }}
+      run: |
+        cargo xtask invariantes
