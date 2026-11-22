@@ -9732,7 +9732,22 @@ const RUSTDOCFLAGS_DA_DOCUMENTACAO: (&str, &str) = (
 /// ou com outro valor ([`RUSTDOCFLAGS_DA_DOCUMENTACAO`]). A ação do
 /// compilador ([`compilador`]) cita as variáveis que recusa, e fica de fora
 /// da lista e do `__CARGO`, não do `RUSTFLAGS`: ela não escreve no ambiente
-/// dos passos seguintes, que o `invariantes` confere nela.
+/// dos passos seguintes, que o `invariantes` confere nela. Desde o lote A11,
+/// as linhas de comentário não contam.
+///
+/// # Os comentários e as menções, desde o lote A11
+///
+/// A regra lia também as linhas de comentário — um `# nunca pomos o
+/// RUSTDOCFLAGS aqui` reprovava a CI sem defeito nenhum (o achado 1 do
+/// adversário do lote A10) —, e as regras irmãs dos workflows
+/// (`compilador::conferir_os_workflows`) já as pulavam: um comentário não
+/// põe variável nenhuma. Fora dos comentários, a regra continua a ler o
+/// nome em toda linha, e a menção — o nome de um passo, um `echo` ou um
+/// `grep` num `run:` — reprova como a definição: ela não lê o shell, e um
+/// `echo "CARGO_ENCODED_RUSTFLAGS=…" >> "$GITHUB_ENV"`, um
+/// `${RUSTFLAGS:=…}` ou um `printf -v` põem a variável sem nenhum `env:` nem
+/// atribuição que uma leitura das chaves e das atribuições visse. Quem
+/// precisa citar o nome o cita num comentário.
 ///
 /// # Por quê, desde o lote A8
 ///
@@ -9771,6 +9786,10 @@ fn variaveis_do_cargo_na_ci(relativo: &str, texto: &str) -> Vec<String> {
         .enumerate()
         .filter_map(|(n, linha)| {
             let t = linha.trim();
+            // Um comentário não põe variável nenhuma, nem muda o passo.
+            if t.starts_with('#') {
+                return None;
+            }
             if let Some(nome) = t.strip_prefix("- name:") {
                 passo = Some(nome.trim());
             } else if t.starts_with("- ") {
@@ -9808,7 +9827,8 @@ fn variaveis_do_cargo_na_ci(relativo: &str, texto: &str) -> Vec<String> {
                          do `xtask` ({fora_da_lista:?}; a lista: {VARIAVEIS_DO_CARGO_NA_CI:?}), na \
                          CI — o cargo as lê como o config, e o `xtask` não as tira do build do \
                          kernel: o ligador, o executor, os perfis, os rustflags, o rustdoc dos \
-                         doctests —: {}",
+                         doctests; fora de um comentário, a menção — o nome de um passo, um \
+                         `echo` — conta como a definição —: {}",
                         n + 1,
                         linha.trim()
                     )
@@ -15016,16 +15036,18 @@ mod testes_dos_nomes_protegidos {
     /// As variáveis do cargo na CI (o B3 do adversário do lote A8, no lote
     /// A9): as da lista — a cor, a compilação incremental, o diretório de
     /// saída — passam, num `env:` e numa linha de comando; o ligador de um
-    /// alvo e o do hospedeiro, o executor, os perfis, o `CARGO_BUILD_*`, o
+    /// alvo, o executor do hospedeiro, os perfis, o `CARGO_BUILD_*`, o
     /// `CARGO_ALIAS_*`, o `CARGO_UNSTABLE_*` e o `CARGO_HOME` reprovam, cada um
     /// na linha dele; a ação do compilador, que cita as que recusa, fica de
     /// fora da lista — e não do `RUSTFLAGS`. Os workflows e as ações de
-    /// verdade passam.
+    /// verdade passam. O executor do hospedeiro estava num comentário até o
+    /// lote A11, que tirou os comentários da regra
+    /// (`adversario_a10_o_comentario_que_cita_a_variavel_na_ci`).
     #[test]
     fn as_variaveis_do_cargo_na_ci() {
         let ci = "env:\n  CARGO_TERM_COLOR: always\n  CARGO_INCREMENTAL: 0\n\
-                  run: CARGO_TARGET_DIR=../target cargo clippy\n  CARGO_TARGET_AARCH64_UNKNOWN_NONE_SOFTFLOAT_LINKER: x\n\
-                  # o CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER num comentario\n  \
+                  run: CARGO_TARGET_DIR=../target cargo clippy\n  CARGO_TARGET_AARCH64_UNKNOWN_NONE_SOFTFLOAT_LINKER: x\n  \
+                  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: ./rodar\n  \
                   CARGO_PROFILE_DEV_OPT_LEVEL: 3\n  CARGO_BUILD_JOBS: 1\n  CARGO_ALIAS_XTASK: x\n  \
                   CARGO_UNSTABLE_BUILD_STD: core\n  CARGO_HOME: /x\n";
         let achados = super::variaveis_do_cargo_na_ci(".github/workflows/ci.yml", ci);
@@ -15089,6 +15111,51 @@ mod testes_dos_nomes_protegidos {
                 "        LEEM = (\"CARGO\", \"RUST\", \"__CARGO\")\n"
             ),
             Vec::<String>::new()
+        );
+    }
+
+    /// O achado 1 do adversário do lote A10, no lote A11: um comentário de
+    /// um workflow que cita o `RUSTFLAGS`, o `RUSTDOCFLAGS` ou uma variável do
+    /// cargo fora da lista — no começo do arquivo, recuado entre os passos ou
+    /// dentro de um `run:` — não reprova, e um `- name:` comentado não muda o
+    /// passo; o controle, as mesmas variáveis num `env:` de verdade, reprova
+    /// cada uma na linha dela; e, fora de um comentário, a menção — o nome de
+    /// um passo, um `echo`, um `grep` — reprova como a definição.
+    #[test]
+    fn adversario_a10_o_comentario_que_cita_a_variavel_na_ci() {
+        let ci = ".github/workflows/ci.yml";
+        let comentarios = "# Nota: este workflow nao define RUSTDOCFLAGS em passo nenhum.\n\
+                           jobs:\n  qualidade:\n    steps:\n      \
+                           # nem RUSTFLAGS, nem CARGO_NET_RETRY, nem __CARGO_TESTS_ONLY_SRC_ROOT\n      \
+                           - name: Testes\n        run: |\n          \
+                           # o RUSTFLAGS do job ficaria aqui\n          cargo test\n";
+        assert_eq!(
+            super::variaveis_do_cargo_na_ci(ci, comentarios),
+            Vec::<String>::new()
+        );
+        let definidas = "jobs:\n  qualidade:\n    steps:\n      - name: Testes\n        env:\n          \
+                         RUSTFLAGS: -Zx\n          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links\n          \
+                         CARGO_NET_RETRY: 3\n          __CARGO_TESTS_ONLY_SRC_ROOT: f\n        \
+                         run: cargo test\n";
+        assert_eq!(
+            linhas_de(ci, &super::variaveis_do_cargo_na_ci(ci, definidas)),
+            [6, 7, 8, 9]
+        );
+        // O `- name:` comentado não faz do passo o da documentação.
+        let comentado = "      - name: Testes\n      # - name: Documentação\n        env:\n          \
+                         RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links\n";
+        assert_eq!(
+            linhas_de(ci, &super::variaveis_do_cargo_na_ci(ci, comentado)),
+            [4]
+        );
+        let mencoes = "      - name: Checar o RUSTFLAGS\n        run: echo RUSTDOCFLAGS\n      \
+                       - run: grep -r CARGO_NET_RETRY .\n";
+        let achados = super::variaveis_do_cargo_na_ci(ci, mencoes);
+        assert_eq!(linhas_de(ci, &achados), [1, 2, 3]);
+        assert!(
+            achados[0]
+                .contains("a menção — o nome de um passo, um `echo` — conta como a definição"),
+            "{achados:?}"
         );
     }
 
