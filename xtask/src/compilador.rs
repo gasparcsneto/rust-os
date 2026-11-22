@@ -1477,23 +1477,76 @@ fn chamadas_com_outro_toolchain(arquivo: &str, fonte: &str) -> Vec<String> {
         .collect()
 }
 
-/// Uma linha de YAML que não é comentário: o recuo e o texto sem as
-/// bordas. As vazias ficam, com o recuo zero: um bloco `|` pode tê-las.
+/// Uma linha de YAML que não é comentário: o recuo, o texto sem as bordas
+/// e se ela é do conteúdo de um escalar em bloco (`|`, `>`) — um texto, e
+/// não uma chave nem um item do YAML. As vazias ficam, com o recuo zero: um
+/// bloco `|` pode tê-las.
 struct Linha<'a> {
     recuo: usize,
     texto: &'a str,
+    escalar: bool,
 }
 
-/// As linhas de código de um YAML, sem os comentários de linha inteira.
+/// As linhas de código de um YAML, sem os comentários de linha inteira nem
+/// o BOM do começo do arquivo, que o YAML pula, com o conteúdo de cada
+/// escalar em bloco marcado: as linhas, depois da que o abre, mais recuadas
+/// que a chave dele — ou que o `-`, num item que é o bloco —, e as vazias
+/// entre elas ([`abre_um_bloco`]).
 fn linhas_de_codigo(texto: &str) -> Vec<Linha<'_>> {
+    let mut bloco: Option<usize> = None;
     texto
+        .strip_prefix('\u{feff}')
+        .unwrap_or(texto)
         .lines()
         .filter(|l| !l.trim_start().starts_with('#'))
-        .map(|l| Linha {
-            recuo: l.len() - l.trim_start().len(),
-            texto: l.trim(),
+        .map(|l| {
+            let recuo = l.len() - l.trim_start().len();
+            let texto = l.trim();
+            let escalar = bloco.is_some_and(|coluna| texto.is_empty() || recuo > coluna);
+            if !escalar {
+                bloco = abre_um_bloco(texto).map(|coluna| recuo + coluna);
+            }
+            Linha {
+                recuo,
+                texto,
+                escalar,
+            }
         })
         .collect()
+}
+
+/// Se a linha — o texto dela, sem as bordas — abre um escalar em bloco: o
+/// valor dela é `|` ou `>`, com os indicadores de corte e de recuo, e no
+/// máximo um comentário depois. Devolve a coluna, a partir do recuo da
+/// linha, que o conteúdo passa: a da chave, ou a do último `-`, num item que
+/// é o próprio bloco.
+///
+/// # Por quê, desde o lote A13
+///
+/// Um passo da ação escrito como o texto de um bloco — numa entrada do
+/// `with:` do checkout (`nota: |`), num `run:` que o bash não roda — tinha,
+/// para a leitura por linhas, um `-` de item e as chaves dele na coluna
+/// certa: [`item_da_linha`] o tomava pelo passo, e
+/// [`linhas_que_o_passo_nao_le`] o lia inteiro; e a ordem e a contagem o
+/// tomavam pela conferência, que o GitHub não roda — para o YAML, é texto
+/// (o M2 do adversário do lote A12).
+fn abre_um_bloco(texto: &str) -> Option<usize> {
+    let mut corpo = texto;
+    let mut traco = None;
+    while corpo == "-" || corpo.starts_with("- ") {
+        traco = Some(texto.len() - corpo.len());
+        corpo = corpo[1..].trim_start();
+    }
+    let (coluna, valor) = match chave_e_valor(corpo) {
+        Some((_, valor)) => (texto.len() - corpo.len(), valor),
+        None => (traco?, sem_comentario(corpo)),
+    };
+    let indicadores = valor.strip_prefix(['|', '>'])?;
+    (indicadores.len() <= 2
+        && indicadores
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b == b'+' || b == b'-'))
+    .then_some(coluna)
 }
 
 /// Os caracteres de um workflow, ou de uma ação, que o YAML lê de um jeito e
@@ -1627,12 +1680,14 @@ struct Chave<'a> {
 
 /// O item de lista de `linhas` — as de código de um YAML — que tem a linha
 /// `i`, um passo: o começo, no `-` mais próximo acima, de recuo menor que o
-/// da linha — ou nela mesma —; o fim, na primeira linha de recuo igual ou
+/// da linha — ou nela mesma —, que não é do conteúdo de um bloco
+/// ([`abre_um_bloco`]); o fim, na primeira linha de recuo igual ou
 /// menor que o do `-`; e a coluna das chaves dele, a do que vem depois do
 /// `-`, na mesma linha, ou a da primeira linha de baixo. Nenhum, se a linha
 /// não está num item.
 fn item_da_linha(linhas: &[Linha<'_>], i: usize) -> Option<(usize, usize, Option<usize>)> {
-    let item = |l: &Linha<'_>| l.texto == "-" || l.texto.starts_with("- ");
+    // O `-` do conteúdo de um bloco é texto, e não um item.
+    let item = |l: &Linha<'_>| !l.escalar && (l.texto == "-" || l.texto.starts_with("- "));
     let comeco = (0..=i)
         .rev()
         .find(|&j| item(&linhas[j]) && (j == i || linhas[j].recuo < linhas[i].recuo))?;
@@ -4912,6 +4967,76 @@ jobs:
         ] {
             assert_eq!(quebras_que_a_leitura_nao_ve(texto), Vec::new());
         }
+    }
+
+    /// O passo da ação como o texto de um bloco (no lote A13, o M2 do
+    /// adversário do lote A12): o `-`, o `id: compilador` e o `uses:` da ação
+    /// no conteúdo de um escalar em bloco — numa entrada do `with:` do
+    /// checkout, num `run:` literal que o bash não roda, num dobrado com os
+    /// indicadores, num item que é o bloco — contavam como a conferência, que
+    /// o GitHub não roda: cada um reprova. O conteúdo fica marcado, com as
+    /// vazias entre as linhas dele, e a chave seguinte, na coluna do passo,
+    /// não; e um bloco com um item que não é o da ação passa.
+    #[test]
+    fn adversario_a12_o_passo_da_acao_como_texto_de_um_bloco() {
+        let nome = ".github/workflows/ci.yml";
+        let passo = "      - name: O compilador\n        id: compilador\n        uses: ./.github/actions/compilador\n";
+        assert_eq!(OFICIAL.matches(passo).count(), 1);
+        let sem = OFICIAL.replacen(passo, "", 1);
+        let checkout = "      - uses: actions/checkout@v4\n";
+        let falso = |recuo: &str| {
+            format!(
+                "{recuo}- name: O compilador\n{recuo}  id: compilador\n{recuo}  uses: ./.github/actions/compilador\n"
+            )
+        };
+        for (rotulo, bloco) in [
+            (
+                "numa entrada do checkout",
+                format!(
+                    "{checkout}        with:\n          nota: |\n{}",
+                    falso("            ")
+                ),
+            ),
+            (
+                "num run que o bash nao roda",
+                format!(
+                    "{checkout}      - name: Nada\n        run: |\n          : '\n{}          '\n",
+                    falso("          ")
+                ),
+            ),
+            (
+                "num bloco dobrado, com os indicadores e um comentario",
+                format!(
+                    "{checkout}      - name: Nada\n        run: >2-  # texto\n{}",
+                    falso("          ")
+                ),
+            ),
+            (
+                "num item que e o bloco",
+                format!("{checkout}      - |\n{}", falso("        ")),
+            ),
+        ] {
+            let texto = sem.replacen(checkout, &bloco, 1);
+            assert_ne!(texto, sem, "{rotulo}");
+            assert!(!um(nome, &texto).is_empty(), "{rotulo}: passou");
+        }
+        // As linhas do conteúdo, marcadas, e as vazias entre elas; a chave
+        // seguinte, na coluna do passo, não.
+        let linhas = linhas_de_codigo(
+            "      - name: Nada\n        run: |\n          - x: y\n\n            z\n        if: always()\n",
+        );
+        assert_eq!(
+            linhas.iter().map(|l| l.escalar).collect::<Vec<_>>(),
+            [false, false, true, true, true, false]
+        );
+        // O controle: um bloco com um item que não é o da ação, antes do
+        // passo de verdade, passa.
+        let com_bloco = OFICIAL.replacen(
+            checkout,
+            &format!("{checkout}      - name: Lista\n        run: |\n          - item: x\n            outro: y\n"),
+            1,
+        );
+        assert_eq!(um(nome, &com_bloco), Vec::<String>::new());
     }
 
     #[test]
