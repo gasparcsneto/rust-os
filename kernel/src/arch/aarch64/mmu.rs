@@ -1342,6 +1342,11 @@ unsafe fn publicar() {
 /// Deve ser chamada logo após escrever um descritor.
 unsafe fn invalidar(virtual_: u64) {
     #[cfg(feature = "modo-teste")]
+    {
+        ULTIMA_COM_TRADUCAO.store(com_traducao_de_teste(virtual_), Ordering::Release);
+        ULTIMA_INVALIDACAO.store(virtual_, Ordering::Release);
+    }
+    #[cfg(feature = "modo-teste")]
     let anotado = tlbi_comecando(&TLBI_POR_ENDERECO);
     // SAFETY: sequência de manutenção de TLB exigida pelo manual.
     unsafe {
@@ -1360,6 +1365,63 @@ unsafe fn invalidar(virtual_: u64) {
     }
     #[cfg(feature = "modo-teste")]
     tlbi_terminado(anotado);
+}
+
+/// Só para a suíte: o endereço do último `tlbi` difundido por endereço, e
+/// se ele ainda tinha tradução na tabela ativa na hora — ver
+/// [`ultima_invalidacao_de_teste`].
+#[cfg(feature = "modo-teste")]
+static ULTIMA_INVALIDACAO: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "modo-teste")]
+static ULTIMA_COM_TRADUCAO: AtomicBool = AtomicBool::new(false);
+
+/// Só para a suíte: o último `tlbi` difundido por endereço — o endereço,
+/// e se a entrada dele ainda estava na tabela quando o `tlbi` saiu. A
+/// remoção invalida depois de tirar a entrada: invalidados antes, os
+/// núcleos podiam guardar a tradução de novo — por um percurso
+/// especulativo, no hardware — entre o `tlbi` e a escrita da entrada. O
+/// emulador não percorre por especulação, e só esta anotação mostra a
+/// ordem. Numa troca de permissão a entrada continua válida, e a anotação
+/// diz que tinha tradução: quem a lê é o caso da remoção.
+#[cfg(feature = "modo-teste")]
+pub fn ultima_invalidacao_de_teste() -> (u64, bool) {
+    (
+        ULTIMA_INVALIDACAO.load(Ordering::Acquire),
+        ULTIMA_COM_TRADUCAO.load(Ordering::Acquire),
+    )
+}
+
+/// Só para a suíte: `virtual_` tem tradução na raiz ativa agora — o
+/// percurso das três tabelas, só de leitura, sem tocar a página. Chamada
+/// por [`invalidar`], de quem segura [`TRAVA`].
+#[cfg(feature = "modo-teste")]
+fn com_traducao_de_teste(virtual_: u64) -> bool {
+    let (i1, i2, i3) = indices(virtual_);
+    // SAFETY: a MMU está ligada e quem chama segura a trava; só lemos
+    // entradas das tabelas da raiz ativa, que o mapa de identidade alcança.
+    unsafe {
+        let e1 = raiz_ativa().add(i1).read_volatile();
+        if e1 & VALIDO == 0 {
+            return false;
+        }
+        if e1 & TABELA == 0 {
+            return true;
+        }
+        let e2 = ((e1 & MASCARA_ENDERECO) as *const u64)
+            .add(i2)
+            .read_volatile();
+        if e2 & VALIDO == 0 {
+            return false;
+        }
+        if e2 & TABELA == 0 {
+            return true;
+        }
+        ((e2 & MASCARA_ENDERECO) as *const u64)
+            .add(i3)
+            .read_volatile()
+            & VALIDO
+            != 0
+    }
 }
 
 /// Endereço virtual por onde o kernel enxerga uma página física.

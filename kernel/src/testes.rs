@@ -29763,6 +29763,23 @@ fn smp_travas_excluem_entre_nucleos() -> Resultado {
 /// `tlbi` nela — a conta dos de fora fica vazia, e a rodada sai limpa —, e
 /// a rodada repetida de [`ate_uma_rodada_limpa`] fica de guarda para um
 /// núcleo ligado sem leitor.
+///
+/// # A ordem
+///
+/// A invalidação dos outros núcleos tem de sair depois de a entrada sair
+/// da tabela. Na ordem trocada — o aviso, ou o `tlbi` difundido, antes da
+/// escrita da entrada —, um núcleo pode guardar a tradução de novo entre
+/// os dois, por um percurso especulativo no hardware, e ficar com ela
+/// depois de o frame voltar ao alocador. O emulador não percorre por
+/// especulação, e os leitores não tocam a página na janela: as leituras
+/// não veem a ordem trocada, e o caso passava com ela (o adversário da
+/// rodada 5). A remoção anota o último aviso — o endereço, e se a entrada
+/// ainda estava na tabela naquela hora (`ultima_invalidacao_de_teste`, de
+/// cada backend, só na suíte) —, e o caso confere que o da página saiu
+/// com ela fora. A anotação é lida logo depois da remoção, ainda na
+/// janela: todo núcleo está mascarado, e nenhum outro invalida nada no
+/// meio. A remoção que não avisa núcleo nenhum não anota nada, e a
+/// anotação de antes fica; essa, quem a pega são as leituras.
 fn smp_desmapear_do_kernel_vale_em_todos_os_nucleos() -> Resultado {
     #[cfg(target_arch = "aarch64")]
     use crate::arch::aarch64::mmu::mapear_frame_sem_invalidar_de_teste as mapear_sem_invalidar;
@@ -29888,6 +29905,10 @@ fn smp_desmapear_do_kernel_vale_em_todos_os_nucleos() -> Resultado {
             }
         }
         let prontos = esperar_ate(|| PRONTOS.load(SeqCst) == quantos, 300);
+        // A última invalidação dos outros núcleos, lida logo depois da
+        // remoção: o endereço, e se a entrada ainda estava na tabela — ver
+        // "A ordem".
+        let mut aviso = (0, true);
         // A janela, mascarada também deste lado: no aarch64, uma troca de
         // espaço daqui no meio difundiria um `vmalle1is`.
         let r =
@@ -29923,6 +29944,7 @@ fn smp_desmapear_do_kernel_vale_em_todos_os_nucleos() -> Resultado {
                 // fica com o conteúdo antigo, que é o que uma tradução velha
                 // mostraria.
                 let antigo = crate::arch::desmapear(PAGINA)?;
+                aviso = invalidacao_dos_outros_nucleos_de_teste();
                 if let Err(motivo) = remapear() {
                     crate::frames::liberar(antigo);
                     return Err(motivo);
@@ -29964,6 +29986,12 @@ fn smp_desmapear_do_kernel_vale_em_todos_os_nucleos() -> Resultado {
             quantos,
             crate::tempo::uptime_ms().saturating_sub(inicio)
         );
+        crate::log_info!(
+            "teste",
+            "a ultima invalidacao dos outros nucleos: {:#x}, com a entrada ainda na tabela: {}",
+            aviso.0,
+            aviso.1
+        );
         let depois = |n: &usize| LIDO_DEPOIS[*n].load(SeqCst);
         let veredito = if leitores.iter().any(|n| depois(n) == ANTIGO) {
             Err("um nucleo continuou lendo o frame antigo: a traducao nao morreu nele")
@@ -29971,6 +29999,10 @@ fn smp_desmapear_do_kernel_vale_em_todos_os_nucleos() -> Resultado {
             Err("um leitor nao viu nem o conteudo novo nem o antigo")
         } else if aqui != NOVO {
             Err("este nucleo continuou lendo o frame antigo: a remocao nao invalidou nele")
+        } else if aviso.0 != PAGINA {
+            Err("a ultima invalidacao dos outros nucleos nao foi a da pagina")
+        } else if aviso.1 {
+            Err("a remocao avisou os outros nucleos com a traducao ainda na tabela")
         } else {
             Ok(())
         };
@@ -33328,6 +33360,21 @@ fn ate_uma_rodada_limpa(
     Ok(Err(
         "inconclusivo: em todas as rodadas outro nucleo difundiu um tlbi na janela, e ele derrubaria a traducao velha por conta propria",
     ))
+}
+
+/// O último aviso de invalidação aos outros núcleos — o endereço, e se a
+/// entrada dele ainda estava na tabela naquela hora: no x86, o descarte
+/// por NMI; no aarch64, o `tlbi` difundido por endereço. Ver o caso da
+/// remoção, "A ordem".
+fn invalidacao_dos_outros_nucleos_de_teste() -> (u64, bool) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        crate::arch::aarch64::mmu::ultima_invalidacao_de_teste()
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::arch::x86_64::smp::ultima_invalidacao_de_teste()
+    }
 }
 
 /// Os `tlbi` difundidos dos núcleos de fora de `par` até agora, ou `None` se

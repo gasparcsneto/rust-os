@@ -551,6 +551,39 @@ pub fn traduzir(virtual_: u64) -> Option<u64> {
     })
 }
 
+/// Só para a suíte: `virtual_` tem tradução na tabela ativa agora — o
+/// percurso das quatro tabelas pelo mapa da memória física, só de
+/// leitura, sem a trava e sem tocar a página. Quem chama segura
+/// [`TRAVA`] — o aviso aos outros núcleos sai de dentro da remoção — ou
+/// sabe que ninguém muda a tabela no meio.
+#[cfg(feature = "modo-teste")]
+pub fn com_traducao_de_teste(virtual_: u64) -> bool {
+    let deslocamento = DESLOCAMENTO.load(Ordering::Relaxed);
+    if deslocamento == u64::MAX || !canonico(virtual_) {
+        return false;
+    }
+    let (raiz, _) = x86_64::registers::control::Cr3::read();
+    let mut tabela = raiz.start_address().as_u64();
+    for nivel in [39u32, 30, 21, 12] {
+        let indice = ((virtual_ >> nivel) & 0x1FF) as usize;
+        // SAFETY: `tabela` é o frame de uma tabela da hierarquia ativa, e
+        // o mapa da memória física o alcança; só lemos uma entrada.
+        let entrada = unsafe {
+            ((deslocamento + tabela) as *const u64)
+                .add(indice)
+                .read_volatile()
+        };
+        if entrada & PageTableFlags::PRESENT.bits() == 0 {
+            return false;
+        }
+        if nivel != 12 && entrada & PageTableFlags::HUGE_PAGE.bits() != 0 {
+            return true;
+        }
+        tabela = entrada & 0x000F_FFFF_FFFF_F000;
+    }
+    true
+}
+
 /// Endereço virtual por onde o kernel enxerga uma página física.
 ///
 /// Aqui é o deslocamento onde o iniciador mapeou a memória física inteira —

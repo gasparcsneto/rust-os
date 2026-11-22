@@ -434,6 +434,29 @@ pub fn descartes() -> u64 {
     DESCARTES.load(Ordering::Relaxed)
 }
 
+/// Só para a suíte: o endereço do último descarte pedido aos outros
+/// núcleos, e se ele ainda tinha tradução na tabela ativa na hora do
+/// aviso — ver [`ultima_invalidacao_de_teste`].
+#[cfg(feature = "modo-teste")]
+static ULTIMA_INVALIDACAO: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "modo-teste")]
+static ULTIMA_COM_TRADUCAO: AtomicBool = AtomicBool::new(false);
+
+/// Só para a suíte: o último descarte pedido aos outros núcleos — o
+/// endereço, e se a entrada dele ainda estava na tabela quando o aviso
+/// saiu. A remoção avisa depois de tirar a entrada: avisados antes, os
+/// outros núcleos podiam guardar a tradução de novo — por um percurso
+/// especulativo, no hardware — entre o aviso e a escrita da entrada, e
+/// ficar com ela depois de o frame voltar ao alocador. O emulador não
+/// percorre por especulação, e só esta anotação mostra a ordem.
+#[cfg(feature = "modo-teste")]
+pub fn ultima_invalidacao_de_teste() -> (u64, bool) {
+    (
+        ULTIMA_INVALIDACAO.load(Ordering::Acquire),
+        ULTIMA_COM_TRADUCAO.load(Ordering::Acquire),
+    )
+}
+
 /// Faz todos os outros núcleos descartarem a tradução de `virtual_`.
 ///
 /// Chamada por quem acabou de desmapear uma página do **kernel**, com a
@@ -458,6 +481,14 @@ pub fn descartar_nos_outros(virtual_: u64) {
         ALVO.store(virtual_, Ordering::Release);
         FALTAM.store(outros, Ordering::Release);
         DESCARTES.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "modo-teste")]
+        {
+            ULTIMA_COM_TRADUCAO.store(
+                paginacao::com_traducao_de_teste(virtual_),
+                Ordering::Release,
+            );
+            ULTIMA_INVALIDACAO.store(virtual_, Ordering::Release);
+        }
 
         avisar(outros);
 
