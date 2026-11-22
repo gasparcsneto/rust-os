@@ -1410,7 +1410,8 @@ o de desmapeá-la e o de mapeá-la com a permissão final — fazia 49 166, e
 levava de 1,77 a 1,92 s em release com quatro núcleos, contra 0,21 a 0,22
 com um; o `mapear` cheio — 45 056 páginas, um `tlbi` cada —, de 1,92 a 2,01
 s. Mas a arquitetura não deixa a TLB guardar uma entrada que gera falha de
-tradução (o manual da Arm, em *General TLB maintenance requirements*):
+tradução (o manual da Arm, em *General TLB maintenance requirements*,
+citado sem conferir na fonte):
 trocar uma entrada inválida por uma válida não tem o que invalidar, e, para
 o núcleo que a escreve, basta publicar a escrita, com `dsb ishst; isb`. É o
 que fazem, na entrada privada de um processo, o `mapear_frame` — que recusa
@@ -1434,11 +1435,12 @@ neste nucleo e noutro`, nas duas metades — a escrita depois da marca ia pela
 tradução gravável velha, sem falha, e o outro dono a via —; sem o `tlbi` da
 remoção, `smp: desmapear do kernel vale em todo nucleo` — que antes da
 correção não a pegaria: o `tlbi` do mapeamento seguinte a cobria, e desde o
-lote ICACHE a cobre de novo —; sem o
+lote ICACHE a cobria de novo, até o lote ICACHE-3 remapear sem ele (ver "A
+remoção vale nos outros núcleos", abaixo) —; sem o
 `dsb ishst` da entrada nova, ou sem o dos zeros da tabela nova, nenhum caso:
 equivalentes no emulador, cujo percorredor lê a memória do convidado na
-ordem do programa — as barreiras fecham janelas que só um processador de
-verdade abre.
+ordem do programa (o mecanismo, citado sem conferir na fonte do QEMU) — as
+barreiras fecham janelas que só um processador de verdade abre.
 
 **A entrada nova compartilhada leva o `tlbi`.** Dispensar o `tlbi` vale onde
 um núcleo só traduz a entrada: a **privada** de um processo — a faixa do
@@ -1490,7 +1492,8 @@ só então o frame fica livre — com a trava e a máscara de antes. No x86, o
 próximo `invlpg` ou `CR3`: a limpeza agora entrega as tabelas soltas a uma
 lista, um `invlpg` do endereço depois dela as tira dos caches de estrutura,
 e só então elas voltam ao alocador. Nenhum dos dois se vê no emulador: as
-mutações que trocam a ordem de volta passam — o QEMU sem aceleração não
+mutações que os desfazem passam — no ARM, a ordem de volta no `desmapear`;
+no x86, sem o `invlpg` de depois da limpeza —, e o QEMU sem aceleração não
 guarda os níveis intermediários do percurso (o mecanismo, citado sem
 conferir na fonte do QEMU).
 
@@ -1506,8 +1509,9 @@ tlbi`; a remoção sem o `tlbi` (a M3 do adversário), só o caso novo `memoria:
 remapear uma pagina privada neste nucleo nao le o frame antigo`, que lê o
 conteúdo velho — `smp: desmapear do kernel vale em todo nucleo` deixou de
 pegá-la, porque o `tlbi` da entrada nova compartilhada cobre a falta na página
-do kernel, como antes do trabalho arm-tlbi —; o `tlbi` por endereço só neste
-núcleo (a M5), nas duas rodadas, a segunda metade de `memoria: marcar a copia na
+do kernel, como antes do trabalho arm-tlbi; e, com isso, no ARM nenhum caso
+conferia que a remoção difunde, até o lote ICACHE-3 —; o `tlbi` por endereço
+só neste núcleo (a M5), nas duas rodadas, a segunda metade de `memoria: marcar a copia na
 escrita derruba a traducao gravavel da TLB, neste nucleo e noutro` — o outro
 dono viu a escrita, sem resolução nenhuma — e `smp: desmapear do kernel vale em
 todo nucleo`, e a primeira metade passa. Passam, e são equivalentes no emulador,
@@ -1554,19 +1558,25 @@ ICACHE-2, [B], os reforçou:
 - No x86, o caso da remoção remapeia a página sem o `invlpg` que o
   `mapear_frame` faz no fim, e que derrubava a tradução velha com ou sem o
   da remoção: uma entrada que era não presente não pede invalidação (o
-  manual da Intel, citado sem conferir na fonte).
+  manual da Intel, em 4.10.4.3, *Optional Invalidation* — lido em cópias
+  não oficiais, e citado sem conferir na fonte oficial).
 
 **A tabela nova chega zerada a quem a liga.** No x86 o pacote `x86_64` liga a
 tabela de página nova — escreve a entrada que aponta para ela — e só então a
 zera (o `create_next_table`), e o frame vinha do alocador como estava: as
 tabelas de um espaço desmontado voltam com as entradas presentes, e o adversário
-do lote ICACHE mediu 118 de 181 tabelas novas assim. Entre a ligação e o zerar,
+do lote ICACHE mediu 118 de 181 tabelas novas assim, numa rodada do x86 filtrada
+aos casos que criam e desmontam espaços. Entre a ligação e o zerar,
 um percurso — especulativo, deste núcleo, ou de outro numa região do kernel, que
 todos traduzem — leria o conteúdo velho como tabela, e a tradução que tirasse
 dele ficaria na TLB; o zerar do pacote a tira da tabela, e não da TLB. Era de
 antes do lote ICACHE. Agora o `allocate_frame` do x86 zera o frame antes de
 entregá-lo ao pacote — as escritas de um núcleo ficam visíveis na ordem do
-programa, também ao percorredor (citado sem conferir no manual) —; no ARM, o
+programa, também ao percorredor (citado sem conferir no manual) —, e desde o
+lote ICACHE-3 com uma barreira do compilador entre os zeros e a entrada: o
+pacote escreve a entrada por uma `&mut`, e nada impedia o compilador de
+trocar os dois de lugar; o código gerado já saía na ordem (o adversário do
+lote ICACHE-2 desmontou o kernel de produção). No ARM, o
 `descer` já zerava, com o `dsb ishst` antes do descritor. Os outros caminhos que
 dão um frame a uma tabela escrevem a tabela inteira antes de ela ser alcançável:
 a raiz nova de um espaço (`criar_espaco`, que só uma troca de espaço ativa), o
@@ -1596,11 +1606,13 @@ ICACHE, com o caso da tabela nova —, no código final do lote:
   ver.
 - A M5 sem o fio reprova a segunda metade na primeira rodada — "no socio
   0xdddd0000dddd0004", nenhuma resolução — e `smp: desmapear do kernel vale
-  em todo nucleo`; e a máquina para depois, no caso da carga, numa falha
-  fatal (um `instruction_abort` em `pc=0x0`): com a invalidação só local,
-  os fios que leem o `CTR_EL0` nos outros núcleos traduzem a pilha nova
-  pela tradução velha da vaga — o mecanismo provável —, e o `xtask` encerra
-  o emulador depois de 600 s sem caso terminado.
+  em todo nucleo`; e a máquina para depois, no caso da carga, logo depois de
+  ele registrar os quatro `CTR_EL0`, numa falha fatal (um `instruction_abort`
+  em `pc=0x0`): com a invalidação só local, a pilha de um fio que morreu sai
+  da tabela sem sair da TLB dos outros núcleos, e a de um fio novo na mesma
+  vaga — provavelmente o da carga, criado logo depois das leituras — é lida
+  noutro núcleo pela tradução velha (o mecanismo provável, não conferido) —,
+  e o `xtask` encerra o emulador depois de 600 s sem caso terminado.
 - O zerar do `descer` depois do descritor — o defeito do x86 levado ao ARM
   — reprova só o caso da tabela nova, com duas tabelas sujas: a encomendada
   e a que o alocador entregou.
@@ -1616,6 +1628,53 @@ ICACHE, com o caso da tabela nova —, no código final do lote:
   sujas — a encomendada e duas que o alocador entregou assim —; a carga sem
   a sincronia, só o caso da carga; e o `invlpg` de depois da limpeza tirado
   (a M-C) passa, equivalente no emulador.
+
+**A remoção vale nos outros núcleos.** O adversário do lote ICACHE-2 achou
+que, no ARM, nenhum caso conferia que remover uma página do kernel derruba a
+tradução nos **outros** núcleos: `smp: desmapear do kernel vale em todo
+nucleo` mapeava a página de novo pelo `mapear_frame`, cujo `tlbi vaae1is` da
+entrada compartilhada derrubava a tradução velha no leitor com ou sem o da
+remoção, e a remoção com o `tlbi` só deste núcleo (a M-RL dele) passava na
+parte da paginação inteira. No hardware, outro núcleo continuaria traduzindo
+um frame que já voltou ao alocador — a pilha de um fio morto, uma
+superfície, o MMIO. O lote ICACHE-3, [B], fez o caso discriminar a difusão,
+nas duas arquiteturas:
+
+- o remapeamento não invalida nada: no ARM, por
+  `mmu::mapear_frame_sem_invalidar_de_teste`, só da suíte, em que a entrada
+  compartilhada só publica; no x86, pela função do lote ICACHE-2, sem o
+  `invlpg` do `mapear_novo` — que é só deste núcleo, e não alcançava o
+  leitor. No ARM, o leitor faz `dsb ish; isb` entre o aviso e a leitura de
+  depois: sem o `tlbi` do mapeamento, é a segunda das três saídas de
+  `mmu::privada_de_um_processo`;
+- o leitor fica mascarado da primeira leitura à de depois, e o fio do caso,
+  a janela inteira, com o aperto por fases e desistência do caso da marca.
+  Com as esperas sem máscara, uma troca de espaço de um dos dois no meio
+  podia esconder a falta — no ARM, o `vmalle1is` da troca; no x86, a troca de
+  `CR3` no núcleo do leitor, que descarta também as traduções do kernel,
+  porque nenhuma é global;
+- a rodada que viu um `tlbi` difundido de um núcleo de fora do par se
+  repete, até uma limpa, como no caso da marca.
+
+As mutações, em depuração com quatro núcleos, contra a parte da paginação:
+a M-RL reprova só o caso — "um nucleo continuou lendo o frame antigo: a
+traducao nao morreu nele", e o log diz "o nucleo 1 leu
+0xaaaaaaaaaaaaaaaa depois da troca" —; no x86, a remoção sem o aviso aos
+outros núcleos, só com o `invlpg` deste, para a máquina dentro do caso,
+numa falha fatal (um `page_fault` em `pc=0x0`) — as pilhas dos fios
+mortos saem sem o aviso, e a do leitor, numa vaga já usada, é lida no
+outro núcleo pela tradução velha (o mecanismo provável; no ARM, o `tlbi`
+do mapeamento da pilha nova a derruba) —, e a mesma remoção só na página
+do caso, com o aviso nas outras, reprova só o caso, com a mesma falha e o
+mesmo log. Sem elas, 48 de 48 nas duas, com o leitor lendo
+0xbbbbbbbbbbbbbbbb e o veredito na rodada 1.
+
+Na suíte, a conta dos `tlbi` de fora e o `tlbi` saem agora do mesmo
+núcleo: com as interrupções ligadas — a troca de espaço da carga roda assim
+—, o fio podia migrar entre a anotação e o `tlbi`, e o `tlbi` de um núcleo
+entraria na conta de outro (o achado 4 do adversário, teórico). `invalidar`
+e `invalidar_tudo` mascaram as interrupções da anotação ao fim do `tlbi`,
+só com `modo-teste`.
 
 **As travas são justas.** O `spin::Mutex` é um teste-e-troca: ganha quem
 chegar primeiro naquele instante, e um núcleo que solta e pede de novo ganha
@@ -1899,6 +1958,19 @@ não compila.
   de instruções, a falta espúria e a tabela nova pela conta das operações;
   a cache dos níveis intermediários, só a leitura do código. Quem os veria é
   um processador de verdade — o KVM, o HVF, a máquina.
+- O caso da carga confere quantas linhas a sincronia percorre e onde — as
+  contas e a faixa saem da variável do laço, e não do operando de cada `dc
+  cvau` e `ic ivau` —, e não a ordem das passadas, as barreiras, o operando
+  do `asm!` nem núcleos de linhas diferentes: esses só um processador de
+  verdade mostra. Passam, na parte da paginação do ARM, em depuração com
+  quatro núcleos (o lote ICACHE-3, o achado 3 do adversário do lote
+  ICACHE-2), com as mesmas contas e a mesma faixa: a invalidação antes da
+  limpeza (a M-ORDEM), sem o `dsb ish` entre as passadas (a M-DSB), sem o
+  `isb` do fim (a M-ISB) e o `ic ivau` uma linha adiante (a M-OPERANDO);
+  e passam também as linhas só do `CTR_EL0` deste núcleo — no emulador os
+  quatro dão o mesmo —, e, no caso da tabela nova, o `descer` sem o `dsb
+  ishst` entre os zeros e o descritor. Tirar a conta do próprio operando
+  não fecharia a classe: a mutação seguinte iria para dentro do `asm!`.
 - No x86, a remoção trata como privada a entrada de topo do usuário de
   qualquer raiz, também a da raiz do kernel, que os fios do kernel de todos
   os núcleos têm ativa: lá o `invlpg` é só deste núcleo, e as tabelas que
@@ -1975,18 +2047,21 @@ as menores de todos os núcleos — cada um anota as suas ao acordar —, e o
 cobrem; o Cortex-A72, que a CI emula, não anuncia nenhum dos dois. Se a
 carga muda de núcleo no meio da manutenção, o `dsb ish` da troca de espaço
 do núcleo que ela deixa completa a que ficou pendente antes de o fio ser
-solto. No x86 não há o que fazer: o cache de instruções é coerente com as
-escritas, e o processo ou roda no núcleo que escreveu o código, que confere
-as próprias escritas contra o que já buscou, ou entra noutro pela troca de
-`CR3`, que serializa. A carga é o único caminho por onde o kernel escreve
+solto (o alcance do `dsb`, citado sem conferir no manual da Arm). No x86
+não há o que fazer — pelo manual da Intel, citado sem conferir na fonte —:
+o cache de instruções é coerente com as escritas, e o processo ou roda no
+núcleo que escreveu o código, que confere as próprias escritas contra o que
+já buscou, ou entra noutro pela troca de `CR3`, que serializa. A carga é o
+único caminho por onde o kernel escreve
 código: o lançamento e a troca de imagem são a mesma; o `fork` não escreve
 — o filho divide os frames do pai, já sincronizados —; e a cópia na escrita
 nunca copia uma página executável, porque só marca as graváveis, e nenhuma
 página do usuário é gravável e executável (`elf::validar` recusa o segmento
 que pede as duas, e o resto do kernel só mapeia dados para o processo). O
 emulador não mostra a falta — tirada a manutenção, só o caso da conta
-reprova; o QEMU sem aceleração mantém o código traduzido coerente com a
-memória —, e por isso o caso `memoria: a carga sincroniza o cache de
+reprova, na parte da paginação; o QEMU sem aceleração mantém o código
+traduzido coerente com a memória (o mecanismo, citado sem conferir na
+fonte do QEMU) —, e por isso o caso `memoria: a carga sincroniza o cache de
 instrucoes do codigo` confere pela conta: na carga do exemplo, as páginas
 sincronizadas — as do fio dele, e não as da máquina — são as do código, e
 só elas, com uma limpeza e uma invalidação por linha, no tamanho que o caso
@@ -17036,23 +17111,84 @@ runners das CIs 530 e 531. A fumaça do teclado USB do x86, a da CI 527, e o
 caso novo da tela passaram. Reprovou a parte 3/3 da suíte do ARM, 356 de
 357: "pareamento: o terminal de verdade engole fora da coordenacao FALHOU --
 um caractere que o teclado nao produz sem shift". O caso nem chegou a
-digitar: o shift do teclado, que é global, estava apertado desde `usb: o
-relatorio hid vira teclas`, que terminava com o shift do relatório e não o
-soltava. As partes são intercaladas — o caso `i` é da parte `k` de `n`
-quando `i % n == k - 1` —, e o caso novo da tela, no meio da tabela,
+teclar: o `s` da senha, a primeira letra que ele digita pelo teclado, já
+não achava tecla — o shift do teclado, que é global, estava apertado desde
+`usb: o relatorio hid vira teclas`, que terminava com o shift do relatório
+e não o soltava. As partes são intercaladas — o caso `i` é da parte `k` de
+`n` quando `i % n == k - 1` —, e o caso novo da tela, no meio da tabela,
 deslocou os índices de todos os de depois: o do pareamento passou a rodar
-na parte do HID, sem um caso no meio que esvaziasse o teclado. O defeito é
-antigo, de isolamento entre casos, e a falha, determinística: não se rodou
-de novo. A correção fecha a classe: o executor confere o shift que cada
-caso devolve (`estado_da_suite_devolvido`, como o coletor e o journal desde
-a CI 509), o caso do HID solta o shift e confere a minúscula, e um caso no
-fim da tabela é o controle da conferência. As mutações: a conferência sem o
-shift, ou o executor sem soltá-lo, reprovam o caso de controle; o HID sem
-soltar reprova o próprio caso do HID, e o do pareamento passa. O holdover
-da bancada de tempo, na parte 3/3: o x86 a -133 ppm (2056 s em 2056) e o
-ARM a -3 ppm (2056 s em 2056), os dois dentro da guarda. O último job foi o
-dos fluxos entre dispositivos (x86_64 e aarch64), que esperou 48,2 minutos
-na fila e rodou 29,6; o maior, a atualização do ARM, com 49,9.
+na parte do HID, a 3/3, nas duas arquiteturas. No ARM, nenhum caso no meio
+esvaziava o teclado; no x86, o `ponteiro: pacote PS/2`, na mesma parte, o
+esvazia — no ARM ele não faz nada —, e a parte 3/3 do x86 passou. O
+defeito é antigo, de isolamento entre casos, e a falha, determinística: não
+se rodou de novo. A correção fecha a classe do shift apertado, e não a do
+estado global que um caso muda e o seguinte da mesma parte herda: o
+executor confere o que cada caso devolve (`estado_da_suite_devolvido`) — o
+coletor e o journal desde a CI 509, o shift desde esta, e o registro de
+identidade desde o lote ICACHE-3 (abaixo) —, o caso do HID solta o shift e
+confere a minúscula, e um caso no fim da tabela é o controle da
+conferência. O resto do estado global — as filas, o histórico e os cursores
+do teclado, entre outros — continua com a disciplina de cada caso. As
+mutações, no ARM, com a suíte filtrada aos casos do teclado, do HID, do
+pareamento e do executor: a conferência sem o shift, ou o executor sem
+soltá-lo, reprovam o caso de controle; o HID sem soltar reprova o próprio
+caso do HID, e o do pareamento passa. O holdover da bancada de tempo, na
+parte 3/3: o x86 a -133 ppm (2056 s em 2056) e o ARM a -3 ppm (2056 s em
+2056), os dois dentro da guarda. O último job foi o dos fluxos entre
+dispositivos (x86_64 e aarch64), que esperou 48,3 minutos na fila e rodou
+29,6; o maior, a atualização do ARM, com 49,9.
+
+O adversário do lote ICACHE-2 achou mais um estado global que a conferência
+do executor não via: o registro de identidade. `energia: quem nao pode ouve
+a recusa` registrava a chave de teste da suíte como administradora — a
+privada dela está no código da suíte — e não a tirava: o
+`com_agentes_de_teste` do meio devolve o registro ao terminar, e o registro
+dela vinha depois dele. Os casos seguintes da mesma parte rodavam com ela —
+na CI 534, na parte 2/3 do ARM, seis casos e o corpo de um sétimo —, e
+nenhum reprovava só porque nenhum deles contava os administradores; um caso
+novo no meio da tabela, como o da tela na CI 532, poderia pôr depois dele
+um que contasse. O lote ICACHE-3, [B], pôs o registro na conferência: o executor
+tira, antes do primeiro caso, uma impressão dele — os agentes, os
+administradores, os editores, as fontes de hora e as lápides
+(`identidade::impressao_do_registro_de_teste`, só na suíte; a chave do Duke
+fica de fora) — e a compara depois de cada caso; o caso que o deixa mudado
+reprova ("o caso deixou o registro de identidade mudado"), e o executor
+devolve o da imagem, as lápides esquecidas antes da leitura dos arquivos.
+A varredura — a suíte inteira, nas duas arquiteturas, em depuração, pelas
+partes da CI — achou, antes das correções, 32 casos no ARM que deixavam o
+registro mudado — e, na parte 1/3 do x86, os mesmos 17 da parte 1/3 do
+ARM —, por três causas: os invólucros `com_grupo` e `com_chaves`
+esqueciam os registrados, e não as lápides — as revogações por quórum dos
+casos do grupo, e as que o journal reposto trazia nos das chaves —; os
+casos que terminam num boot de teste — a persistência reaberta, ou o
+journal reposto —, da identidade, da compactação, do armazém, da adoção e
+da coleta, deixavam o registro como o journal o diz: os agentes que os
+casos de antes registraram, e as lápides; e os da bancada que anulam uma
+chave no meio de uma chamada, e o de cada chave ser um principal,
+registravam um agente sem devolvê-lo. Os invólucros terminam agora por
+`registro_da_imagem` — as lápides esquecidas, e os arquivos lidos de
+novo, nessa ordem —, e cada um dos outros casos, por
+`com_o_registro_devolvido`, que roda o corpo do caso e devolve o registro
+depois das conferências dele — também um irmão do mesmo molde que a
+varredura não pegou (`adocao: o journal com poucos registros`). Depois
+delas, a varredura passou inteira nas duas arquiteturas: no ARM, 358 de
+358 em cada parte; no x86, 364 de 364, 363 de 363 e 363 de 363 — todo
+veredito dos casos que repetem a rodada, na primeira. O executor diz no
+log o registro em números — os agentes, os administradores e os
+revogados, os editores, as fontes de hora e as lápides — no começo da
+suíte e depois de um caso que o deixa mudado. O
+caso `suite: o executor ve e devolve o registro de identidade que o caso
+mudou`, no fim da tabela — as partes são
+intercaladas, e um caso no meio mudaria a parte de todos os de depois —, é o
+controle da conferência. As mutações, em depuração com quatro núcleos, nas
+duas arquiteturas, com a suíte filtrada ao caso de controle, aos da energia e
+dos processos e à compactação — que grava no journal o registro de um agente,
+que a reconstrução, na cauda, repõe —: sem a comparação, o caso de controle
+reprova ("o executor nao viu o registro de identidade mudado"); sem a
+devolução, também ("o executor nao devolveu o registro de identidade: ele
+ficou mudado"), e o caso seguinte reprova com o registro que ficou; e os três
+casos sem a devolução que o lote lhes deu reprovam, cada um com "o caso deixou
+o registro de identidade mudado". Sem elas, 10 de 10 no ARM e 11 de 11 no x86.
 
 A CI 533 (`c3acd71`, o lote ICACHE-2 e os parágrafos das CIs 530 e 531)
 passou 47 de 48 na primeira tentativa, em 76,2 minutos e 1071 de máquina.

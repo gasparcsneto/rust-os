@@ -33206,8 +33206,9 @@ fn memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel() -> Resultado 
 /// # Por que pela conta, e não pelo efeito
 ///
 /// Porque o emulador não mostra o defeito: tirada a manutenção, só este caso
-/// reprova — o QEMU sem aceleração mantém o código traduzido coerente com a
-/// memória. O caso confere a manutenção pelo número de operações: um fio do
+/// reprova, na parte da paginação — o QEMU sem aceleração mantém o código
+/// traduzido coerente com a memória (o mecanismo, citado sem conferir na
+/// fonte do QEMU). O caso confere a manutenção pelo número de operações: um fio do
 /// kernel carrega o exemplo, e as páginas sincronizadas — as do fio, e não
 /// as da máquina (`paginacao::sincronia_de_teste`) — têm de ser as do
 /// segmento de código, e só elas, com uma limpeza e uma invalidação por
@@ -33712,8 +33713,8 @@ fn memoria_remapear_uma_pagina_privada_neste_nucleo_nao_le_o_frame_antigo() -> R
 /// chegou zerada (`paginacao::tabela_nova_de_teste`), e o caso exige as
 /// tabelas novas deste mapeamento — três no x86, duas no aarch64 —, todas
 /// zeradas. O emulador não mostra a janela: o percurso do QEMU sem
-/// aceleração não é especulativo, e um zerar depois da ligação passaria em
-/// todo caso que olhasse só o resultado.
+/// aceleração não é especulativo (de memória, sem a fonte do QEMU), e um
+/// zerar depois da ligação passaria em todo caso que olhasse só o resultado.
 fn paginacao_a_tabela_nova_chega_zerada_antes_de_ser_ligada() -> Resultado {
     use crate::arch::{self, Permissoes, TAMANHO_PAGINA};
     use crate::paginacao::tabela_nova_de_teste as tabelas;

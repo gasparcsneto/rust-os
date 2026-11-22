@@ -2213,9 +2213,10 @@ pendência #298.
     código: o `fork` divide os frames, e a cópia na escrita nunca copia uma
     página executável — só marca as graváveis, e o `elf::validar` recusa o
     segmento gravável e executável. O emulador não mostra a falta —
-    tirada a manutenção, só o caso da conta reprova; o QEMU sem aceleração
-    mantém o código traduzido coerente com a memória —, e o caso confere a
-    manutenção pela conta das operações;
+    tirada a manutenção, só o caso da conta reprova, na parte da paginação;
+    o QEMU sem aceleração mantém o código traduzido coerente com a memória
+    (o mecanismo, citado sem conferir na fonte do QEMU) —, e o caso confere
+    a manutenção pela conta das operações;
   - o `mapear_frame` volta ao `tlbi` difundido na entrada compartilhada —
     as regiões do kernel e a raiz do kernel —, contra a falta de tradução
     espúria de um núcleo sem o FEAT_ETS (citado sem conferir no manual) que
@@ -2248,19 +2249,25 @@ pendência #298.
     o emulador não mostra nem como falha;
   - as metades do caso da marca, e o caso da remoção no aarch64, repetem a
     rodada em que um núcleo de fora do par difundiu um `tlbi` na janela, até
-    uma limpa, e reprovam sem nenhuma; e o caso da remoção, no x86,
+    uma limpa, em no máximo oito, e reprovam sem nenhuma; e o caso da
+    remoção, no x86,
     remapeia sem o `invlpg` que cobria a remoção sem o dela;
   - no x86, a tabela de página nova chega zerada ao pacote `x86_64`, que a
     liga antes de zerá-la — de antes do lote ICACHE: entre a ligação e o
     zerar, um percurso de tabela leria o que o frame tinha, uma tabela
     velha com as entradas presentes —; um caso novo confere, com um frame
-    sujo encomendado ao alocador, que nenhuma tabela nova chega suja a quem
-    a liga, nas duas arquiteturas;
+    sujo encomendado ao alocador, que as tabelas novas de um mapeamento
+    chegam zeradas a quem as liga, nas duas arquiteturas;
   - o texto: a mutação do x86 que passava não era equivalente, e as
     citações que vieram de memória — o manual da Arm, o FEAT_ETS, os
     manuais da Intel e da AMD, o QEMU — estão marcadas como tais
     ([README](../README.md#vários-núcleos), "Os casos do lote ICACHE veem o
-    que dizem conferir" e "A tabela nova chega zerada a quem a liga").
+    que dizem conferir" e "A tabela nova chega zerada a quem a liga"). A
+    marca não chegou a todo lugar nele: o mecanismo do QEMU ficou sem ela
+    no Userspace do README, neste dossiê e no caso da carga, e o percurso
+    não especulativo do QEMU, no caso da tabela nova; e, de antes, do
+    trabalho arm-tlbi, o manual da Arm e o percorredor do QEMU. O lote
+    ICACHE-3 as marcou (o E1 do revisor do lote ICACHE-2).
 
   O lote A10, [B], fez os achados do adversário do lote A9 — os dois altos,
   os dois médios, as cinco baixas e as seis informativas —, os do revisor
@@ -2360,6 +2367,38 @@ pendência #298.
   revisão. Três testes novos no hospedeiro e dois reforçados, e as
   mutações do lote (*As do lote A11*, no
   [README](../README.md#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
+
+  Depois do lote A11, o lote ICACHE-3, [B], fez os achados do adversário e
+  do revisor do lote ICACHE-2 e da correção do shift, sem autoridade,
+  regra, registro, identidade, persistência ou semântica de auditoria
+  novos:
+  - `smp: desmapear do kernel vale em todo nucleo` discrimina a difusão da
+    remoção, nas duas arquiteturas: o remapeamento não invalida nada — no
+    aarch64, por `mmu::mapear_frame_sem_invalidar_de_teste`, só da suíte —,
+    o leitor e o fio do caso ficam mascarados na janela, com o aperto por
+    fases, e a rodada que viu um `tlbi` de fora se repete. No aarch64, o
+    `tlbi` do mapeamento novo cobria a remoção com o `tlbi` só deste núcleo,
+    que passava; no x86, uma troca de `CR3` no núcleo do leitor podia
+    esconder a falta do aviso;
+  - o executor da suíte confere também o registro de identidade — os
+    agentes, os administradores, os editores, as fontes de hora e as
+    lápides —, pela impressão que tira no começo, e devolve o da imagem: o
+    caso que o deixa mudado reprova. A varredura achou 32 casos que o
+    deixavam — os invólucros `com_grupo` e `com_chaves` não esqueciam as
+    lápides, os casos que terminam num boot de teste deixavam o registro
+    como o journal o diz, e os da bancada que anulam uma chave
+    registravam um agente sem devolvê-lo —, e cada um o devolve agora: a
+    suíte inteira passa nas duas arquiteturas, pelas partes da CI;
+  - na suíte, a conta dos `tlbi` de fora e o `tlbi` saem do mesmo núcleo,
+    com as interrupções mascaradas entre os dois; e, no x86, uma barreira
+    do compilador entre os zeros da tabela nova e a entrada que a liga;
+  - o texto: o que o caso da carga não vê — a ordem das passadas, as
+    barreiras, o operando do `asm!`, núcleos de linhas diferentes —, com
+    as mutações que passam, rodadas; as citações de memória que faltava
+    marcar; a falha fatal da M5; e a CI 532 — por que a parte 3/3 do x86
+    passou, e que a correção fechou a classe do shift, e não a do estado
+    global ([README](../README.md#vários-núcleos), "A remoção vale nos
+    outros núcleos", e [Testes](../README.md#testes)).
 
 ### I7
 

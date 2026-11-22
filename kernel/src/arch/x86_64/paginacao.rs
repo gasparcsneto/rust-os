@@ -156,8 +156,9 @@ unsafe impl FrameAllocator<Size4KiB> for AlocadorDeFrames {
     /// dono, ou páginas grandes. A tradução que saísse dali ficaria na TLB: o
     /// zerar do pacote a tira da tabela, e não da TLB, e o `invlpg` do fim do
     /// mapeamento é só da página mapeada (o achado 4 do adversário do lote
-    /// ICACHE, de antes dele; medido por ele, 118 de 181 tabelas novas
-    /// chegavam com entradas presentes de antes).
+    /// ICACHE, de antes dele; medido por ele, numa rodada do x86 filtrada aos
+    /// casos que criam e desmontam espaços, 118 de 181 tabelas novas chegavam
+    /// com entradas presentes de antes).
     ///
     /// Zerada aqui, ela chega vazia a quem a liga. As escritas de um núcleo
     /// ficam visíveis na ordem do programa no x86, também ao percorredor de
@@ -306,8 +307,9 @@ pub unsafe fn mapear_frame(
 /// sem o `invlpg` dela (o E1 do revisor do lote ICACHE). Remapeando por
 /// aqui, só o `invlpg` da remoção derruba a tradução velha: a entrada era
 /// não presente, e nenhuma TLB guarda tradução de uma entrada não presente
-/// (o manual da Intel, citado sem conferir na fonte, dispensa a invalidação
-/// nessa troca).
+/// (o manual da Intel, em 4.10.4.3, *Optional Invalidation*, dispensa a
+/// invalidação nessa troca — lido em cópias não oficiais, e citado sem
+/// conferir na fonte oficial).
 ///
 /// # Safety
 ///

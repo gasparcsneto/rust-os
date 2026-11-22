@@ -1271,7 +1271,8 @@ pub fn tlbi_de_fora_de_teste(par: &[usize]) -> Option<u64> {
 ///
 /// Porque não há o que invalidar. O manual da arquitetura — o *Arm
 /// Architecture Reference Manual for A-profile architecture* (DDI 0487), em
-/// *General TLB maintenance requirements*, no capítulo da VMSA do AArch64 —
+/// *General TLB maintenance requirements*, no capítulo da VMSA do AArch64;
+/// citado de memória, e a frase entre aspas também, sem conferir na fonte —
 /// deixa a TLB guardar, a qualquer momento, toda entrada que não gera uma
 /// falha de tradução, de tamanho de endereço ou do bit de acesso — também a
 /// que só gera uma falha de permissão —, e só garante fora dela as que geram
@@ -1492,8 +1493,8 @@ fn linhas_da_sincronia() -> (Option<u64>, Option<u64>) {
 ///
 /// Nada: o QEMU sem aceleração mantém o código traduzido coerente com a
 /// memória (o mecanismo, citado sem conferir na fonte do QEMU). Tirar esta
-/// manutenção deixou passar, nas rodadas do lote ICACHE, a parte da
-/// paginação inteira, menos o caso `memoria: a carga sincroniza o cache de
+/// manutenção deixou passar, nas rodadas dos lotes ICACHE e ICACHE-2, a
+/// parte da paginação inteira, menos o caso `memoria: a carga sincroniza o cache de
 /// instrucoes do codigo`, que confere a conta das operações — o que esta
 /// função devolve, contra o `CTR_EL0` que o próprio caso lê, e a faixa que
 /// ela percorreu.
@@ -1502,7 +1503,8 @@ fn linhas_da_sincronia() -> (Option<u64>, Option<u64>) {
 ///
 /// A carga roda com as interrupções ligadas, e o fio pode migrar no meio do
 /// `dc cvau` ou do `ic ivau`: o `dsb ish` do núcleo em que ele retoma não
-/// espera a manutenção que o anterior emitiu. Quem a completa é o `dsb ish`
+/// espera a manutenção que o anterior emitiu (o alcance do `dsb`, citado sem
+/// conferir no manual). Quem a completa é o `dsb ish`
 /// de [`trocar_espaco`] no núcleo que o fio deixa — o seguinte ali é o
 /// ocioso ou um fio do kernel, com a raiz do kernel, ou outro processo, e a
 /// raiz muda sempre —, e a troca só solta o fio para outro núcleo depois
