@@ -23818,10 +23818,33 @@ fn saida_desde(registros: &[RegistroDoLog], desde: u64, codigo: i64) -> Option<u
         .map(|r| r.seq)
 }
 
-/// O kernel num instante, pelos relatórios que um agente lê: o relógio, o
-/// pulso de cada núcleo, as apresentações da tela e quantos registros de log
-/// já saíram. Dois retratos, um de cada lado de uma janela, dizem o que a
-/// encheu — ver [`Retrato::janela`].
+/// O período do timer do kernel, em milissegundos: 100 Hz nas duas
+/// arquiteturas (o `HZ` de `kernel/src/arch/*/mod.rs`). É o passo do relógio
+/// que o `system.info` dá, e a folga de uma comparação dele com o do
+/// hospedeiro.
+const PERIODO_DO_TIMER_MS: u64 = 10;
+
+/// O kernel por quatro relatórios que um agente lê, um depois do outro: o
+/// relógio e o pulso de cada núcleo (`system.info`), os avanços do executor
+/// (`tasks.stats`), as apresentações da tela (`display.info`) e quantos
+/// registros de log já saíram (`log.tail`) — e, no relógio do hospedeiro,
+/// quando o primeiro foi pedido e respondido. Dois retratos, um de cada lado
+/// de uma janela, dizem o que a encheu — ver [`Retrato::janela`].
+///
+/// # Não é um instante
+///
+/// São quatro pedidos seguidos, e cada contador é lido na hora do pedido
+/// dele. O que acontece entre o primeiro e o último pedido do retrato de
+/// depois conta nos relatórios lidos depois, e não nos de antes: uma linha
+/// que rola o console logo depois do `system.info` de depois entra nas
+/// apresentações e nas linhas da janela, e o tempo em que ela mascarou o
+/// núcleo dos dispositivos, não — fica fora dos tiques. No retrato de antes
+/// é o contrário: o que acontece entre o `system.info` e o `log.tail` dele
+/// conta nos tiques, e não nas apresentações nem nas linhas. A borda é de
+/// uns poucos pedidos, mas uma apresentação inteira cabe nela: a linha pode
+/// contar a menos, no tempo mascarado, até a apresentação que ela mostra
+/// (o revisor do lote FUMAÇA-USB, numa rodada com uma rolagem e ~30 ms sem
+/// tique). O ping não muda: o cronômetro para antes do retrato de depois.
 ///
 /// # Por que a sonda da rede tira retratos
 ///
@@ -23835,9 +23858,17 @@ fn saida_desde(registros: &[RegistroDoLog], desde: u64, codigo: i64) -> Option<u
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Retrato {
     uptime_ms: u64,
+    /// Quando, no relógio do hospedeiro, o `system.info` foi pedido e
+    /// quando a resposta dele chegou: o kernel leu o relógio dele entre os
+    /// dois.
+    relogio_lido: (Instant, Instant),
     /// Os tiques do timer de cada núcleo, na ordem do índice: o dos
     /// dispositivos, o zero, primeiro.
     tiques: Vec<u64>,
+    /// Quantas vezes o executor avançou uma tarefa, e quantas foi acordado
+    /// — os `polls` e os `wakes` do `tasks.stats`.
+    avancos: u64,
+    despertares: u64,
     /// Quantas atualizações chegaram à tela — zero sem compositor.
     apresentacoes: u64,
     /// A última delas: x, y, largura e altura.
@@ -23848,8 +23879,8 @@ struct Retrato {
 
 impl Retrato {
     /// Pelo canal de `pedir`: a serial, ou um agente com `system.read` e
-    /// `log.read` no papel — o `display.info` também é de `system.read` —,
-    /// como o observador e quem herda dele.
+    /// `log.read` no papel — o `tasks.stats` e o `display.info` também são
+    /// de `system.read` —, como o observador e quem herda dele.
     ///
     /// Devolve também a hora, no hospedeiro, em que a última resposta
     /// chegou: o começo do cronômetro de uma medida que comece neste
@@ -23863,21 +23894,33 @@ impl Retrato {
     fn tirar(
         pedir: &mut dyn FnMut(&str, &str) -> Result<String, String>,
     ) -> Result<(Retrato, Instant), String> {
+        let pedido = Instant::now();
         let info = pedir("system.info", "{}")?;
+        let lido = Instant::now();
+        let tarefas = pedir("tasks.stats", "{}")?;
         let tela = pedir("display.info", "{}")?;
         let log = pedir("log.tail", r#"{"count":0}"#)?;
         let fim = Instant::now();
-        let retrato = Retrato::de(&info, &tela, &log).ok_or_else(|| {
-            format!("retrato: um relatorio nao se le\n  {info}\n  {tela}\n  {log}")
-        })?;
+        let retrato =
+            Retrato::de(&info, &tarefas, &tela, &log, (pedido, lido)).ok_or_else(|| {
+                format!("retrato: um relatorio nao se le\n  {info}\n  {tarefas}\n  {tela}\n  {log}")
+            })?;
         Ok((retrato, fim))
     }
 
-    /// O retrato das respostas de `system.info`, `display.info` e
-    /// `log.tail`.
-    fn de(info: &str, tela: &str, log: &str) -> Option<Retrato> {
+    /// O retrato das respostas de `system.info`, `tasks.stats`,
+    /// `display.info` e `log.tail`, com as horas do hospedeiro em que o
+    /// `system.info` foi pedido e respondido.
+    fn de(
+        info: &str,
+        tarefas: &str,
+        tela: &str,
+        log: &str,
+        relogio_lido: (Instant, Instant),
+    ) -> Option<Retrato> {
         use protocolo::json::Json;
         let info = Json(info.trim().as_bytes()).member("result")?;
+        let tarefas = Json(tarefas.trim().as_bytes()).member("result")?;
         let tela = Json(tela.trim().as_bytes()).member("result")?;
         let lista = info.member("cores")?;
         let mut nucleos: Vec<(u64, u64)> = Vec::new();
@@ -23904,7 +23947,10 @@ impl Retrato {
         };
         Some(Retrato {
             uptime_ms: info.member("uptime_ms")?.as_u64()?,
+            relogio_lido,
             tiques: nucleos.into_iter().map(|(_, t)| t).collect(),
+            avancos: tarefas.member("polls")?.as_u64()?,
+            despertares: tarefas.member("wakes")?.as_u64()?,
             apresentacoes,
             ultimo_dano,
             emitidos: registros_do_log(log)?.1,
@@ -23913,19 +23959,62 @@ impl Retrato {
 
     /// O que aconteceu de `self` a `depois`, numa linha em ASCII:
     ///
-    /// - quanto o relógio do kernel andou;
+    /// - quanto o relógio do kernel andou, e quanto o hospedeiro andou entre
+    ///   as duas leituras dele: no mínimo, de quando a resposta do
+    ///   `system.info` de antes chegou a quando o de depois foi pedido; no
+    ///   máximo, de quando o de antes foi pedido a quando o de depois
+    ///   respondeu. O relógio mais de um período ([`PERIODO_DO_TIMER_MS`])
+    ///   atrás do mínimo vai marcado;
     /// - quantos tiques cada núcleo contou. Um núcleo com as interrupções
     ///   mascaradas não conta tique, e o relógio anda pelos outros — ver
     ///   `tempo::avancar`, no kernel. O que o núcleo dos dispositivos contou
     ///   a menos que o que mais contou é o tempo que ele passou mascarado,
     ///   em períodos do timer, e vai convertido pela conta do próprio
     ///   relógio;
+    /// - quantas vezes o executor avançou uma tarefa e quantas foi acordado
+    ///   — os pedidos da própria sonda entram na conta;
     /// - quantas apresentações chegaram à tela, e o tamanho da última;
     /// - as linhas de log que entraram no anel nesse meio, tiradas de
     ///   `registros` — uma leitura de `log.tail` feita depois de `depois`.
+    ///
+    /// # O que a régua dos tiques não vê
+    ///
+    /// O tempo mascarado que ela dá é um piso, e relativo ao núcleo que mais
+    /// contou (o adversário do lote FUMAÇA-USB):
+    ///
+    /// - **todos os núcleos mascarados juntos** — os outros girando numa
+    ///   trava com as interrupções desligadas enquanto o zero apresenta — e
+    ///   **o hospedeiro parado** — nenhum fio do emulador rodando: o relógio
+    ///   do kernel para com eles, porque um período em que núcleo nenhum
+    ///   tiqueia não volta, e a conta diz ~0 ms sem tique, com o ping lento.
+    ///   Quem os mostra é o hospedeiro: o relógio fica atrás dele, e a linha
+    ///   o marca;
+    /// - **o executor ocupado sem máscara** — um tratador longo, um pedido
+    ///   adiado pelo caminho da auditoria: o núcleo tiqueia, e nada vai à
+    ///   tela nem ao log. Os avanços do executor dizem quantos foram, e não
+    ///   quanto cada um levou: um tratador longo é um avanço só;
+    /// - **um núcleo só**: sem outro com quem comparar, não há estimativa.
     fn janela(&self, depois: &Retrato, registros: &[RegistroDoLog]) -> String {
         let relogio = depois.uptime_ms.saturating_sub(self.uptime_ms);
-        let mut partes = vec![format!("relogio +{relogio} ms")];
+        let ms = |d: Duration| d.as_millis() as u64;
+        let minimo = ms(depois
+            .relogio_lido
+            .0
+            .saturating_duration_since(self.relogio_lido.1));
+        let maximo = ms(depois
+            .relogio_lido
+            .1
+            .saturating_duration_since(self.relogio_lido.0));
+        let mut o_relogio =
+            format!("relogio +{relogio} ms (no hospedeiro, de +{minimo} a +{maximo} ms");
+        let atras = minimo.saturating_sub(relogio);
+        if atras > PERIODO_DO_TIMER_MS {
+            o_relogio.push_str(&format!(
+                ": o relogio ficou ~{atras} ms atras, periodos sem tique em nucleo nenhum"
+            ));
+        }
+        o_relogio.push(')');
+        let mut partes = vec![o_relogio];
 
         let andou: Vec<u64> = self
             .tiques
@@ -23946,6 +24035,12 @@ impl Retrato {
                 ));
             }
         }
+
+        partes.push(format!(
+            "executor: +{} avancos, +{} despertares",
+            depois.avancos.saturating_sub(self.avancos),
+            depois.despertares.saturating_sub(self.despertares)
+        ));
 
         let apresentacoes = depois.apresentacoes.saturating_sub(self.apresentacoes);
         partes.push(match (apresentacoes, depois.ultimo_dano) {
@@ -29022,12 +29117,22 @@ mod testes {
         assert_eq!(registros_do_log(sem_seq), None);
     }
 
-    /// A janela entre dois retratos: o relógio, os tiques que o núcleo dos
-    /// dispositivos contou a menos — e o tempo mascarado que eles dão —, as
-    /// apresentações da tela e só as linhas de log que entraram nela.
+    /// A janela entre dois retratos: o relógio e o hospedeiro entre as duas
+    /// leituras dele, os tiques que o núcleo dos dispositivos contou a menos
+    /// — e o tempo mascarado que eles dão —, os avanços do executor, as
+    /// apresentações da tela e só as linhas de log que entraram nela. E o
+    /// relógio que ficou atrás do hospedeiro vai marcado: é o que a régua dos
+    /// tiques não vê.
     #[test]
     fn a_janela_entre_dois_retratos() {
         use super::*;
+        let t0 = Instant::now();
+        let em = |ms: u64| t0 + Duration::from_millis(ms);
+        let tarefas = |polls: u64, wakes: u64| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":5,"result":{{"spawned":40,"completed":12,"alive":28,"polls":{polls},"wakes":{wakes},"wakes_coalesced":3,"sleepers":{{"waiting":4,"capacity":64,"without_slot":0}},"never_scheduled":0}}}}"#
+            )
+        };
         let info = |uptime: u64, tiques: [u64; 4]| {
             let nucleos: Vec<String> = tiques
                 .iter()
@@ -29052,16 +29157,21 @@ mod testes {
         };
         let antes = Retrato::de(
             &info(50_000, [5000, 5100, 5101, 5102]),
+            &tarefas(500, 480),
             &tela(900),
             &log(162),
+            (em(0), em(3)),
         )
         .expect("o retrato de antes se le");
         // Os núcleos vêm na ordem do índice, mesmo fora dela na resposta.
         assert_eq!(antes.tiques, [5000, 5100, 5101, 5102]);
+        assert_eq!((antes.avancos, antes.despertares), (500, 480));
         let depois = Retrato::de(
             &info(51_100, [5031, 5209, 5210, 5211]),
+            &tarefas(530, 505),
             &tela(902),
             &log(164),
+            (em(1095), em(1101)),
         )
         .expect("o retrato de depois se le");
         let registro = |seq: u64, mensagem: &str| RegistroDoLog {
@@ -29078,7 +29188,9 @@ mod testes {
         ];
         assert_eq!(
             antes.janela(&depois, &registros),
-            "relogio +1100 ms; tiques: nucleo 0 +31, os outros +109..+109 (o nucleo 0 ficou ~787 ms sem tique); \
+            "relogio +1100 ms (no hospedeiro, de +1092 a +1101 ms); \
+             tiques: nucleo 0 +31, os outros +109..+109 (o nucleo 0 ficou ~787 ms sem tique); \
+             executor: +30 avancos, +25 despertares; \
              tela: 2 apresentacao(oes), a ultima 1280x752 em (0,40); \
              log: 2 linha(s) | [162] 50162 ms agent porta 2: agente-2 entrou (cc3d388b) ? com acento \
              | [163] 50163 ms agent processo encerrou com codigo 77"
@@ -29098,14 +29210,63 @@ mod testes {
             )
         };
         let sem_tela = r#"{"jsonrpc":"2.0","id":2,"result":{"present":false}}"#;
-        let a = Retrato::de(&so(10, 1), sem_tela, &log(5)).expect("se le sem tela");
-        let b = Retrato::de(&so(30, 3), sem_tela, &log(5)).expect("se le sem tela");
+        let a = Retrato::de(
+            &so(10, 1),
+            &tarefas(7, 7),
+            sem_tela,
+            &log(5),
+            (em(0), em(1)),
+        )
+        .expect("se le sem tela");
+        let b = Retrato::de(
+            &so(30, 3),
+            &tarefas(9, 8),
+            sem_tela,
+            &log(5),
+            (em(21), em(22)),
+        )
+        .expect("se le sem tela");
         assert_eq!(
             a.janela(&b, &[]),
-            "relogio +20 ms; um nucleo so, +2 tiques; tela: nenhuma apresentacao; log: 0 linha(s)"
+            "relogio +20 ms (no hospedeiro, de +20 a +22 ms); um nucleo so, +2 tiques; \
+             executor: +2 avancos, +1 despertares; tela: nenhuma apresentacao; log: 0 linha(s)"
+        );
+        // O relógio atrás do hospedeiro: todos os núcleos sem tique, ou a
+        // máquina parada por ele — a conta dos tiques diz ~0 ms, e o
+        // hospedeiro mostra. Até um período de diferença é a granularidade
+        // do relógio, e não vai marcado.
+        let parado = |uptime: u64, tiques: u64, pedido: u64| {
+            Retrato::de(
+                &info(uptime, [tiques; 4]),
+                &tarefas(9, 8),
+                sem_tela,
+                &log(5),
+                (em(pedido), em(pedido + 2)),
+            )
+            .expect("o retrato se le")
+        };
+        let um_periodo = parado(0, 0, 0).janela(&parado(50, 5, 62), &[]);
+        assert!(
+            um_periodo.starts_with("relogio +50 ms (no hospedeiro, de +60 a +64 ms); tiques:"),
+            "{um_periodo}"
+        );
+        let atras = parado(0, 0, 0).janela(&parado(50, 5, 302), &[]);
+        assert!(
+            atras.starts_with(
+                "relogio +50 ms (no hospedeiro, de +300 a +304 ms: o relogio ficou ~250 ms atras, periodos sem tique em nucleo nenhum); \
+                 tiques: nucleo 0 +5, os outros +5..+5 (o nucleo 0 ficou ~0 ms sem tique);"
+            ),
+            "{atras}"
         );
         // Um relatório que não se lê não vira um retrato de zeros.
-        assert_eq!(Retrato::de("{}", sem_tela, &log(5)), None);
+        assert_eq!(
+            Retrato::de("{}", &tarefas(1, 1), sem_tela, &log(5), (em(0), em(1))),
+            None
+        );
+        assert_eq!(
+            Retrato::de(&so(10, 1), "{}", sem_tela, &log(5), (em(0), em(1))),
+            None
+        );
     }
 
     /// A espera do `guardar` é pela saída dele: uma linha igual de antes do
@@ -29161,6 +29322,7 @@ mod testes {
                 "system.info" => {
                     r#"{"jsonrpc":"2.0","id":1,"result":{"cores":[{"index":0,"state":"online","ticks":7}],"uptime_ms":70}}"#
                 }
+                "tasks.stats" => r#"{"jsonrpc":"2.0","id":4,"result":{"polls":11,"wakes":10}}"#,
                 "display.info" => r#"{"jsonrpc":"2.0","id":2,"result":{"present":false}}"#,
                 "log.tail" => {
                     r#"{"jsonrpc":"2.0","id":3,"result":{"records":[],"total_emitted":9}}"#
@@ -29171,17 +29333,28 @@ mod testes {
             Ok(resposta.to_string())
         };
         let (retrato, comeco) = Retrato::tirar(&mut pedir).expect("o retrato se tira");
-        assert_eq!((retrato.uptime_ms, retrato.emitidos), (70, 9));
-        let (ultimo, chegou) = chegadas.last().cloned().expect("o retrato pediu");
-        assert_eq!(ultimo, "log.tail");
+        assert_eq!(
+            (retrato.uptime_ms, retrato.avancos, retrato.emitidos),
+            (70, 11, 9)
+        );
+        let pedidos: Vec<&str> = chegadas.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(
+            pedidos,
+            ["system.info", "tasks.stats", "display.info", "log.tail"]
+        );
+        let (_, chegou) = chegadas.last().cloned().expect("o retrato pediu");
         assert!(
             comeco >= chegou,
             "o cronometro comecou antes da ultima resposta do retrato"
         );
+        // O relógio do kernel foi lido entre as duas horas do system.info.
+        let (pedido, lido) = retrato.relogio_lido;
+        assert!(pedido < chegadas[0].1 && chegadas[0].1 <= lido);
         // E um relatório que não se lê é erro, e não um retrato.
         let mut recusado = |metodo: &str, _: &str| -> Result<String, String> {
             Ok(match metodo {
                 "log.tail" => r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32000}}"#,
+                "tasks.stats" => r#"{"jsonrpc":"2.0","id":4,"result":{"polls":1,"wakes":1}}"#,
                 "display.info" => r#"{"jsonrpc":"2.0","id":2,"result":{"present":false}}"#,
                 _ => r#"{"jsonrpc":"2.0","id":1,"result":{"cores":[],"uptime_ms":1}}"#,
             }
@@ -29198,13 +29371,16 @@ mod testes {
     #[test]
     fn o_aperto_da_porta_e_achado_antes_da_janela() {
         use super::*;
+        let agora = Instant::now();
         let retrato = |emitidos: u64| {
             Retrato::de(
                 r#"{"jsonrpc":"2.0","id":1,"result":{"cores":[{"index":0,"state":"online","ticks":7}],"uptime_ms":70}}"#,
+                r#"{"jsonrpc":"2.0","id":4,"result":{"polls":11,"wakes":10}}"#,
                 r#"{"jsonrpc":"2.0","id":2,"result":{"present":false}}"#,
                 &format!(
                     r#"{{"jsonrpc":"2.0","id":3,"result":{{"records":[],"total_emitted":{emitidos}}}}}"#
                 ),
+                (agora, agora),
             )
             .expect("o retrato se le")
         };
