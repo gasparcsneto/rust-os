@@ -17306,6 +17306,19 @@ fn ultimo_com_metodo(metodo: &str) -> Option<politica::auditoria::Evento> {
     .flatten()
 }
 
+/// O último registro da auditoria com este método gravado depois de `seq`
+/// — o do caso, pela marca que ele tirou antes de agir, e não o do anel
+/// inteiro. A devolução do registro de pessoas (`pessoas::esquecer_registradas`,
+/// no começo e no fim de muitos casos, e no executor) grava um
+/// `person.login` da sessão de teste: o último `person.login` do anel podia
+/// ser esse, e não o do login que o caso confere (o informativo 5 do
+/// adversário da rodada 5).
+fn ultimo_com_metodo_depois(seq: u64, metodo: &str) -> Option<politica::auditoria::Evento> {
+    registros_depois(seq, |e| e.metodo == metodo)
+        .pop()
+        .map(|(_, e)| e)
+}
+
 /// A pessoa ativa de uma sessão, ou o erro.
 fn pessoa_da_sessao(
     id: crate::pessoas::IdSessao,
@@ -17370,9 +17383,11 @@ fn pessoas_sessoes_por_console() -> Resultado {
         let bia = crate::pessoas::registrar_de_teste("bia", "observador", SENHA_DE_TESTE);
 
         // A mesma pessoa em dois consoles.
+        let antes = crate::autorizacao::ultimo_registro();
         let a1 = autenticar(Console::Fisico, "ana", SENHA_DE_TESTE)
             .map_err(|_| "ana nao entrou no console")?;
-        let login = ultimo_com_metodo("person.login").ok_or("o login nao foi gravado")?;
+        let login =
+            ultimo_com_metodo_depois(antes, "person.login").ok_or("o login nao foi gravado")?;
         if login.titular != Titular::Pessoa
             || login.agente != ana.texto()
             || login.sessao_de_pessoa != Some(a1.0)
@@ -17449,10 +17464,12 @@ fn pessoas_recusas_e_tentativas() -> Resultado {
         let ana = crate::pessoas::registrar_de_teste("ana", "operador", SENHA_DE_TESTE);
         let console = Console::Terminal(7);
 
+        let antes = crate::autorizacao::ultimo_registro();
         if autenticar(console, "ana", b"errada") != Err(RecusaDeLogin::NaoConfere) {
             return Err("uma senha errada entrou");
         }
-        let e = ultimo_com_metodo("person.login").ok_or("a recusa nao foi gravada")?;
+        let e =
+            ultimo_com_metodo_depois(antes, "person.login").ok_or("a recusa nao foi gravada")?;
         if e.titular != Titular::Anonimo
             || e.agente != ana.texto()
             || e.sessao_de_pessoa.is_some()
@@ -17462,10 +17479,12 @@ fn pessoas_recusas_e_tentativas() -> Resultado {
             crate::log_error!("teste", "{:?}", e);
             return Err("a senha errada nao foi gravada como recusa contra a pessoa");
         }
+        let antes = crate::autorizacao::ultimo_registro();
         if autenticar(console, "ninguem-aqui", SENHA_DE_TESTE) != Err(RecusaDeLogin::NaoConfere) {
             return Err("um nome desconhecido entrou");
         }
-        let e = ultimo_com_metodo("person.login").ok_or("a recusa nao foi gravada")?;
+        let e =
+            ultimo_com_metodo_depois(antes, "person.login").ok_or("a recusa nao foi gravada")?;
         if e.titular != Titular::Anonimo || !e.agente.is_empty() || e.detalhe != "nome desconhecido"
         {
             crate::log_error!("teste", "{:?}", e);
@@ -17483,10 +17502,12 @@ fn pessoas_recusas_e_tentativas() -> Resultado {
                 return Err("uma tentativa dentro do limite nao foi conferida");
             }
         }
+        let antes = crate::autorizacao::ultimo_registro();
         if autenticar(console, "ana", SENHA_DE_TESTE) != Err(RecusaDeLogin::Tentativas) {
             return Err("o console passou do limite de tentativas e ainda conferiu");
         }
-        let e = ultimo_com_metodo("person.login").ok_or("o limite nao foi gravado")?;
+        let e =
+            ultimo_com_metodo_depois(antes, "person.login").ok_or("o limite nao foi gravado")?;
         if e.codigo != politica::Codigo::RateLimit || e.recurso != "terminal:7" {
             crate::log_error!("teste", "{:?}", e);
             return Err("o limite de tentativas nao foi gravado com o console");
@@ -17646,12 +17667,14 @@ fn pessoas_estados_nao_se_confundem() -> Resultado {
         {
             return Err("as sessoes da pessoa revogada continuaram na tabela");
         }
+        let antes = crate::autorizacao::ultimo_registro();
         if autenticar(Console::Terminal(4), "cora", b"outra senha")
             != Err(RecusaDeLogin::NaoConfere)
         {
             return Err("a pessoa revogada entrou");
         }
-        let e = ultimo_com_metodo("person.login").ok_or("a recusa nao foi gravada")?;
+        let e =
+            ultimo_com_metodo_depois(antes, "person.login").ok_or("a recusa nao foi gravada")?;
         if e.detalhe != "pessoa revogada" || e.agente != id.texto() {
             crate::log_error!("teste", "{:?}", e);
             return Err("a recusa da pessoa revogada nao diz o motivo");
@@ -31254,6 +31277,9 @@ fn smp_o_login_nao_entra_no_console_reaberto() -> Resultado {
     COMECOU.store(false, SeqCst);
     TERMINOU.store(false, SeqCst);
     crate::interpretador::abrir_console(CONSOLE);
+    // A marca de antes do login: o `person.login` que o caso confere é o
+    // dele, e não o da sessão de teste que `esquecer_registradas` gravou.
+    let antes = crate::autorizacao::ultimo_registro();
     digitar_no_console(CONSOLE, "login\nana\n");
 
     let resultado = (|| -> Resultado {
@@ -31277,10 +31303,12 @@ fn smp_o_login_nao_entra_no_console_reaberto() -> Resultado {
         }
         // A senha conferiu: sem isto, um login recusado por outro motivo
         // passaria por todas as perguntas abaixo sem que nada tivesse corrido.
-        let entrou =
-            ultimo_com_metodo("person.login").is_some_and(|e| e.codigo == politica::Codigo::Allow);
+        let login = ultimo_com_metodo_depois(antes, "person.login");
+        let entrou = login
+            .as_ref()
+            .is_some_and(|e| e.codigo == politica::Codigo::Allow);
         if !entrou {
-            if let Some(e) = ultimo_com_metodo("person.login") {
+            if let Some(e) = login {
                 crate::log_error!("teste", "o login acabou em {:?}: {}", e.codigo, e.detalhe);
             }
             return Err("a senha do caso nao abriu sessao nenhuma");
