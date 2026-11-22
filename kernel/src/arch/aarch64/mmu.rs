@@ -1134,7 +1134,7 @@ unsafe fn tabela_vazia(tabela: *const u64) -> bool {
 /// Deve ser chamada logo após descartar uma tabela de tradução.
 unsafe fn invalidar_tudo() {
     #[cfg(feature = "modo-teste")]
-    let nucleo = tlbi_comecando(&TLBI_INTEIRAS);
+    let anotado = tlbi_comecando(&TLBI_INTEIRAS);
     // SAFETY: manutenção de TLB, sempre válida a partir de EL1.
     unsafe {
         asm!(
@@ -1146,7 +1146,7 @@ unsafe fn invalidar_tudo() {
         );
     }
     #[cfg(feature = "modo-teste")]
-    tlbi_terminado(nucleo);
+    tlbi_terminado(anotado);
 }
 
 /// Só para a suíte: quantos `tlbi` difundidos cada núcleo fez — por
@@ -1184,25 +1184,50 @@ pub fn tlbi_deste_nucleo_de_teste() -> (u64, u64) {
 static TLBI_EM_CURSO: [AtomicU64; crate::nucleos::MAX_NUCLEOS] =
     [const { AtomicU64::new(0) }; crate::nucleos::MAX_NUCLEOS];
 
+/// Só para a suíte: o `tlbi` que [`tlbi_comecando`] anotou, para
+/// [`tlbi_terminado`] — o núcleo em que ele sai, e se as interrupções
+/// estavam ligadas antes da máscara da conta.
+#[cfg(feature = "modo-teste")]
+struct TlbiAnotado {
+    nucleo: usize,
+    estavam_ligadas: bool,
+}
+
 /// Só para a suíte: anota em `contador` e em [`TLBI_EM_CURSO`] o `tlbi`
-/// difundido que este núcleo vai fazer, e devolve o núcleo, para
-/// [`tlbi_terminado`].
+/// difundido que este núcleo vai fazer, e devolve o que
+/// [`tlbi_terminado`] precisa.
 ///
 /// Antes do `asm!`, que começa com `dsb ishst`: a anotação está completa
 /// para todo núcleo antes de o `tlbi` sair.
+///
+/// # As interrupções mascaradas, da anotação ao fim do `tlbi`
+///
+/// Com elas ligadas — a troca de espaço da carga roda assim —, o fio podia
+/// sair deste núcleo entre a leitura do núcleo e o `tlbi`, e retomar noutro:
+/// o `tlbi` sairia de lá e entraria na conta deste, e a janela de um caso
+/// cujo par tivesse este núcleo, e não aquele, pareceria limpa com ele (o
+/// achado 4 do adversário do lote ICACHE-2, teórico). Mascaradas até
+/// [`tlbi_terminado`], a conta e o `tlbi` são do mesmo núcleo. Só na suíte:
+/// fora dela não há conta, e o `tlbi` roda como sempre.
 #[cfg(feature = "modo-teste")]
-fn tlbi_comecando(contador: &[AtomicU64; crate::nucleos::MAX_NUCLEOS]) -> usize {
+fn tlbi_comecando(contador: &[AtomicU64; crate::nucleos::MAX_NUCLEOS]) -> TlbiAnotado {
+    let estavam_ligadas = super::mascarar_irqs();
     let nucleo = super::nucleo_atual();
     contador[nucleo].fetch_add(1, Ordering::Relaxed);
     TLBI_EM_CURSO[nucleo].fetch_add(1, Ordering::Relaxed);
-    nucleo
+    TlbiAnotado {
+        nucleo,
+        estavam_ligadas,
+    }
 }
 
 /// Só para a suíte: o `tlbi` de [`tlbi_comecando`] terminou — depois do
-/// `dsb ish` que o completa em todo núcleo.
+/// `dsb ish` que o completa em todo núcleo —, e as interrupções voltam ao
+/// que eram antes da conta.
 #[cfg(feature = "modo-teste")]
-fn tlbi_terminado(nucleo: usize) {
-    TLBI_EM_CURSO[nucleo].fetch_add(1, Ordering::Relaxed);
+fn tlbi_terminado(anotado: TlbiAnotado) {
+    TLBI_EM_CURSO[anotado.nucleo].fetch_add(1, Ordering::Relaxed);
+    super::restaurar_irqs(anotado.estavam_ligadas);
 }
 
 /// Só para a suíte: a soma de [`TLBI_EM_CURSO`] dos núcleos fora de `par`,
@@ -1316,7 +1341,7 @@ unsafe fn publicar() {
 /// Deve ser chamada logo após escrever um descritor.
 unsafe fn invalidar(virtual_: u64) {
     #[cfg(feature = "modo-teste")]
-    let nucleo = tlbi_comecando(&TLBI_POR_ENDERECO);
+    let anotado = tlbi_comecando(&TLBI_POR_ENDERECO);
     // SAFETY: sequência de manutenção de TLB exigida pelo manual.
     unsafe {
         asm!(
@@ -1333,7 +1358,7 @@ unsafe fn invalidar(virtual_: u64) {
         );
     }
     #[cfg(feature = "modo-teste")]
-    tlbi_terminado(nucleo);
+    tlbi_terminado(anotado);
 }
 
 /// Endereço virtual por onde o kernel enxerga uma página física.
