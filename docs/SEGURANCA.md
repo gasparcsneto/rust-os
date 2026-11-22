@@ -158,13 +158,24 @@ pontos onde acontece — não num canal paralelo:
   A7) —, sem macro de fora da lista do `xtask`, que escreveria ali o `impl`
   ou o `#[no_mangle]` sem a palavra, e sem montador nem ligador nos
   arquivos da carga, que dariam a uma entrada de dentro um símbolo que
-  qualquer arquivo declara (o lote A8) — e as macros da lista com o corpo
-  que o `xtask` confere, token a token, chamando o `core` e o `alloc` de
-  verdade, e o `cargo xtask` que roda as guardas na CI o de verdade: a
-  ação que confere o compilador recusa, antes de todo `cargo`, um executor
-  ou um apelido do cargo que o trocassem (o lote A9). O que as guardas de
-  texto do `xtask` não fecham — quem escreve no kernel para contorná-las
-  de propósito — fica com a revisão ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)).
+  qualquer arquivo declara (o lote A8) — e os três registros do log, entre
+  as macros da lista, com o corpo que o `xtask` confere, token a token, e o
+  `core` e o `alloc` que as macros da lista chamam, os de verdade (o lote
+  A9) — nenhuma dependência direta do kernel com a biblioteca de outro
+  nome que o do pacote (o lote A10) —; e o `cargo xtask` que roda as
+  guardas na CI, o de verdade. A raiz da confiança é a definição da CI — os
+  workflows e as ações —, e quem a protege é a revisão; abaixo dela, a ação
+  que confere o compilador recusa, antes de todo `cargo` que compila ou
+  roda, um executor ou um apelido do cargo que o trocassem (o lote A9), e,
+  desde o lote A10, o ambiente do job fora de uma lista fechada, o PATH e
+  as casas do cargo e do rustup dentro do repositório, um `rust-toolchain`
+  fora dos dois oficiais ou com `path`, um manifesto com `cargo-features` ou
+  um perfil com `rustflags`, e o config de um diretório de build fora da
+  lista; roda todo `cargo` dela no toolchain fixado pelo canal; e
+  roda as invariantes, no job de lints, antes do cache e de todo outro
+  `cargo`, sem nada do repositório antes. O que as guardas de texto do
+  `xtask` não fecham — quem escreve no kernel para contorná-las de
+  propósito — e a definição da CI ficam com a revisão ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)).
   E as recusas das perguntas sobre quem
   pede — o journal recusado, quem pede encerrado ou contido, o editor, o
   papel, a cota,
