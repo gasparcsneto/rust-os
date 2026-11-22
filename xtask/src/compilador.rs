@@ -68,7 +68,9 @@
 //!   falha fechada ([`linhas_que_o_passo_nao_le`]) — depois de cada
 //!   checkout, antes do cache e de qualquer `cargo`, com o canal em toda
 //!   chave de cache — desde o lote A13, numa leitura que falha fechada no
-//!   arquivo inteiro: as quebras de linha que só o YAML vê e, fora do
+//!   arquivo inteiro: as quebras de linha que só o YAML vê — e, desde o
+//!   lote A14, os espaços que ele não toma por espaço e os caracteres que
+//!   ele não imprime — e, fora do
 //!   conteúdo dos blocos, as formas que ela não lê reprovam
 //!   ([`quebras_que_a_leitura_nao_ve`], [`forma_que_a_leitura_nao_le`]), e
 //!   um checkout escrito numa delas não escapa da ordem —; a ação tem os
@@ -1586,9 +1588,11 @@ fn abre_um_bloco(texto: &str) -> Option<usize> {
 /// a leitura por linhas daqui ([`linhas_de_codigo`]) de outro, cada um com o
 /// número da linha — a contada pelos `\n` — e o nome dele: o CR sozinho,
 /// fora do CRLF, o NEL (U+0085), o LS (U+2028) e o PS (U+2029), que o YAML
-/// lê como quebras de linha e o `str::lines` não; e o BOM (U+FEFF) fora do
+/// lê como quebras de linha e o `str::lines` não; o BOM (U+FEFF) fora do
 /// começo do arquivo, que a libyaml pula no começo de uma linha e que a
-/// leitura daqui não toma por recuo.
+/// leitura daqui não toma por recuo; e, desde o lote A14, os espaços que o
+/// `trim` do Rust tira e o YAML guarda no valor, e os caracteres que o YAML
+/// não imprime.
 ///
 /// # Por quê, desde o lote A13
 ///
@@ -1602,17 +1606,48 @@ fn abre_um_bloco(texto: &str) -> Option<usize> {
 /// leitura tira inteira, também (o M1 do adversário do lote A12; o BOM no
 /// começo de uma linha do meio é o B1 dele). Sem esses caracteres, o texto
 /// tem as mesmas linhas para a leitura daqui, para o YAML 1.1 e para o 1.2.
-fn quebras_que_a_leitura_nao_ve(texto: &str) -> Vec<(usize, &'static str)> {
+///
+/// # Os espaços que o YAML não toma por espaço, desde o lote A14
+///
+/// A leitura tira as bordas de cada linha e de cada valor com o `trim` do
+/// Rust, que tira todo espaço do Unicode; o YAML só toma por espaço o
+/// espaço e o TAB, e guarda os outros no valor. `invariantes: true` com um
+/// NBSP (U+00A0) no fim era `true` para a leitura e `true\u{a0}` para o
+/// PyYAML e para a libyaml — e, pela fonte, para o YamlDotNet, que o runner
+/// usa para ler a ação —: o `if:` do passo das invariantes, que compara a
+/// entrada com `'true'`, não as rodava, com o `cargo xtask invariantes`
+/// passando; o mesmo NBSP no nome da entrada, na ação, também (o M4 do
+/// adversário do lote A13). Um caractere que não se vê no diff. Reprovam,
+/// então, os outros espaços — o NBSP, o U+1680, os de U+2000 a U+200A, o
+/// U+202F, o U+205F, o U+3000, o VT e o FF —, e os caracteres que o YAML
+/// não imprime — os controles, menos o TAB, o LF e o CR, e o U+FFFE e o
+/// U+FFFF —: a libyaml e o PyYAML recusam o arquivo, e o YamlDotNet 5.3.0
+/// não os confere — guarda-os no valor, e acaba um comentário no NUL (o B1
+/// dele). Os invisíveis que não são espaço — o ZWSP, o ZWJ, as marcas de
+/// direção — o `trim` não tira: a leitura e o YAML leem o mesmo valor, com
+/// eles, e um valor que as regras comparam deixa de ser o que elas esperam.
+fn quebras_que_a_leitura_nao_ve(texto: &str) -> Vec<(usize, String)> {
     let mut achados = Vec::new();
     for (n, linha) in texto.split('\n').enumerate() {
         let linha = linha.strip_suffix('\r').unwrap_or(linha);
         for (i, c) in linha.char_indices() {
             let qual = match c {
-                '\r' => "um CR sozinho",
-                '\u{85}' => "um NEL (U+0085)",
-                '\u{2028}' => "um LS (U+2028)",
-                '\u{2029}' => "um PS (U+2029)",
-                '\u{feff}' if n > 0 || i > 0 => "um BOM (U+FEFF) fora do começo do arquivo",
+                '\r' => String::from("um CR sozinho"),
+                '\u{85}' => String::from("um NEL (U+0085)"),
+                '\u{2028}' => String::from("um LS (U+2028)"),
+                '\u{2029}' => String::from("um PS (U+2029)"),
+                '\u{feff}' if n > 0 || i > 0 => {
+                    String::from("um BOM (U+FEFF) fora do começo do arquivo")
+                }
+                '\u{feff}' | ' ' | '\t' => continue,
+                c if c.is_whitespace() => format!(
+                    "um espaço (U+{:04X}) que o YAML não toma por espaço",
+                    u32::from(c)
+                ),
+                c if c.is_control() || c == '\u{fffe}' || c == '\u{ffff}' => format!(
+                    "um caractere (U+{:04X}) que o YAML não imprime",
+                    u32::from(c)
+                ),
                 _ => continue,
             };
             achados.push((n + 1, qual));
@@ -2069,8 +2104,10 @@ fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str>
 ///
 /// As regras leem o YAML linha a linha. Em todo arquivo — a ação do
 /// compilador inclusive —, antes delas, reprova o que essa leitura não lê
-/// como o YAML lê: os caracteres que o YAML toma por outra linha
-/// ([`quebras_que_a_leitura_nao_ve`]) e, fora do conteúdo dos blocos, as
+/// como o YAML lê: os caracteres que o YAML toma por outra linha — e,
+/// desde o lote A14, os espaços que ele não toma por espaço, e que a
+/// leitura tira com as bordas, e os que ele não imprime
+/// ([`quebras_que_a_leitura_nao_ve`]) — e, fora do conteúdo dos blocos, as
 /// formas que ela não lê ([`forma_que_a_leitura_nao_le`]) — o estilo de
 /// fluxo, a chave entre aspas ou com escape, a chave complexa, a âncora, o
 /// apelido, a etiqueta, a fusão, o texto entre aspas em várias linhas. Um
@@ -2082,12 +2119,14 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
     let mut fora = Vec::new();
     for (nome, texto) in workflows {
         // Antes de toda leitura, e também na ação do compilador: o que o YAML
-        // lê como outra linha, e a leitura por linhas não vê.
+        // lê como outra linha, ou como outro valor, e a leitura por linhas
+        // não vê.
         for (n, qual) in quebras_que_a_leitura_nao_ve(texto) {
             fora.push(format!(
-                "{nome}:{n}: {qual} — o YAML lê ali uma quebra de linha, ou um caractere, que a \
-                 leitura por linhas do `xtask` não vê: uma chave do passo, como um `if:`, ou um \
-                 checkout, que ela não lê"
+                "{nome}:{n}: {qual} — o YAML lê ali uma quebra de linha, um espaço que fica no \
+                 valor ou um caractere que ele não imprime, e a leitura por linhas do `xtask` não: \
+                 uma chave do passo, como um `if:`, um checkout ou o valor de uma entrada, que ela \
+                 lê de outro jeito"
             ));
         }
         let linhas = linhas_de_codigo(texto);
@@ -5384,6 +5423,90 @@ jobs:
             ACAO,
         ] {
             assert_eq!(quebras_que_a_leitura_nao_ve(texto), Vec::new());
+        }
+    }
+
+    /// Os espaços que o YAML não toma por espaço, e os caracteres que ele não
+    /// imprime (no lote A14, o M4 e o B1 do adversário do lote A13):
+    /// `invariantes: true` com um NBSP no fim era `true` para a leitura, que
+    /// tira as bordas com o `trim` do Rust, e `true\u{a0}` para o YAML — o
+    /// passo das invariantes, que compara a entrada com `'true'`, não rodava,
+    /// e o `cargo xtask invariantes` passava; o NBSP no nome da entrada, na
+    /// ação, também; e um NUL num comentário, onde o YamlDotNet acaba o
+    /// comentário. Cada um reprova, com a linha, também na ação; o texto em
+    /// português, o travessão, as aspas tipográficas, um emoji, o ZWJ e o
+    /// seletor de variação passam; e um invisível que não é espaço, o ZWSP,
+    /// fica no valor para os dois — a porta não o acusa, e a regra que lê o
+    /// valor, sim.
+    #[test]
+    fn adversario_a13_os_espacos_que_o_yaml_nao_toma_por_espaco() {
+        let ci = include_str!("../../.github/workflows/ci.yml");
+        let entrada = "          invariantes: true\n";
+        assert_eq!(ci.matches(entrada).count(), 1);
+        let n = ci[..ci.find(entrada).expect("a entrada")]
+            .matches('\n')
+            .count()
+            + 1;
+        let do_caractere = |fora: &[String]| -> Vec<String> {
+            fora.iter()
+                .filter(|f| f.contains(" — o YAML lê ali uma quebra de linha"))
+                .cloned()
+                .collect()
+        };
+        for c in [
+            '\u{a0}', '\u{1680}', '\u{2000}', '\u{2003}', '\u{200a}', '\u{202f}', '\u{205f}',
+            '\u{3000}', '\u{b}', '\u{c}', '\u{0}', '\u{1}', '\u{1b}', '\u{7f}', '\u{90}',
+            '\u{fffe}',
+        ] {
+            let qual = format!("U+{:04X}", u32::from(c));
+            for texto in [
+                ci.replacen(entrada, &format!("          invariantes: true{c}\n"), 1),
+                ci.replacen(entrada, &format!("          invariantes: {c}true\n"), 1),
+            ] {
+                let fora = do_caractere(&um(CI, &texto));
+                assert!(
+                    fora.len() == 1 && fora[0].starts_with(&format!("{CI}:{n}: ")),
+                    "{qual}: {fora:#?}"
+                );
+                assert!(fora[0].contains(&qual), "{qual}: {fora:#?}");
+            }
+        }
+        // O NBSP no nome da entrada da ação: o `if:` do passo das
+        // invariantes lê `inputs.invariantes`, que deixa de existir.
+        let acao = ACAO.replacen("  invariantes:\n", "  invariantes\u{a0}:\n", 1);
+        assert_ne!(acao, ACAO);
+        let fora = do_caractere(&um(ACAO_DO_COMPILADOR, &acao));
+        assert!(fora.len() == 1 && fora[0].contains("U+00A0"), "{fora:#?}");
+        // O NUL num comentário do passo da ação (o B1): o YamlDotNet acaba
+        // ali o comentário, e o resto da linha seria outra coisa.
+        let passo = "      - name: O compilador\n        id: compilador\n";
+        assert_eq!(OFICIAL.matches(passo).count(), 1);
+        let nul = OFICIAL.replacen(
+            passo,
+            &format!("{passo}        # x\u{0}        if: false\n"),
+            1,
+        );
+        let fora = do_caractere(&um(CI, &nul));
+        assert!(
+            fora.len() == 1 && fora[0].starts_with(&format!("{CI}:9: um caractere (U+0000)")),
+            "{fora:#?}"
+        );
+        // O ZWSP não é espaço para o Rust nem para o YAML: a porta não o
+        // acusa, e o valor `true\u{200b}` não liga as invariantes.
+        let zwsp = ci.replacen(entrada, "          invariantes: true\u{200b}\n", 1);
+        assert_eq!(do_caractere(&um(CI, &zwsp)), Vec::<String>::new());
+        assert_eq!(as_invariantes_na_acao(&zwsp).len(), 1);
+        // O texto de verdade passa.
+        let nome = "      - name: O compilador\n";
+        assert_eq!(OFICIAL.matches(nome).count(), 1);
+        for novo in [
+            "      - name: O compilador — a conferência “oficial” (ação, órgão)\n",
+            "      - name: O compilador \u{1f980}\n        # \u{1f680} \u{2705}\n",
+            "      - name: O compilador \u{1f468}\u{200d}\u{1f4bb} \u{2764}\u{fe0f}\n",
+        ] {
+            let texto = OFICIAL.replacen(nome, novo, 1);
+            assert_ne!(texto, OFICIAL);
+            assert_eq!(um(CI, &texto), Vec::<String>::new(), "{novo}");
         }
     }
 
