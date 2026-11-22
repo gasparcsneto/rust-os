@@ -175,7 +175,8 @@ pontos onde acontece — não num canal paralelo:
   desde o lote A12, um link no commit ou no caminho de um diretório de
   saída, por onde os arquivos do commit chegavam a um `target` sem a regra
   os ver, e, desde o lote A13, um submódulo no commit ou o que não é pasta
-  nesse caminho —, e o config de um diretório de build fora da lista — na
+  nesse caminho, que o `git` lista, desde o lote A14, sem o ambiente do
+  job —, e o config de um diretório de build fora da lista — na
   raiz, outro que o apelido —;
   roda todo `cargo` dela no toolchain fixado pelo canal — uma exceção à
   letra do 4.1 do `CLAUDE.md`, que proíbe o `RUSTUP_TOOLCHAIN` no projeto,
@@ -190,11 +191,20 @@ pontos onde acontece — não num canal paralelo:
   apelido, como ela. Desde o lote A12, a leitura desse passo falha
   fechada — uma linha dele que ela não lê, como um escape na chave que o
   YAML lê como `if:`, reprova —, e o comentário do fim de uma linha sai do
-  valor que ela compara; e, desde o lote A13, a leitura falha fechada no
-  arquivo inteiro, em todo workflow e ação — as quebras de linha que só o
-  YAML vê e, fora do conteúdo dos blocos, as formas que ela não lê
-  reprovam —, e os passos da própria ação só têm as chaves que ela lê
-  neles, sem `if:`, `continue-on-error:` nem `env:` a mais. O que as
+  valor que ela compara; e, desde o lote A13 — com as lacunas que o lote
+  A14 fechou, abaixo —, a leitura falha fechada no arquivo inteiro, em
+  todo workflow e ação — as quebras de linha que só o YAML vê e, fora do
+  conteúdo dos blocos, as formas que ela não lê reprovam —, e os passos
+  da própria ação só têm as chaves que ela lê neles, sem `if:`,
+  `continue-on-error:` nem `env:` a mais. Desde o lote A14, a leitura
+  reprova também os espaços que o YAML não toma por espaço,
+  os caracteres que ele não imprime e um segundo documento; o passo que
+  liga as invariantes é um item do `steps:` do job de lints; a ação tem a
+  forma que o runner lê, e cada passo dela é o item de `runs.steps` com o
+  `id` dele — uma cópia como o texto de um bloco não conta —; e, nos
+  workflows oficiais, nenhum job roda num `container:`, o `env:` do
+  workflow e o dos jobs só têm os nomes de uma lista fechada, nenhum passo
+  escreve no `GITHUB_ENV`, e o checkout é só o do commit. O que as
   guardas de texto do
   `xtask` não fecham — quem escreve no kernel para contorná-las de
   propósito — e a definição da CI ficam com a revisão ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)).

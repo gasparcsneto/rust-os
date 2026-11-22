@@ -1816,23 +1816,25 @@ fn sem_comentario(valor: &str) -> &str {
 /// A forma do YAML de uma linha de código — `texto`, sem as bordas, fora do
 /// conteúdo de um escalar em bloco — que a leitura por linhas não lê, ou
 /// nenhuma. Ela lê a chave simples — letras, dígitos, `-` e `_`, sem aspas —
-/// com o `:` seguido de um espaço ou do fim; o valor numa linha — sem aspas,
-/// entre aspas que fecham nela, um bloco (`|`, `>`), ou uma sequência em
-/// estilo de fluxo só de escalares simples (`[x86_64, aarch64]`); e o item
-/// de uma lista com um desses. Não lê o item em estilo de fluxo (`- { … }`,
-/// `- [ … ]`), a chave complexa (`?`, `:`), a chave entre aspas — com um
-/// escape, ela é outra para o YAML (`"u\x73es"`) —, a âncora, o apelido, a
-/// etiqueta, a fusão (`<<`), o texto entre aspas em várias linhas, e o valor
-/// que começa por outro indicador do YAML — também o estilo de fluxo no
-/// valor de uma chave (`chave: { … }`), que a regra de antes recusava nos
-/// workflows e nas outras ações, e não na do compilador.
+/// com o `:` seguido de um espaço, de uma tabulação ou do fim; o valor numa
+/// linha — sem aspas, entre aspas que fecham nela, um bloco (`|`, `>`), ou
+/// uma sequência em estilo de fluxo só de escalares simples
+/// (`[x86_64, aarch64]`); e o item de uma lista com um desses. Não lê o
+/// item em estilo de fluxo (`- { … }`, `- [ … ]`), a chave complexa (`?`,
+/// `:`), a chave entre aspas — com um escape, ela é outra para o YAML
+/// (`"u\x73es"`) —, a âncora, o apelido, a etiqueta, a fusão (`<<`), o texto
+/// entre aspas em várias linhas, e o valor que começa por outro indicador
+/// do YAML — também o estilo de fluxo no valor de uma chave
+/// (`chave: { … }`), que a regra de antes recusava nos workflows e nas
+/// outras ações, e não na do compilador.
 ///
 /// # Por quê, desde o lote A13
 ///
 /// As regras dos workflows leem as chaves linha a linha
 /// ([`chave_e_valor`]), e pulam o que não reconhecem: o checkout escrito em
-/// estilo de fluxo, com um escape na chave ou numa chave complexa não pedia
-/// a conferência depois dele — a lacuna que o lote A12 deixou relatada —;
+/// estilo de fluxo ou com um escape na chave — a lacuna que o lote A12
+/// deixou relatada —, ou numa chave complexa — o M3 a achou maior —, não
+/// pedia a conferência depois dele;
 /// uma ação de fora de [`ACOES_OFICIAIS`] em estilo de fluxo — uma que
 /// instala outro toolchain — passava; e um texto entre aspas em várias
 /// linhas esconde dela um `#` que é do valor, ou lhe mostra um passo que o
@@ -2114,8 +2116,8 @@ fn chaves_de_dentro<'a>(linhas: &[Linha<'a>], chave: &Chave<'a>) -> Vec<Chave<'a
 
 /// Uma linha `chave: valor` de YAML na forma simples, a que a leitura do
 /// passo da ação aceita ([`linhas_que_o_passo_nao_le`]): a chave sem aspas
-/// nem escape — letras, dígitos, `-` e `_` —, o `:` seguido de um espaço ou
-/// do fim da linha, e o valor, sem o comentário do fim
+/// nem escape — letras, dígitos, `-` e `_` —, o `:` seguido de um espaço, de
+/// uma tabulação ou do fim da linha, e o valor, sem o comentário do fim
 /// ([`sem_comentario`]), vazio, entre aspas que fecham na linha, ou sem um
 /// indicador de YAML no começo — a âncora (`&`), o apelido (`*`), a
 /// etiqueta (`!`), o estilo de fluxo (`{`, `[`), o bloco (`|`, `>`), a
@@ -2241,9 +2243,13 @@ fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str>
 /// ([`SOBREPOSICOES`]), e o checkout só tem as chaves de
 /// [`CHAVES_DO_CHECKOUT`]. O canário
 /// sobrepõe, mas não roda nos pushes, não usa o cache nem publica a
-/// proveniência. As ações locais seguem as regras dos workflows oficiais,
-/// menos a que confere o compilador, que cita o que recusa: nela vale só a
-/// leitura que falha fechada, abaixo, e o resto é de [`conferir_a_acao`].
+/// proveniência. As ações locais seguem a leitura que falha fechada, abaixo,
+/// e as regras dos workflows oficiais que leem o texto de cada linha — as
+/// ações permitidas, as sobreposições, a escrita num `rust-toolchain` e a
+/// leitura do passo que usa a ação —, e não as de um workflow: a ordem, a
+/// contagem do `id`, as chaves de cache e o que o job escolhe. A que confere
+/// o compilador, que cita o que recusa, segue só a leitura, e o resto é de
+/// [`conferir_a_acao`].
 ///
 /// # A leitura falha fechada no arquivo inteiro, desde o lote A13
 ///

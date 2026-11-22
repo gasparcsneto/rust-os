@@ -2569,10 +2569,14 @@ pendência #298.
     ou com escape, a chave complexa, a âncora, o apelido, a etiqueta, a
     fusão, o texto entre aspas em várias linhas — reprovam: o checkout
     escrito assim, a lacuna que o lote A12 deixou, não escapa mais da
-    ordem;
+    ordem — e ficavam de fora, e o lote A14 os fecha, os espaços que o
+    YAML não toma por espaço e os caracteres que ele não imprime, e o
+    texto de um bloco na própria ação e no job de lints;
   - os passos da própria ação só com as chaves que a leitura lê neles: um
     `if: false` no do ambiente, um `continue-on-error: true` ou um
-    embrulho do compilador no `env:` do das invariantes passavam;
+    embrulho do compilador no `env:` do das invariantes passavam — e cada
+    passo era a primeira linha `id:` do arquivo, que uma cópia dele como o
+    texto de um bloco podia ser, e o lote A14 o fecha;
   - três falsos positivos do passo da ação — o `id` entre aspas, o `-` só
     com um comentário, o nome que começa por `-` —, que o YAML lê como o
     passo de sempre, passam;
@@ -2585,14 +2589,17 @@ pendência #298.
     `executado:` só aceita a linha do console da sonda;
   - o texto: o E1, o P1, o P2 e o P3 do revisor; o que o achado M2
     desmente no texto do lote A12 — o `uses:` num bloco `run:` reprovava
-    só sem o `-` de um item —; a frase da linha `executado:`; e o que a
-    sonda do agente no Terminal confere
+    só sem o `-` de um item —; a frase da linha `executado:` e o que a
+    sonda do agente no Terminal confere, no texto das esperas da fumaça
+    ([README](../README.md#armazenamento-nativo)); e o inventário das
+    guardas de texto
     ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)).
 
   Fica o que fica dos lotes A10 a A12 — o `if:` e o `continue-on-error:`
   de um job inteiro, e o resto da definição da CI, com a revisão: um passo
-  novo na ação, ou o script de um passo dela, e a pasta da ação como link,
-  que o runner carregaria antes do passo do ambiente —. Oito testes novos
+  novo na ação — e a forma dela, que o lote A14 fecha —, ou o script de
+  um passo dela, e a pasta da ação como link, que o runner carregaria
+  antes do passo do ambiente —. Oito testes novos
   no hospedeiro, um reforçado e um ajustado, e as mutações do lote (*As do
   lote A13*, no
   [README](../README.md#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
@@ -2636,6 +2643,56 @@ pendência #298.
   processador de verdade faz; o laço que jogasse fora o resultado inteiro
   do caso, que um controle de dentro não alcança; e a `executado:`, que diz
   que o gate permitiu e o comando começou, e não que ele teve efeito.
+
+  Depois do lote ICACHE-5, o lote A14, [B], fez os achados do adversário
+  da rodada 6 sobre o lote A13 — a leitura dos workflows, a ação do
+  compilador e o `git` dela —, os informativos dele, o que o lote achou na
+  revisão deles e os itens do revisor da rodada 6 sobre o texto do lote
+  A13, na guarda do compilador e no texto, sem autoridade, regra de
+  acesso, registro, identidade, persistência ou semântica de auditoria
+  novos:
+  - a porta da leitura reprova também os espaços que o YAML não toma por
+    espaço — o NBSP, o VT, o U+3000 —, que a leitura tirava com as bordas
+    e o YAML guarda no valor: `invariantes: true` com um NBSP no fim não
+    ligava as invariantes no GitHub, e passava; e os caracteres que o YAML
+    não imprime, como o NUL;
+  - só um passo do job de lints liga as invariantes: o `:` de uma chave é
+    o seguido de um espaço, de uma tabulação ou do fim, o item de uma
+    linha é o que vai até ela, e o passo é um item do `steps:` do job — o
+    texto no `env:` do job e o item de uma matriz ligavam as invariantes,
+    e o passo de verdade ficava sem a entrada;
+  - a ação do compilador tem a forma que o runner lê — as chaves de cima,
+    a entrada, o `outputs.canal` do passo `conferir`, o `runs.using:
+    composite` e só os quatro passos —, e cada passo é o item de
+    `runs.steps` com o `id` dele: uma cópia de um passo como o texto de um
+    bloco era o passo para as regras, os passos numa chave a mais da raiz
+    e um quinto passo passavam, e o canal fixo tirava o compilador da
+    chave de todo cache;
+  - o `git` da ação — o do passo do ambiente e o do canal — roda só com o
+    PATH conferido e sem a configuração global e a do sistema: um
+    `GIT_INDEX_FILE` no `env:` do job escondia o arquivo do commit num
+    `target/` e o submódulo, e o `HOME` escolhia uma configuração que roda
+    um programa no `git`;
+  - nos workflows oficiais, nenhum job roda num `container:`, o `env:` do
+    workflow e o de cada job só têm os nomes de uma lista fechada — o
+    `LD_PRELOAD`, o `CC` do `build.rs` do `ring`, o `HOME` e o `BASH_ENV`
+    escolhiam o programa que roda nos passos da ação —, nenhum passo
+    escreve no `GITHUB_ENV`, e o checkout só tem o `uses:` e o `name:`;
+  - um documento só: um segundo documento, que o runner recusa, reprova;
+  - o texto: o que os achados desmentem no do lote A13, e os itens do
+    revisor da rodada 6 sobre ele
+    ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)).
+
+  Fica o que fica dos lotes A10 a A13 — o `if:` e o `continue-on-error:`
+  de um job inteiro, um passo entre o checkout e a ação, o script de um
+  passo dela e a pasta da ação como link, com a revisão —; o ambiente que
+  a imagem do runner traz fora dos nomes do cargo e do rustup, que a ação
+  não confere; e o runner que o `runs-on:` escolhe. Num job com o
+  carregador ou o `BASH_ENV` no ambiente, a ação pode não acusar nada, e
+  quem acusa a linha do `env:` é o `cargo xtask invariantes` de fora dele.
+  Seis testes novos no hospedeiro, e as mutações do lote (*As do lote
+  A14*, no
+  [README](../README.md#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
 
 ### I7
 

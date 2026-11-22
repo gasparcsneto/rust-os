@@ -4,15 +4,19 @@
 #
 # Onde a confiança começa, desde o lote A10: a definição da CI — os
 # workflows e esta ação — é a raiz da confiança, e quem a protege é a
-# revisão. Um passo novo, o `env:` de um passo do workflow ou o script
-# daqui mudam o que a CI faz, e nada abaixo deles os confere; desde o lote
-# A13, os passos daqui só têm as chaves que o `cargo xtask invariantes` lê
-# neles — o `name:`, o `id:`, o `shell:` e o `run:`, e, no das invariantes,
-# o `if:` da entrada e o `env:` com o toolchain fixado —, e um `if:`, um
-# `continue-on-error:` ou um `env:` a mais reprovam. Abaixo dela, esta ação
-# garante que o primeiro `cargo` que roda o código do repositório — o
-# `cargo xtask invariantes`, no job de lints — é o do toolchain oficial, no
-# ambiente conferido, sem nada do repositório antes.
+# revisão. Um passo novo num workflow, o `env:` ou o `run:` de um passo
+# dele, ou o script daqui, mudam o que a CI faz, e nada abaixo deles os
+# confere. Desde o lote A13, os passos daqui só têm as chaves que o `cargo
+# xtask invariantes` lê neles — o `name:`, o `id:`, o `shell:` e o `run:`, e,
+# no das invariantes, o `if:` da entrada e o `env:` com o toolchain fixado
+# —, e um `if:`, um `continue-on-error:` ou um `env:` a mais reprovam; e,
+# desde o lote A14, cada passo é o item de `runs.steps` com o `id` dele —
+# uma cópia dele como o texto de um bloco não conta mais —, e a ação tem a
+# forma que o runner lê: as chaves de cima, a entrada, o `outputs.canal` do
+# passo `conferir`, o `runs.using: composite` e só estes quatro passos.
+# Abaixo dela, esta ação garante que o primeiro `cargo` que roda o código
+# do repositório — o `cargo xtask invariantes`, no job de lints — é o do
+# toolchain oficial, no ambiente conferido, sem nada do repositório antes.
 #
 # Roda logo depois do checkout, antes do cache e de qualquer `cargo` (o
 # `cargo xtask invariantes` confere a ordem, e, desde o lote A11, que o
@@ -23,7 +27,12 @@
 # desde o lote A13, a leitura falha fechada no arquivo inteiro — as quebras
 # de linha que só o YAML vê e, fora do conteúdo dos blocos, as formas que
 # ela não lê reprovam, em todo workflow e nesta ação: um checkout escrito
-# numa delas não escapa da ordem), em quatro passos:
+# numa delas não escapa da ordem; desde o lote A14, também os espaços que o
+# YAML não toma por espaço, os caracteres que ele não imprime e um segundo
+# documento; e, nos workflows oficiais, nenhum job roda num `container:`, o
+# `env:` do workflow e o dos jobs só têm os nomes de uma lista fechada,
+# nenhum passo escreve no `GITHUB_ENV`, e o checkout é só o do commit), em
+# quatro passos:
 #
 # 1. `ambiente`, em Python — o do sistema, `/usr/bin/python3`, e não o do
 #    PATH, que é o que ele confere —, antes de qualquer programa do
