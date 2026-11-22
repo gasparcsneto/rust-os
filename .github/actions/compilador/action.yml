@@ -296,8 +296,9 @@ runs:
         # saída. A regra de cima casa o caminho do arquivo, e um link põe o
         # diretório de saída noutro lugar — o `target` → uma pasta do commit,
         # que ela lê pelo outro nome — ou traz para a árvore o que mora num
-        # diretório de saída. O índice guarda o link com o modo 120000; o
-        # repositório não tem nenhum.
+        # diretório de saída. O índice guarda o link com o modo 120000, e, desde
+        # o lote A13, o submódulo — um gitlink — com o 160000; o repositório não
+        # tem nenhum dos dois.
         indice = subprocess.run(["git", "ls-files", "-z", "--stage"], capture_output=True)
         if indice.returncode != 0:
             erros.append(
@@ -313,8 +314,17 @@ runs:
                     "noutro lugar, com os arquivos do commit dentro, ou trazer para a árvore o que "
                     "mora num; o repositório não tem link nenhum, e um novo muda esta regra, revisada"
                 )
-        # E no disco: o caminho de cada diretório de saída sem link nenhum —
-        # resolvido, ele é o próprio caminho.
+            if modo == "160000":
+                erros.append(
+                    f"{arquivo}: um submódulo no commit (um gitlink) — num checkout com os "
+                    "submódulos, ele traz para a árvore, num diretório de saída do cargo ou noutro "
+                    "lugar, os arquivos de outro repositório, que nenhuma regra daqui vê; o "
+                    "repositório não tem submódulo nenhum, e um novo muda esta regra, revisada"
+                )
+        # E no disco: o caminho de cada diretório de saída só com pastas —
+        # nenhum link, e, desde o lote A13, nada que não seja pasta, como o
+        # `target` que é um arquivo do commit: resolvido, ele é o próprio
+        # caminho, e o cargo grava nele.
         vistos = set()
         for diretorio in DIRETORIOS:
             saida = f"{diretorio}/target" if diretorio else "target"
@@ -332,6 +342,14 @@ runs:
                         )
                     break
                 if not os.path.isdir(atual):
+                    lugar = os.path.relpath(atual, RAIZ)
+                    if os.path.lexists(atual) and lugar not in vistos:
+                        vistos.add(lugar)
+                        erros.append(
+                            f"{saida}: o caminho do diretório de saída do cargo passa por {lugar}, "
+                            "que não é uma pasta — o cargo não tem onde gravar, e o lugar dele é "
+                            "o de um arquivo do commit"
+                        )
                     break
         # O cargo, o rustc, o rustdoc e o rustfmt do PATH: os proxies do rustup
         # do CARGO_HOME, ou os binários do toolchain oficial.

@@ -73,8 +73,10 @@
 //!   ([`quebras_que_a_leitura_nao_ve`], [`forma_que_a_leitura_nao_le`]), e
 //!   um checkout escrito numa delas não escapa da ordem —; a ação tem os
 //!   passos que conferem, fora do cargo, o
-//!   ambiente, o PATH, os `rust-toolchain`, os artefatos e — desde o lote
-//!   A12 — os links do commit, e o config do cargo — o do executor desde o
+//!   ambiente, o PATH, os `rust-toolchain`, os artefatos, os links — desde
+//!   o lote A12, no commit e no caminho dos diretórios de saída — e os
+//!   submódulos do commit e o que não é pasta nesse caminho — desde o lote
+//!   A13 —, e o config do cargo — o do executor desde o
 //!   lote A9, os outros desde o lote A10 —, e o das invariantes, que o job
 //!   de lints liga pela entrada `invariantes: true` no `with:` do passo dela
 //!   ([`conferir_a_acao`], [`as_invariantes_na_acao`]) — desde o lote A13,
@@ -249,6 +251,17 @@ const PASSO_DO_EXECUTOR: &str = "executor";
 /// plantado nela (o achado 3 do adversário do lote A11). O passo recusa
 /// todo link do commit, pelo modo do índice — o repositório não tem nenhum
 /// —, e todo link no caminho de um diretório de saída, no disco.
+///
+/// # Os submódulos e o que não é pasta, desde o lote A13
+///
+/// Um submódulo — um gitlink, o modo 160000 do índice — no lugar de um
+/// `target` passava pelas duas regras (o I1 do adversário do lote A12):
+/// num checkout sem os submódulos, ele é uma pasta vazia, e num com eles,
+/// os arquivos de outro repositório, que nenhuma regra daqui vê. E um
+/// `target` que é um arquivo do commit também passava, e só o cargo parava
+/// depois (o I2 dele). O passo recusa todo submódulo do commit, pelo modo
+/// do índice — o repositório não tem nenhum —, e, no caminho de um
+/// diretório de saída, o que existe e não é pasta.
 const PASSOS_DA_ACAO: [(&str, &str, &[&str]); 4] = [
     (
         "ambiente",
@@ -268,6 +281,8 @@ const PASSOS_DA_ACAO: [(&str, &str, &[&str]); 4] = [
             "arquivo.startswith(saidas)",
             "if modo == \"120000\":",
             "if os.path.islink(atual):",
+            "if modo == \"160000\":",
+            "if os.path.lexists(atual)",
         ],
     ),
     (
@@ -3414,6 +3429,14 @@ mod testes {
                 acao.replace("if os.path.islink(atual):", "if False:"),
             ),
             (
+                "sem os submódulos do commit",
+                acao.replace("if modo == \"160000\":", "if modo == \"0\":"),
+            ),
+            (
+                "sem o que não é pasta no caminho das saídas",
+                acao.replace("if os.path.lexists(atual)", "if False"),
+            ),
+            (
                 "sem o canal fixado no executor",
                 acao.replace("env=ambiente,\n", "\n"),
             ),
@@ -3542,6 +3565,37 @@ mod testes {
         ambiente: &[(&str, String)],
         antes_no_path: Option<&str>,
     ) -> NaAcao {
+        let caso = ArvoreDoCaso {
+            arquivos,
+            links,
+            forcados,
+            submodulos: &[],
+        };
+        rodar_a_acao_na_arvore(base, nome, &caso, ambiente, antes_no_path)
+    }
+
+    /// A árvore de um caso de [`rodar_a_acao_na_arvore`]: os `arquivos`, os
+    /// `links` — o caminho e para onde ele aponta —, os `forcados` — os de
+    /// `target/`, que o `.gitignore` deixa de fora do commit — e, desde o
+    /// lote A13, os `submodulos`: um gitlink (o modo 160000) em cada caminho,
+    /// só no índice, como num commit com um submódulo que o checkout não
+    /// trouxe.
+    struct ArvoreDoCaso<'a> {
+        arquivos: &'a [(&'a str, String)],
+        links: &'a [(&'a str, &'a str)],
+        forcados: &'a [&'a str],
+        submodulos: &'a [&'a str],
+    }
+
+    /// Como [`rodar_a_acao_com_links`], com a árvore inteira do caso
+    /// ([`ArvoreDoCaso`]).
+    fn rodar_a_acao_na_arvore(
+        base: &Path,
+        nome: &str,
+        caso: &ArvoreDoCaso<'_>,
+        ambiente: &[(&str, String)],
+        antes_no_path: Option<&str>,
+    ) -> NaAcao {
         let acao = include_str!("../../.github/actions/compilador/action.yml");
         let projeto = super::super::raiz_do_projeto();
         let arvore = base.join(nome);
@@ -3566,7 +3620,7 @@ mod testes {
         }
         escrever(".gitignore", "target/\n");
         std::fs::create_dir_all(arvore.join("iniciador")).expect("o iniciador");
-        for (relativo, texto) in arquivos {
+        for (relativo, texto) in caso.arquivos {
             escrever(relativo, texto);
             // Os programas falsos do caso, executáveis, como num commit com
             // o modo deles.
@@ -3574,7 +3628,7 @@ mod testes {
                 tornar_executavel(&arvore.join(relativo));
             }
         }
-        for (relativo, destino) in links {
+        for (relativo, destino) in caso.links {
             let caminho = arvore.join(relativo);
             std::fs::create_dir_all(caminho.parent().expect("a pasta")).expect("a pasta");
             std::os::unix::fs::symlink(destino, &caminho).expect(relativo);
@@ -3591,8 +3645,14 @@ mod testes {
         };
         git(&["init", "-q"]);
         git(&["add", "-A"]);
-        for f in forcados {
+        for f in caso.forcados {
             git(&["add", "-f", "--", f]);
+        }
+        // O submódulo: só o gitlink no índice, com um commit que não existe
+        // aqui — o checkout sem os submódulos não o traz.
+        for s in caso.submodulos {
+            let entrada = format!("160000,{},{s}", "1".repeat(40));
+            git(&["update-index", "--add", "--cacheinfo", &entrada]);
         }
         git(&["commit", "-q", "-m", "a árvore do caso"]);
         // O CARGO_HOME do caso, com os proxies ligados ao rustup de verdade,
@@ -3896,6 +3956,97 @@ mod testes {
             if !r.passou {
                 cegos.push(format!("{nome}: {}", r.saida));
             }
+        }
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(cegos.is_empty(), "{cegos:#?}");
+    }
+
+    /// O submódulo e o que não é pasta no caminho de um diretório de saída
+    /// (no lote A13, o I1 e o I2 do adversário do lote A12): um gitlink — o
+    /// modo 160000 do índice — no lugar do `target`, no do `target` de um
+    /// diretório de build ou noutro lugar passava pelo passo do ambiente, e
+    /// num checkout com os submódulos traria os arquivos de outro
+    /// repositório; e um `target` que é um arquivo do commit também passava,
+    /// e só o cargo parava depois. Cada um reprova, pelo script rodado como
+    /// o runner o roda, com os erros dele, e só eles; e a árvore sem nenhum
+    /// dos dois passa.
+    #[test]
+    fn adversario_a12_o_submodulo_e_o_que_nao_e_pasta_no_caminho_das_saidas() {
+        let base = base_da_acao("acao-a12-submodulos");
+        let submodulo = "um submódulo no commit (um gitlink)";
+        let nao_e_pasta = "o caminho do diretório de saída do cargo passa por";
+        type Caso = (
+            &'static str,
+            Vec<(&'static str, String)>,
+            Vec<&'static str>,
+            Vec<String>,
+        );
+        let casos: Vec<Caso> = vec![
+            (
+                "o-submodulo-target",
+                vec![],
+                vec!["target"],
+                vec![format!("target: {submodulo}")],
+            ),
+            (
+                "o-submodulo-de-um-diretorio-de-build",
+                vec![],
+                vec!["kernel/target"],
+                vec![format!("kernel/target: {submodulo}")],
+            ),
+            (
+                "o-submodulo-noutro-lugar",
+                vec![],
+                vec!["vendor/outro"],
+                vec![format!("vendor/outro: {submodulo}")],
+            ),
+            (
+                "o-target-arquivo",
+                vec![("target", String::from("nada\n"))],
+                vec![],
+                vec![format!("target: {nao_e_pasta} target, que não é uma pasta")],
+            ),
+            (
+                "o-target-arquivo-de-um-diretorio-de-build",
+                vec![("kernel/target", String::from("nada\n"))],
+                vec![],
+                vec![format!(
+                    "kernel/target: {nao_e_pasta} kernel/target, que não é uma pasta"
+                )],
+            ),
+        ];
+        let mut cegos = Vec::new();
+        for (nome, arquivos, submodulos, esperados) in &casos {
+            let caso = ArvoreDoCaso {
+                arquivos,
+                links: &[],
+                forcados: &[],
+                submodulos,
+            };
+            let r = rodar_a_acao_na_arvore(&base, nome, &caso, &[], None);
+            let erros = r
+                .saida
+                .lines()
+                .filter(|l| l.starts_with("::error::"))
+                .count();
+            if r.passou
+                || erros != esperados.len()
+                || !esperados
+                    .iter()
+                    .all(|e| r.saida.contains(&format!("::error::{e}")))
+            {
+                cegos.push(format!("{nome}: {}", r.saida));
+            }
+        }
+        let nenhum = ArvoreDoCaso {
+            arquivos: &[],
+            links: &[],
+            forcados: &[],
+            submodulos: &[],
+        };
+        let r = rodar_a_acao_na_arvore(&base, "nenhum", &nenhum, &[], None);
+        if !r.passou {
+            cegos.push(format!("nenhum: {}", r.saida));
         }
         let _ = std::fs::remove_dir_all(&base);
         assert!(cegos.is_empty(), "{cegos:#?}");
