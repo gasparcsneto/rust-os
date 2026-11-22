@@ -2765,23 +2765,75 @@ fn medir_o_desenho(tela: &crate::tela::Tela) -> Resultado {
 ///
 /// Como o do desenho, [`tela_desenhar_nao_regrediu_em_ordem_de_grandeza`]:
 /// uma razão, e não um teto em milissegundos, para a máquina entrar nos dois
-/// lados da conta e sair dela. De um lado, a tela física inteira pelo
-/// `copiar_linha` de verdade, linha a linha, como o adaptador linear a
-/// apresenta; do outro, a mesma cópia por `copy_nonoverlapping`, para o
-/// mesmo framebuffer, em blocos alternados. Pelo contador de ciclos, e não
-/// pelo relógio: uma tela copiada leva poucos milissegundos, e o relógio
-/// anda de dez em dez.
+/// lados da conta e sair dela. De um lado, a tela física pelo `copiar_linha`
+/// de verdade, linha a linha, como o adaptador linear a apresenta; do outro,
+/// a mesma cópia por `copy_nonoverlapping`, para o mesmo framebuffer, em
+/// blocos alternados — uma faixa de um quarto da tela de cada lado, sete
+/// vezes, a faixa descendo pela tela. Pelo contador de ciclos, e não pelo
+/// relógio: um bloco leva menos de um milissegundo, e o relógio anda de dez
+/// em dez.
 ///
 /// No núcleo dos dispositivos, que é onde a apresentação roda: no
 /// emulador, copiar para o framebuffer de outro núcleo custa cem vezes mais
 /// — ver `Compositor::apresentar_pendente` —, e a medida seria dessa
 /// diferença, e não do caminho.
 ///
+/// # Por que o bloco mais rápido, e não a soma
+///
+/// Porque o ruído do hospedeiro só soma tempo. No emulador o contador de
+/// ciclos anda com o relógio do hospedeiro, e um bloco leva junto o que
+/// acontecer enquanto ele dura: o tratador do tique, ou o fio do processador
+/// virtual sem a vez no hospedeiro por dezenas de milissegundos. Julgada
+/// pela razão das somas de três pares de blocos, uma preempção dessas caía
+/// inteira num bloco de 3,5 ms e decidia a medida: com o hospedeiro ocupado
+/// por oito laços, o caso reprovou a 418% da cópia no x86, sem defeito
+/// nenhum, e chegou a 262% no ARM (o adversário do lote FUMAÇA-USB). Pelo
+/// bloco mais rápido de cada lado — o menor da apresentação contra o menor
+/// da cópia —, basta um bloco limpo de cada lado para cada um medir o custo
+/// dele; e a regressão que o caso recusa põe **todo** bloco da apresentação
+/// dezenas de vezes acima da cópia, o mais rápido também.
+///
+/// Os dois atalhos por par de blocos não servem: a mediana das razões de
+/// três pares chegou a 294% no ARM com o hospedeiro ocupado, e a menor
+/// razão entre os pares esconderia a regressão se um só bloco da cópia
+/// levasse uma preempção longa. E sete pares, e não três, para que o ruído
+/// precise cair em todos os blocos de um lado para pesar.
+///
+/// # Por que um quarto da tela por bloco
+///
+/// Porque o bloco mais rápido só mede o custo se houver um bloco limpo de
+/// cada lado, e com o hospedeiro ocupado o fio do processador virtual roda
+/// em vezes de poucos milissegundos. Um bloco mais longo que a vez nunca sai
+/// limpo, e o lado de bloco mais curto tem mais chance de caber inteiro
+/// numa: com sete pares de duas telas — 3,3 ms de apresentação contra 2,7
+/// de cópia —, os oito laços puseram todo bloco da apresentação de 2,6 a 6,5
+/// vezes acima do custo dela, um da cópia saiu limpo, e o caso reprovou a
+/// 327% sem defeito nenhum, com as somas da mesma medida a 169%. Um quarto
+/// da tela, perto de meio milissegundo, cabe numa vez dos dois lados: com
+/// os mesmos oito laços, a pior de trinta medidas ficou a 187% no x86, e a
+/// pior de quinze, a 129% no ARM. Pela soma, os mesmos blocos curtos seriam
+/// piores que antes, porque uma preempção pesa dezenas de vezes o custo de
+/// um bloco tão curto: as somas das mesmas medidas chegaram a 798% e a 559%.
+///
+/// O que o bloco mais rápido não tira é um lado inteiro mais lento a medida
+/// toda: os 187% foram uma medida com os sete blocos da apresentação pelo
+/// menos uma vez e meia acima do de costume, e um da cópia no de costume —
+/// as outras vinte e nove ficaram até 127%. O teto do triplo é a folga para
+/// isso.
+///
+/// E em ordem alternada, porque quem vem depois acha a faixa quente — as
+/// traduções do emulador e os caches que o primeiro deixou. No ARM, com a
+/// apresentação sempre antes, a cópia da mesma faixa levava dois terços do
+/// tempo dela, e a razão limpa subia de perto de 115% para perto de 150%;
+/// alternando, cada lado tem a vez de vir depois, e o mais rápido de cada
+/// um é o quente.
+///
 /// # Por que só em depuração
 ///
 /// Porque é lá que o defeito mora. Em release o laço de escritas voláteis
-/// vira um laço reto de escritas de 32 bits, tão rápido quanto a cópia, e a
-/// razão não separa os dois: é registrada, e não julgada.
+/// vira um laço reto de escritas de 32 bits, perto da cópia — medido, a 135%
+/// dela no x86 e a 195% no ARM —, e o teto do triplo não separa os dois: a
+/// razão é registrada, e não julgada.
 fn tela_apresentar_nao_regrediu_em_ordem_de_grandeza() -> Resultado {
     let Some(fisica) = crate::tela::tela_fisica() else {
         return Ok(());
@@ -2821,13 +2873,14 @@ fn tela_apresentar_nao_regrediu_em_ordem_de_grandeza() -> Resultado {
 /// para o framebuffer de `fisica`, inteiro, um padrão de memória comum, e não
 /// o devolve.
 fn medir_a_apresentacao(fisica: &crate::tela::Tela) -> Resultado {
-    // Blocos alternados, como no desenho. Em depuração, o caminho que
-    // regrediu leva uma fração de segundo por tela, e seis bastam; em
-    // release, o bastante para o tique e o resto da máquina pesarem igual
-    // nos dois lados.
-    const POR_BLOCO: u64 = if cfg!(debug_assertions) { 2 } else { 5 };
-    const BLOCOS: u64 = if cfg!(debug_assertions) { 3 } else { 4 };
-    const VOLTAS: u64 = POR_BLOCO * BLOCOS;
+    // Blocos alternados, como no desenho, e curtos: um quarto da tela de
+    // cada lado, perto de meio milissegundo em depuração — menos que a vez
+    // que o hospedeiro dá ao fio do processador virtual, para que um bloco
+    // caiba inteiro numa vez dele, dos dois lados (ver "Por que um quarto da
+    // tela por bloco", no caso). Sete pares, a faixa descendo pela tela e
+    // voltando ao topo. Os mesmos nos dois perfis.
+    const FAIXAS: usize = 4;
+    const BLOCOS: usize = 7;
     let (largura, altura) = (fisica.largura as usize, fisica.altura as usize);
     let mut origem = crate::grafico::memoria::Memoria::nova((largura * altura * 4) as u64)?;
     for (i, pixel) in origem.pixels_mut().iter_mut().enumerate() {
@@ -2837,13 +2890,20 @@ fn medir_a_apresentacao(fisica: &crate::tela::Tela) -> Resultado {
     let base = fisica.base_de_teste() as usize;
     let linha_em_bytes = fisica.stride as usize * 4;
 
-    let apresentar = || {
-        for (y, linha) in pixels.chunks_exact(largura).enumerate() {
-            fisica.copiar_linha(0, y as u32, linha);
+    // Uma faixa da tela: a primeira linha dela, e os pixels dela.
+    type Faixa<'p> = (usize, &'p [u32]);
+    // A faixa `k`, de cima para baixo.
+    let faixa = |k: usize| {
+        let (de, ate) = (k * altura / FAIXAS, (k + 1) * altura / FAIXAS);
+        (de, &pixels[de * largura..ate * largura])
+    };
+    let apresentar = |(de, linhas): Faixa| {
+        for (y, linha) in linhas.chunks_exact(largura).enumerate() {
+            fisica.copiar_linha(0, (de + y) as u32, linha);
         }
     };
-    let referencia = || {
-        for (y, linha) in pixels.chunks_exact(largura).enumerate() {
+    let referencia = |(de, linhas): Faixa| {
+        for (y, linha) in linhas.chunks_exact(largura).enumerate() {
             // SAFETY: a tela registrada cobre `stride * altura * 4` bytes
             // mapeados e graváveis a partir de `base`, e cada linha visível
             // tem `largura` pixels de quatro bytes dentro dela, alinhados a
@@ -2851,53 +2911,80 @@ fn medir_a_apresentacao(fisica: &crate::tela::Tela) -> Resultado {
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     linha.as_ptr(),
-                    (base + y * linha_em_bytes) as *mut u32,
+                    (base + (de + y) * linha_em_bytes) as *mut u32,
                     largura,
                 )
             };
         }
     };
 
-    // Uma volta de cada fora da conta: a primeira paga o que as seguintes não
-    // pagam.
-    apresentar();
-    referencia();
-    let (mut total, mut copia) = (0u64, 0u64);
-    for _ in 0..BLOCOS {
-        let antes = crate::arch::ciclos();
-        for _ in 0..POR_BLOCO {
-            apresentar();
-        }
-        total += crate::metricas::desde(antes);
-        let antes = crate::arch::ciclos();
-        for _ in 0..POR_BLOCO {
-            referencia();
-        }
-        copia += crate::metricas::desde(antes);
+    // Uma volta inteira de cada lado fora da conta: a primeira paga o que as
+    // seguintes não pagam.
+    for k in 0..FAIXAS {
+        apresentar(faixa(k));
+        referencia(faixa(k));
     }
-    // Em centésimos: 100 é a apresentação tão rápida quanto a cópia.
-    let razao = total * 100 / copia.max(1);
+    // Os ciclos de cada bloco, de cada lado, levados à tela inteira: a faixa
+    // tem um quarto das linhas. Em ordem alternada: quem vem depois acha a
+    // faixa quente — as traduções do emulador e os caches que o primeiro
+    // deixou; no ARM, a cópia logo depois da apresentação levava dois terços
+    // do tempo da de antes dela —, e cada lado tem a vez de vir depois.
+    let (mut apresentacao, mut copia) = ([0u64; BLOCOS], [0u64; BLOCOS]);
+    for (k, (bloco, da_copia)) in apresentacao.iter_mut().zip(copia.iter_mut()).enumerate() {
+        let f = faixa(k % FAIXAS);
+        let medir = |lado: &dyn Fn(Faixa)| {
+            let antes = crate::arch::ciclos();
+            lado(f);
+            crate::metricas::desde(antes) * altura as u64 / (f.1.len() / largura).max(1) as u64
+        };
+        if k % 2 == 0 {
+            *bloco = medir(&apresentar);
+            *da_copia = medir(&referencia);
+        } else {
+            *da_copia = medir(&referencia);
+            *bloco = medir(&apresentar);
+        }
+    }
+    // O bloco mais rápido de cada lado — ver "Por que o bloco mais rápido, e
+    // não a soma", no caso. Em centésimos: 100 é a apresentação tão rápida
+    // quanto a cópia.
+    let mais_rapido = |blocos: &[u64; BLOCOS]| blocos.iter().copied().min().unwrap_or(0);
+    let (rapida, rapida_da_copia) = (mais_rapido(&apresentacao), mais_rapido(&copia));
+    let razao = rapida * 100 / rapida_da_copia.max(1);
+    // A razão das somas vai junto, sem julgamento: a distância entre as duas
+    // é o quanto o ruído pesou nesta rodada.
+    let pelas_somas = apresentacao.iter().sum::<u64>() * 100 / copia.iter().sum::<u64>().max(1);
+    let por_tela = |ciclos: u64| crate::metricas::nanos(ciclos) / 1000;
     crate::log_info!(
         "tela",
-        "apresentar {}x{}: {} us por tela, {}% da copia ({} us)",
+        "apresentar {}x{}: {} us por tela no bloco mais rapido, {}% da copia ({} us); pelas somas, {}%",
         largura,
         altura,
-        crate::metricas::nanos(total / VOLTAS) / 1000,
+        por_tela(rapida),
         razao,
-        crate::metricas::nanos(copia / VOLTAS) / 1000
+        por_tela(rapida_da_copia),
+        pelas_somas
     );
 
     if cfg!(debug_assertions) {
-        // Medido, em depuração: a cópia de agora a 118% da referência no x86
-        // e a 99% no ARM; pixel a pixel, a 8183% e a 4336%. O triplo separa
-        // os dois com folga. Em release, pixel a pixel ficou a 135% e a 195%.
+        // Medido, em depuração, pelo bloco mais rápido de cada lado, com a
+        // medida repetida quinze vezes num boot: a cópia de agora de 112% a
+        // 129% da referência no x86 e de 113% a 149% no ARM; com o hospedeiro
+        // ocupado por oito laços, no pior, 187% e 129%; pixel a pixel, 5931%
+        // e 5472%. O triplo separa os dois com folga dos dois lados. Em
+        // release, pixel a pixel ficou a 135% e a 195%, pelas somas de telas
+        // inteiras, a medida de antes.
         const TETO_PERCENTUAL: u64 = 300;
         if razao > TETO_PERCENTUAL {
+            // Os blocos todos, para quem depura separar o ruído — um bloco
+            // fora da curva — da regressão — todos.
             crate::log_error!(
                 "teste",
-                "apresentar a {}% da copia, teto {}%",
+                "apresentar a {}% da copia no bloco mais rapido, teto {}%; os blocos, em us por tela: {:?} contra {:?}",
                 razao,
-                TETO_PERCENTUAL
+                TETO_PERCENTUAL,
+                apresentacao.map(por_tela),
+                copia.map(por_tela)
             );
             return Err("apresentar na tela ficou uma ordem de grandeza mais lento");
         }
