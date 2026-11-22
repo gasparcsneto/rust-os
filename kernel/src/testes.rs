@@ -24751,16 +24751,30 @@ fn registro_da_imagem() {
 }
 
 /// Roda `f` e devolve depois o registro de identidade da imagem
-/// ([`registro_da_imagem`]) — também quando `f` falha. É o fim do caso que
-/// termina num boot de teste — a persistência reaberta
+/// ([`registro_da_imagem`]), a política e o registro de pessoas
+/// ([`politica_e_pessoas_da_imagem`]) — também quando `f` falha. É o fim do
+/// caso que termina num boot de teste — a persistência reaberta
 /// ([`com_a_persistencia_fechada`]), ou o journal reposto
-/// ([`reposto_da_imagem`]) —, que deixa o registro como o journal o diz: os
-/// agentes que os casos de antes registraram, e as lápides; e o do caso que
-/// registra alguém sem um invólucro que o devolva.
+/// ([`reposto_da_imagem`]) —, que deixa os três como o journal os diz: os
+/// agentes que os casos de antes registraram, e as lápides; a última
+/// política que um deles escreveu; e as pessoas que registraram. E o do
+/// caso que registra alguém sem um invólucro que o devolva.
 fn com_o_registro_devolvido(f: impl FnOnce() -> Resultado) -> Resultado {
     let resultado = f();
     registro_da_imagem();
+    politica_e_pessoas_da_imagem();
     resultado
+}
+
+/// Devolve a política e o registro de pessoas da imagem: a política lida
+/// de novo do disco, e as pessoas também, com a pessoa padrão da suíte de
+/// volta ao console físico (`pessoas::esquecer_registradas`). Depois do
+/// registro de identidade, quando os dois voltam: a leitura da política
+/// confere o alcance aos papéis dos administradores do registro, e um
+/// administrador que um caso deixou poderia pôr a de emergência em vigor.
+fn politica_e_pessoas_da_imagem() {
+    crate::autorizacao::carregar();
+    crate::pessoas::esquecer_registradas();
 }
 
 /// A volta à imagem e a reposição por cima dela, como o boot as faz: de
@@ -40169,6 +40183,9 @@ fn consoles_reabrir_encerra_a_sessao() -> Resultado {
     let depois = crate::pessoas::sessao(id);
     let no_console = crate::interpretador::sessao_do_console(Console::Fisico);
     crate::interpretador::desativar_para_teste();
+    // A pessoa do caso sai do registro com ele: a sessão de teste a
+    // registra, e o console reaberto não a tira.
+    crate::pessoas::esquecer_registradas();
     if !matches!(antes, EstadoDaSessao::Ativa { .. }) {
         return Err("a sessao de teste nao abriu");
     }
@@ -78724,6 +78741,10 @@ fn hora_o_ponto_de_commit_da_rodada() -> Resultado {
         Ok(())
     });
     crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+    // A pessoa da rodada sai do registro com o caso: a sessão de teste a
+    // registra, e encerrar a sessão não a tira (o achado 2 do adversário
+    // do lote ICACHE-3).
+    crate::pessoas::esquecer_registradas();
     r
 }
 
