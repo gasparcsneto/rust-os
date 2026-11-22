@@ -2749,7 +2749,7 @@ fn medir_o_desenho(tela: &crate::tela::Tela) -> Resultado {
 /// O custo de apresentar, medido a cada rodada contra a cópia de memória dos
 /// mesmos bytes.
 ///
-/// # O que ele recusa
+/// # O que ele recusa, e o que passa
 ///
 /// O caminho rápido de [`crate::tela::Tela::copiar_linha`] — o BGR de quatro
 /// bytes por pixel, o das duas máquinas da suíte — voltando a escrever pixel
@@ -2757,9 +2757,24 @@ fn medir_o_desenho(tela: &crate::tela::Tela) -> Resultado {
 /// interrupções mascaradas, e enquanto ela dura ele não colhe as portas do
 /// canal, não roda o executor e não acorda as esperas do relógio. Pixel a
 /// pixel, no kernel de depuração, cada escrita volátil era uma chamada de
-/// função, e uma tela inteira custava dezenas de vezes a cópia — a cada
-/// linha de log que rolava o console cheio. A CI 527 reprovou a fumaça do
-/// teclado USB por isso.
+/// função, e uma tela inteira custava dezenas de vezes a cópia; e o console
+/// — quase a tela inteira — ia à tela a cada linha de log que rolava o
+/// console cheio. A CI 527 reprovou a fumaça do teclado USB por isso.
+///
+/// Em depuração, o bloco mais rápido da apresentação vai até o triplo do da
+/// cópia, e o bloco do meio de cada lado, até dez vezes. Pixel a pixel, os
+/// dois ficam dezenas de vezes acima; em três quartos da tela, o do meio.
+/// O que passa: uma regressão de menos que o triplo — a cópia feita duas
+/// vezes por linha passa sempre, de 180% a 245%; três vezes fica no teto,
+/// de 250% a 309%, e passou nas quatro medidas do x86 e em uma das quatro
+/// do ARM —; a que poupe metade da tela — ver "Por que também a mediana"
+/// —; e a de um quarto da tela. Em release, ver "Em release".
+///
+/// E a apresentação tem de escrever: a cópia de referência leva a cada linha
+/// da tela a linha de baixo do padrão, e o último pixel só tem o do padrão
+/// se a apresentação o escreveu por cima. Com a mesma linha, uma
+/// `copiar_linha` que não escrevesse nada passava nos dois perfis, com a
+/// razão perto de zero (o achado 3 do adversário do lote FUMAÇA-2).
 ///
 /// # Como ele mede
 ///
@@ -2768,10 +2783,10 @@ fn medir_o_desenho(tela: &crate::tela::Tela) -> Resultado {
 /// lados da conta e sair dela. De um lado, a tela física pelo `copiar_linha`
 /// de verdade, linha a linha, como o adaptador linear a apresenta; do outro,
 /// a mesma cópia por `copy_nonoverlapping`, para o mesmo framebuffer, em
-/// blocos alternados — uma faixa de um quarto da tela de cada lado, sete
+/// blocos alternados — uma faixa de um quarto da tela de cada lado, quinze
 /// vezes, a faixa descendo pela tela. Pelo contador de ciclos, e não pelo
-/// relógio: um bloco leva menos de um milissegundo, e o relógio anda de dez
-/// em dez.
+/// relógio: um bloco leva menos de dois milissegundos, e o relógio anda de
+/// dez em dez.
 ///
 /// No núcleo dos dispositivos, que é onde a apresentação roda: no
 /// emulador, copiar para o framebuffer de outro núcleo custa cem vezes mais
@@ -2796,44 +2811,91 @@ fn medir_o_desenho(tela: &crate::tela::Tela) -> Resultado {
 /// Os dois atalhos por par de blocos não servem: a mediana das razões de
 /// três pares chegou a 294% no ARM com o hospedeiro ocupado, e a menor
 /// razão entre os pares esconderia a regressão se um só bloco da cópia
-/// levasse uma preempção longa. E sete pares, e não três, para que o ruído
-/// precise cair em todos os blocos de um lado para pesar.
+/// levasse uma preempção longa.
+///
+/// # Por que também a mediana
+///
+/// Porque o mínimo de cada lado é tirado entre faixas diferentes da tela, e
+/// não entre repetições do mesmo trabalho: além do ruído, ele escolhe a
+/// faixa mais barata. Uma regressão que poupasse uma das quatro faixas
+/// passava pelo mínimo, a dezenas de vezes nas outras três: com três quartos
+/// da tela pixel a pixel, o caso de sete pares passou nas quatro medidas,
+/// de 156% a 186% (o achado 2 do adversário do lote FUMAÇA-2). O bloco do
+/// meio de cada lado — o oitavo de quinze — vê essa regressão, que põe onze
+/// dos quinze blocos da apresentação dezenas de vezes acima: nas oito
+/// medidas, o mais rápido ficou de 120% a 174%, e a mediana de 4152% a
+/// 5855%.
+///
+/// A mediana não é um filtro de ruído como o mínimo — oito blocos lentos de
+/// um lado a levam junto —, e por isso o teto dela é folgado: sem defeito,
+/// ela ficou de 94% a 151%, com e sem os oito laços, nas duas
+/// arquiteturas, contra um teto de dez vezes. O que ainda passa é a
+/// regressão que poupe duas das três primeiras faixas — oito blocos dos
+/// quinze, metade da tela —, e a de uma faixa só, nos dois juízes.
 ///
 /// # Por que um quarto da tela por bloco
 ///
 /// Porque o bloco mais rápido só mede o custo se houver um bloco limpo de
 /// cada lado, e com o hospedeiro ocupado o fio do processador virtual roda
-/// em vezes de poucos milissegundos. Um bloco mais longo que a vez nunca sai
-/// limpo, e o lado de bloco mais curto tem mais chance de caber inteiro
-/// numa: com sete pares de duas telas — 3,3 ms de apresentação contra 2,7
-/// de cópia —, os oito laços puseram todo bloco da apresentação de 2,6 a 6,5
-/// vezes acima do custo dela, um da cópia saiu limpo, e o caso reprovou a
-/// 327% sem defeito nenhum, com as somas da mesma medida a 169%. Um quarto
-/// da tela, perto de meio milissegundo, cabe numa vez dos dois lados: com
-/// os mesmos oito laços, a pior de trinta medidas ficou a 187% no x86, e a
-/// pior de quinze, a 129% no ARM. Pela soma, os mesmos blocos curtos seriam
-/// piores que antes, porque uma preempção pesa dezenas de vezes o custo de
-/// um bloco tão curto: as somas das mesmas medidas chegaram a 798% e a 559%.
+/// em vezes de poucos milissegundos: quanto mais longo o bloco, menos vezes
+/// ele sai limpo, e o lado de bloco mais curto tem mais chance de caber
+/// inteiro numa. Com sete pares de duas telas — 3,3 ms de apresentação
+/// contra 2,7 de cópia — e os oito laços, o mais rápido da apresentação
+/// saiu limpo em seis de quinze medidas, e o da cópia em dez; numa delas,
+/// todo bloco da apresentação ficou de 2,6 a 6,5 vezes acima do custo dela,
+/// um da cópia saiu limpo, e o caso reprovou a 327% sem defeito nenhum, com
+/// as somas da mesma medida a 169%. Um quarto da tela, perto de meio
+/// milissegundo em depuração no QEMU 8.2 desta máquina, cabe numa vez dos
+/// dois lados: com os mesmos oito laços, e sete pares, a pior de trinta
+/// medidas ficou a 187% no x86, e a pior de quinze, a 129% no ARM. Pela
+/// soma, os mesmos blocos curtos seriam piores que antes, porque uma
+/// preempção pesa dezenas de vezes o custo de um bloco tão curto: as somas
+/// das mesmas rodadas chegaram a 798% e a 559%.
 ///
-/// O que o bloco mais rápido não tira é um lado inteiro mais lento a medida
-/// toda: os 187% foram uma medida com os sete blocos da apresentação pelo
-/// menos uma vez e meia acima do de costume, e um da cópia no de costume —
-/// as outras vinte e nove ficaram até 127%. O teto do triplo é a folga para
-/// isso.
+/// A premissa é do QEMU 8.2. No QEMU 10.2 da CI, uma tela do ARM custa de
+/// 6,3 a 7,0 ms em depuração, perto de três vezes a daqui, e uma faixa
+/// perto de um milissegundo e meio; a CI 535 passou com o hospedeiro
+/// quieto, a 104%.
 ///
-/// E em ordem alternada, porque quem vem depois acha a faixa quente — as
-/// traduções do emulador e os caches que o primeiro deixou. No ARM, com a
-/// apresentação sempre antes, a cópia da mesma faixa levava dois terços do
-/// tempo dela, e a razão limpa subia de perto de 115% para perto de 150%;
-/// alternando, cada lado tem a vez de vir depois, e o mais rápido de cada
-/// um é o quente.
+/// # Por que quinze pares
 ///
-/// # Por que só em depuração
+/// Porque um trecho lento do hospedeiro cobre às vezes os sete primeiros
+/// pares inteiros, de um lado mais que do outro. Sem carga, no x86, os sete
+/// primeiros pares de duas medidas deram 151% e 90%, e os quinze, nas
+/// mesmas, 126% e 119%. Com os quinze, o bloco mais rápido ficou de 113% a
+/// 135% em depuração, com e sem os oito laços, nas duas arquiteturas; e a
+/// mediana de sete pares, mais nervosa, chegou a 171% no ARM com os laços,
+/// contra 151% a de quinze. Custam uns oito milissegundos a mais por medida
+/// em depuração nesta máquina, sem carga, e perto de vinte e cinco no ARM
+/// da CI.
 ///
-/// Porque é lá que o defeito mora. Em release o laço de escritas voláteis
-/// vira um laço reto de escritas de 32 bits, perto da cópia — medido, a 135%
-/// dela no x86 e a 195% no ARM —, e o teto do triplo não separa os dois: a
-/// razão é registrada, e não julgada.
+/// # O que o bloco mais rápido não tira
+///
+/// Um lado inteiro mais lento a medida toda: com sete pares, os 187% foram
+/// uma medida com os sete blocos da apresentação pelo menos uma vez e meia
+/// acima do de costume, e um da cópia no de costume — as outras vinte e
+/// nove ficaram até 127% —; e, sem carga, os 91% foram o espelho, com o
+/// mais rápido da cópia uma vez e meia acima do de costume. O teto do
+/// triplo é a folga para isso, e os quinze pares a encurtam.
+///
+/// # Em ordem alternada
+///
+/// Porque quem vem depois acha a faixa quente — as traduções do emulador e
+/// os caches que o primeiro deixou. No ARM, com a apresentação sempre antes,
+/// a cópia da mesma faixa levava dois terços do tempo dela, e a razão limpa
+/// subia de perto de 115% para perto de 140% — de 133% a 156% nas quinze
+/// medidas —; alternando, cada lado tem a vez de vir depois, e o mais
+/// rápido de cada um é o quente.
+///
+/// # Em release
+///
+/// O laço de escritas voláteis vira um laço reto de escritas de 32 bits,
+/// perto da cópia — pixel a pixel ficou a 135% dela no x86 e a 195% no ARM,
+/// pelas somas de telas inteiras, a medida de antes —, e o triplo não
+/// separa os dois. Os dois juízes vão até dez vezes, contra uma regressão
+/// de ordem de grandeza que só o release tenha: sem defeito, o bloco mais
+/// rápido ficou de 101% a 113% e a mediana de 95% a 125%, com e sem os oito
+/// laços.
 fn tela_apresentar_nao_regrediu_em_ordem_de_grandeza() -> Resultado {
     let Some(fisica) = crate::tela::tela_fisica() else {
         return Ok(());
@@ -2874,19 +2936,26 @@ fn tela_apresentar_nao_regrediu_em_ordem_de_grandeza() -> Resultado {
 /// o devolve.
 fn medir_a_apresentacao(fisica: &crate::tela::Tela) -> Resultado {
     // Blocos alternados, como no desenho, e curtos: um quarto da tela de
-    // cada lado, perto de meio milissegundo em depuração — menos que a vez
-    // que o hospedeiro dá ao fio do processador virtual, para que um bloco
-    // caiba inteiro numa vez dele, dos dois lados (ver "Por que um quarto da
-    // tela por bloco", no caso). Sete pares, a faixa descendo pela tela e
-    // voltando ao topo. Os mesmos nos dois perfis.
+    // cada lado — perto de meio milissegundo em depuração no QEMU 8.2 e no
+    // x86 da CI, e perto de um milissegundo e meio no ARM da CI —, para que
+    // um bloco caiba inteiro numa vez que o hospedeiro dá ao fio do
+    // processador virtual (ver "Por que um quarto da tela por bloco", no
+    // caso). Quinze pares, a faixa descendo pela tela e voltando ao topo. Os
+    // mesmos nos dois perfis.
     const FAIXAS: usize = 4;
-    const BLOCOS: usize = 7;
+    const BLOCOS: usize = 15;
+    // A última faixa é medida sempre com a cópia antes — com `FAIXAS` par, o
+    // `k` dela é sempre ímpar —, e a conferência do fim conta com isso.
+    const _: () = assert!(FAIXAS % 2 == 0);
     let (largura, altura) = (fisica.largura as usize, fisica.altura as usize);
-    let mut origem = crate::grafico::memoria::Memoria::nova((largura * altura * 4) as u64)?;
+    // O padrão tem uma linha a mais que a tela: a da cópia de baixo da
+    // última — ver `referencia`.
+    let mut origem = crate::grafico::memoria::Memoria::nova((largura * (altura + 1) * 4) as u64)?;
     for (i, pixel) in origem.pixels_mut().iter_mut().enumerate() {
         *pixel = (i as u32).wrapping_mul(0x9E37_79B9) & 0x00FF_FFFF;
     }
-    let pixels = &origem.pixels()[..largura * altura];
+    let padrao = &origem.pixels()[..largura * (altura + 1)];
+    let pixels = &padrao[..largura * altura];
     let base = fisica.base_de_teste() as usize;
     let linha_em_bytes = fisica.stride as usize * 4;
 
@@ -2902,8 +2971,17 @@ fn medir_a_apresentacao(fisica: &crate::tela::Tela) -> Resultado {
             fisica.copiar_linha(0, (de + y) as u32, linha);
         }
     };
+    // A cópia de cada linha da tela sai da linha de baixo do padrão, e não
+    // da mesma: o mesmo trabalho, e outro conteúdo na tela. Da mesma linha,
+    // ela deixava na tela o que a apresentação deixaria, e a conferência do
+    // fim não via uma `copiar_linha` que não escrevesse nada (o achado 3 do
+    // adversário do lote FUMAÇA-2). O laço é o mesmo de antes, linha a
+    // linha pelos pedaços da faixa: em depuração ele pesa na conta, e um
+    // laço de índices fazia a cópia uns dez por cento mais rápida, e a
+    // razão subir junto.
     let referencia = |(de, linhas): Faixa| {
-        for (y, linha) in linhas.chunks_exact(largura).enumerate() {
+        let fonte = &padrao[(de + 1) * largura..][..linhas.len()];
+        for (y, linha) in fonte.chunks_exact(largura).enumerate() {
             // SAFETY: a tela registrada cobre `stride * altura * 4` bytes
             // mapeados e graváveis a partir de `base`, e cada linha visível
             // tem `largura` pixels de quatro bytes dentro dela, alinhados a
@@ -2951,47 +3029,66 @@ fn medir_a_apresentacao(fisica: &crate::tela::Tela) -> Resultado {
     let mais_rapido = |blocos: &[u64; BLOCOS]| blocos.iter().copied().min().unwrap_or(0);
     let (rapida, rapida_da_copia) = (mais_rapido(&apresentacao), mais_rapido(&copia));
     let razao = rapida * 100 / rapida_da_copia.max(1);
-    // A razão das somas vai junto, sem julgamento: a distância entre as duas
-    // é o quanto o ruído pesou nesta rodada.
+    // E o bloco do meio de cada lado, o segundo juiz — ver "Por que também
+    // a mediana", no caso.
+    let do_meio = |blocos: &[u64; BLOCOS]| {
+        let mut ordenados = *blocos;
+        ordenados.sort_unstable();
+        ordenados[BLOCOS / 2]
+    };
+    let pela_mediana = do_meio(&apresentacao) * 100 / do_meio(&copia).max(1);
+    // A razão das somas vai junto, sem julgamento: a distância entre ela e as
+    // outras duas é o quanto o ruído pesou nesta rodada.
     let pelas_somas = apresentacao.iter().sum::<u64>() * 100 / copia.iter().sum::<u64>().max(1);
     let por_tela = |ciclos: u64| crate::metricas::nanos(ciclos) / 1000;
     crate::log_info!(
         "tela",
-        "apresentar {}x{}: {} us por tela no bloco mais rapido, {}% da copia ({} us); pelas somas, {}%",
+        "apresentar {}x{}: {} us por tela no bloco mais rapido, {}% da copia ({} us); pela mediana, {}%; pelas somas, {}%",
         largura,
         altura,
         por_tela(rapida),
         razao,
         por_tela(rapida_da_copia),
+        pela_mediana,
         pelas_somas
     );
 
-    if cfg!(debug_assertions) {
-        // Medido, em depuração, pelo bloco mais rápido de cada lado, com a
-        // medida repetida quinze vezes num boot: a cópia de agora de 112% a
-        // 129% da referência no x86 e de 113% a 149% no ARM; com o hospedeiro
-        // ocupado por oito laços, no pior, 187% e 129%; pixel a pixel, 5931%
-        // e 5472%. O triplo separa os dois com folga dos dois lados. Em
-        // release, pixel a pixel ficou a 135% e a 195%, pelas somas de telas
-        // inteiras, a medida de antes.
-        const TETO_PERCENTUAL: u64 = 300;
-        if razao > TETO_PERCENTUAL {
-            // Os blocos todos, para quem depura separar o ruído — um bloco
-            // fora da curva — da regressão — todos.
-            crate::log_error!(
-                "teste",
-                "apresentar a {}% da copia no bloco mais rapido, teto {}%; os blocos, em us por tela: {:?} contra {:?}",
-                razao,
-                TETO_PERCENTUAL,
-                apresentacao.map(por_tela),
-                copia.map(por_tela)
-            );
-            return Err("apresentar na tela ficou uma ordem de grandeza mais lento");
-        }
+    // Os tetos — ver "O que ele recusa, e o que passa", no caso. Em
+    // depuração, o bloco mais rápido até o triplo da cópia; nos dois
+    // perfis, a mediana até dez vezes; e em release, o bloco mais rápido
+    // também até dez vezes, contra uma regressão de ordem de grandeza que só
+    // o release tenha.
+    const TETO_EM_DEPURACAO: u64 = 300;
+    const TETO_FOLGADO: u64 = 1000;
+    let teto = if cfg!(debug_assertions) {
+        TETO_EM_DEPURACAO
+    } else {
+        TETO_FOLGADO
+    };
+    if razao > teto || pela_mediana > TETO_FOLGADO {
+        // Os blocos todos, para quem depura separar o ruído — um bloco fora
+        // da curva — da regressão — todos, ou os de uma parte da tela.
+        crate::log_error!(
+            "teste",
+            "apresentar a {}% da copia no bloco mais rapido, teto {}%, e a {}% pela mediana, teto {}%; os blocos, em us por tela: {:?} contra {:?}",
+            razao,
+            teto,
+            pela_mediana,
+            TETO_FOLGADO,
+            apresentacao.map(por_tela),
+            copia.map(por_tela)
+        );
+        return Err(if razao > teto {
+            "apresentar na tela ficou uma ordem de grandeza mais lento"
+        } else {
+            "apresentar na tela ficou uma ordem de grandeza mais lento em mais da metade dos blocos"
+        });
     }
 
-    // E a cópia escreveu de verdade — senão a medida mediu nada: o último
-    // pixel da tela é o do padrão.
+    // E a apresentação escreveu de verdade — senão a medida mediu nada: o
+    // último pixel da tela é o do padrão. A última faixa vem com a cópia
+    // antes, que deixa nela a linha de baixo do padrão: o pixel do padrão só
+    // está lá se a apresentação o escreveu por cima.
     let ultimo = pixels[largura * altura - 1];
     let lido = fisica.ler_pixel(largura as u32 - 1, altura as u32 - 1);
     if lido != Some(crate::tela::Cor::de_u32(ultimo)) {

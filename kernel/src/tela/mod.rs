@@ -840,10 +840,13 @@ impl Tela {
     /// inteira — de novo. A CI 527 reprovou a fumaça do teclado USB por
     /// isso: o agente de uma porta esperou 2,3 s pelo núcleo mascarado. A
     /// cópia é o `memcpy` do `compiler_builtins`, que vem compilado e
-    /// otimizado com o `core`, em qualquer perfil: 1,8 e 2,3 ms em
-    /// depuração; em release, de 1,5 para 1,1 ms no x86, e de 3,5 para 1,5
-    /// ms no ARM. Quem mede, a cada rodada da suíte, é `tela: apresentar nao
-    /// regrediu em ordem de grandeza`.
+    /// otimizado com o `core`, em qualquer perfil: uma tela em 1,8 ms no x86
+    /// e em 2,3 no ARM, em depuração; em release, de 1,5 para 1,1 ms no
+    /// x86, e de 3,5 para 1,5 ms no ARM — no QEMU 8.2 de onde a correção foi
+    /// medida. No QEMU 10.2 da CI, o x86 fica perto disso, de 1,4 a 1,7 ms,
+    /// e o ARM custa perto de três vezes mais: de 6,3 a 7,0 ms em depuração,
+    /// e 4,9 em release (as CIs 532, 534 e 535). Quem mede, a cada rodada da
+    /// suíte, é `tela: apresentar nao regrediu em ordem de grandeza`.
     ///
     /// # Por que ela basta, sem `volatile`
     ///
