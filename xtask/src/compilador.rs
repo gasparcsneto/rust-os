@@ -333,8 +333,18 @@ const ACOES_DO_CANARIO: [&str; 2] = ["actions/checkout", "actions/upload-artifac
 /// segue sem ela; com o `continue-on-error:`, o job segue com ela
 /// reprovada, e todo `cargo` dele roda depois de uma conferência que
 /// recusou. Desde o lote A11 (a nota do revisor do lote A10): nenhuma regra
-/// as lia.
+/// as lia. E, desde o lote A12, a leitura do passo falha fechada
+/// ([`linhas_que_o_passo_nao_le`]): uma delas escrita de um jeito que ela
+/// não lê — o `"i\x66": false` — reprova como uma linha que ela não lê.
 const CHAVES_FORA_DO_PASSO_DA_ACAO: [&str; 2] = ["if", "continue-on-error"];
+
+/// As chaves que a leitura do passo da conferência do compilador aceita, num
+/// workflow oficial, na forma simples ([`linhas_que_o_passo_nao_le`]): o
+/// nome, o `id` de que a chave do cache lê o canal, a própria ação e as
+/// entradas dela. Outra — o `env:`, o `timeout-minutes:` — reprova; uma nova
+/// entra aqui, de propósito, com a revisão. Desde o lote A12 (o achado 1 do
+/// adversário do lote A11): a leitura falha fechada.
+const CHAVES_DO_PASSO_DA_ACAO: [&str; 4] = ["name", "id", "uses", "with"];
 
 /// O workflow do canário: o único que sobrepõe o compilador.
 const CANARIO: &str = ".github/workflows/canario.yml";
@@ -1561,44 +1571,53 @@ struct Chave<'a> {
     valor: &'a str,
 }
 
-/// As chaves do item de lista de `linhas` — as de código de um YAML — que
-/// tem a linha `i`, um passo: o item começa no `-` mais próximo acima, de
-/// recuo menor que o da linha — ou nela mesma — e acaba na primeira linha
-/// de recuo igual ou menor que o do `-`. As chaves dele são a que vem
-/// depois do `-`, na mesma linha, e as das linhas na coluna dela; as de
-/// dentro do valor de uma chave — um `with:`, um `env:`, um bloco `|` — não.
-/// Nenhuma, se a linha não está num item.
-fn chaves_do_item<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<Chave<'a>> {
+/// O item de lista de `linhas` — as de código de um YAML — que tem a linha
+/// `i`, um passo: o começo, no `-` mais próximo acima, de recuo menor que o
+/// da linha — ou nela mesma —; o fim, na primeira linha de recuo igual ou
+/// menor que o do `-`; e a coluna das chaves dele, a do que vem depois do
+/// `-`, na mesma linha, ou a da primeira linha de baixo. Nenhum, se a linha
+/// não está num item.
+fn item_da_linha(linhas: &[Linha<'_>], i: usize) -> Option<(usize, usize, Option<usize>)> {
     let item = |l: &Linha<'_>| l.texto == "-" || l.texto.starts_with("- ");
-    let Some(comeco) = (0..=i)
+    let comeco = (0..=i)
         .rev()
-        .find(|&j| item(&linhas[j]) && (j == i || linhas[j].recuo < linhas[i].recuo))
-    else {
-        return Vec::new();
-    };
+        .find(|&j| item(&linhas[j]) && (j == i || linhas[j].recuo < linhas[i].recuo))?;
     let traco = &linhas[comeco];
     let fim = (comeco + 1..linhas.len())
         .find(|&k| !linhas[k].texto.is_empty() && linhas[k].recuo <= traco.recuo)
         .unwrap_or(linhas.len());
     let depois = traco.texto[1..].trim_start();
-    let mut chaves = Vec::new();
     let coluna = if depois.is_empty() {
         linhas[comeco + 1..fim]
             .iter()
             .find(|l| !l.texto.is_empty())
             .map(|l| l.recuo)
     } else {
-        let coluna = traco.recuo + traco.texto.len() - depois.len();
-        if let Some((chave, valor)) = chave_e_valor(depois) {
-            chaves.push(Chave {
-                linha: comeco,
-                coluna,
-                chave,
-                valor,
-            });
-        }
-        Some(coluna)
+        Some(traco.recuo + traco.texto.len() - depois.len())
     };
+    Some((comeco, fim, coluna))
+}
+
+/// As chaves do item de lista de `linhas` que tem a linha `i`, um passo
+/// ([`item_da_linha`]): a que vem depois do `-`, na mesma linha, e as das
+/// linhas na coluna dela; as de dentro do valor de uma chave — um `with:`,
+/// um `env:`, um bloco `|` — não. Nenhuma, se a linha não está num item.
+fn chaves_do_item<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<Chave<'a>> {
+    let Some((comeco, fim, coluna)) = item_da_linha(linhas, i) else {
+        return Vec::new();
+    };
+    let depois = linhas[comeco].texto[1..].trim_start();
+    let mut chaves = Vec::new();
+    if let Some(coluna) = coluna.filter(|_| !depois.is_empty())
+        && let Some((chave, valor)) = chave_e_valor(depois)
+    {
+        chaves.push(Chave {
+            linha: comeco,
+            coluna,
+            chave,
+            valor,
+        });
+    }
     for (k, l) in linhas.iter().enumerate().take(fim).skip(comeco + 1) {
         if Some(l.recuo) == coluna
             && !l.texto.is_empty()
@@ -1646,11 +1665,124 @@ fn chaves_de_dentro<'a>(linhas: &[Linha<'a>], chave: &Chave<'a>) -> Vec<Chave<'a
         .collect()
 }
 
+/// Uma linha `chave: valor` de YAML na forma simples, a que a leitura do
+/// passo da ação aceita ([`linhas_que_o_passo_nao_le`]): a chave sem aspas
+/// nem escape — letras, dígitos, `-` e `_` —, o `:` seguido de um espaço ou
+/// do fim da linha, e o valor, sem o comentário do fim
+/// ([`sem_comentario`]), vazio, entre aspas que fecham na linha, ou sem um
+/// indicador de YAML no começo — a âncora (`&`), o apelido (`*`), a
+/// etiqueta (`!`), o estilo de fluxo (`{`, `[`), o bloco (`|`, `>`), a
+/// chave complexa (`?`) e os outros.
+fn chave_simples(texto: &str) -> Option<(&str, &str)> {
+    let (chave, resto) = texto.split_once(':')?;
+    let chave = chave.trim_end();
+    let da_chave = !chave.is_empty()
+        && chave
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    let separada = resto.is_empty() || resto.starts_with([' ', '\t']);
+    let valor = sem_comentario(resto.trim());
+    let do_valor = match valor.as_bytes().first() {
+        None => true,
+        Some(b'"' | b'\'') => fim_das_aspas(valor) == Some(valor.len()),
+        Some(c) => !b"-?:,[]{}#&*!|>%@`".contains(c),
+    };
+    (da_chave && separada && do_valor).then_some((chave, valor))
+}
+
+/// As linhas do passo que usa a ação do compilador — o item de `linhas`
+/// que tem a linha `i`, o `uses:` dela ([`item_da_linha`]) — que a leitura
+/// não reconhece. Ela falha fechada: reconhece, na forma simples
+/// ([`chave_simples`]), as chaves de [`CHAVES_DO_PASSO_DA_ACAO`] — na linha
+/// do `-` e na coluna dela, com o `uses:` o da ação — e as entradas do
+/// `with:`, na coluna da primeira; e as de [`CHAVES_FORA_DO_PASSO_DA_ACAO`],
+/// que a regra delas recusa com a mensagem própria. As vazias e os
+/// comentários ficam de fora — os de linha inteira já saíram em
+/// [`linhas_de_codigo`], e os do fim saem do valor. O resto é uma linha que
+/// a conferência não lê, e que o YAML de verdade pode ler como um `if:` ou
+/// um `continue-on-error:` do passo: um escape na chave (`"i\x66": false`),
+/// uma chave entre aspas, uma chave complexa (`? if`), uma âncora, um
+/// apelido, uma fusão (`<<: *x`), uma chave fora da lista, um valor em
+/// várias linhas — e o `uses:` da ação fora da coluna das chaves, como uma
+/// entrada do `with:` de outra ação ou uma linha de um bloco `run:`. Se a
+/// linha `i` não está num item, ela.
+///
+/// # Por quê, desde o lote A12
+///
+/// A leitura ignorava a linha que não reconhecia, e a recusa do `if:` e do
+/// `continue-on-error:` do lote A11 só via as chaves que ela reconhecia: o
+/// `"i\x66": false` passava pelo `cargo xtask invariantes`, e um parser de
+/// YAML conforme o lê como `if: false` (o achado 1 do adversário do lote
+/// A11). E uma linha `uses:` da ação do compilador fora da coluna das
+/// chaves de um passo — uma entrada do `with:` de outra ação, uma linha de
+/// um bloco `run:` — contava como a conferência, que não rodava.
+fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str> {
+    let Some((comeco, fim, coluna)) = item_da_linha(linhas, i) else {
+        return vec![linhas[i].texto];
+    };
+    // Na coluna das chaves: uma das do passo, na forma simples, com o
+    // `uses:` o da ação; ou uma das recusadas, que a regra delas acusa.
+    let do_passo = |texto: &'a str| {
+        chave_simples(texto)
+            .filter(|&(chave, valor)| {
+                CHAVES_DO_PASSO_DA_ACAO.contains(&chave)
+                    && (chave != "uses" || nome_da_acao(valor) == "./.github/actions/compilador")
+            })
+            .or_else(|| {
+                chave_e_valor(texto)
+                    .filter(|(chave, _)| CHAVES_FORA_DO_PASSO_DA_ACAO.contains(chave))
+            })
+    };
+    // As linhas do passo, com a coluna de cada uma — a do `-`, pelo que vem
+    // depois dele.
+    let depois = linhas[comeco].texto[1..].trim_start();
+    let mut passo: Vec<(usize, &'a str, usize)> = Vec::new();
+    if let Some(coluna) = coluna.filter(|_| !depois.is_empty()) {
+        passo.push((comeco, depois, coluna));
+    }
+    passo.extend(
+        (comeco + 1..fim)
+            .filter(|&k| !linhas[k].texto.is_empty())
+            .map(|k| (k, linhas[k].texto, linhas[k].recuo)),
+    );
+    // O `with:` aberto: a coluna da chave dele e a das entradas.
+    let mut com: Option<(usize, Option<usize>)> = None;
+    let mut fora = Vec::new();
+    for (k, texto, recuo) in passo {
+        let lida = if Some(recuo) == coluna {
+            com = None;
+            match do_passo(texto) {
+                Some(("with", "")) => {
+                    com = Some((recuo, None));
+                    true
+                }
+                outra => outra.is_some(),
+            }
+        } else {
+            // Uma entrada do `with:`, na coluna da primeira — e não o `uses:`
+            // da ação, que é uma chave do passo.
+            let entrada = match com.as_mut() {
+                Some((da_chave, entradas)) if recuo > *da_chave => {
+                    *entradas.get_or_insert(recuo) == recuo && chave_simples(texto).is_some()
+                }
+                _ => false,
+            };
+            entrada && k != i
+        };
+        if !lida {
+            fora.push(linhas[k].texto);
+        }
+    }
+    fora
+}
+
 /// Os workflows: os oficiais só usam as ações de [`ACOES_OFICIAIS`], não
 /// sobrepõem o compilador e o conferem — `./.github/actions/compilador`,
 /// com `id: compilador` — depois de cada checkout, antes do cache e de
 /// qualquer `cargo`, num passo sem as chaves de
-/// [`CHAVES_FORA_DO_PASSO_DA_ACAO`]; e toda chave de cache, a principal e as
+/// [`CHAVES_FORA_DO_PASSO_DA_ACAO`] e que a leitura lê inteiro, só com as de
+/// [`CHAVES_DO_PASSO_DA_ACAO`], na forma simples
+/// ([`linhas_que_o_passo_nao_le`]); e toda chave de cache, a principal e as
 /// de restauração, leva o canal. Nada em estilo de fluxo (`{ ... }`), que
 /// esconderia as chaves desta leitura, e nenhum `uses:` em várias linhas. O
 /// canário sobrepõe, mas não roda nos pushes, não usa o cache nem publica a
@@ -1727,7 +1859,8 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
             }
         }
         // O passo da conferência roda sempre, e o job para com ela
-        // reprovada.
+        // reprovada; e a leitura dele falha fechada: a linha que ela não lê
+        // pode ser, para o YAML, uma das chaves recusadas.
         for (i, _) in linhas
             .iter()
             .enumerate()
@@ -1742,6 +1875,16 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
                         c.chave, c.valor
                     ));
                 }
+            }
+            for linha in linhas_que_o_passo_nao_le(&linhas, i) {
+                fora.push(format!(
+                    "{nome}: `{linha}` no passo da conferência do compilador, que a conferência \
+                     não lê — ela lê nele só o `name:`, o `id:`, o `uses:` da ação e o `with:` com \
+                     as entradas, na forma simples: a chave sem aspas nem escape, o valor numa \
+                     linha, sem âncora, apelido, etiqueta nem estilo de fluxo. O que ela não lê, o \
+                     YAML pode ler como um `if:` ou um `continue-on-error:` — um escape, uma chave \
+                     complexa, uma fusão"
+                ));
             }
         }
         if nome.starts_with(".github/actions/") {
@@ -4334,6 +4477,158 @@ jobs:
             fora.len() == 1 && fora[0].contains("não leva o canal"),
             "{fora:?}"
         );
+    }
+
+    /// A leitura do passo da ação falha fechada (no lote A12, o achado 1 do
+    /// adversário do lote A11): a linha do passo que ela não reconhece
+    /// reprova, com a linha na mensagem. O escape na chave (`"i\x66":
+    /// false`, que um parser de YAML lê como `if: false`), o do
+    /// `continue-on-error`, a chave complexa, a chave entre aspas, a âncora,
+    /// a fusão, o apelido no `with:`, uma chave fora da lista — também o
+    /// `env:` por uma expressão e em bloco —, o valor em várias linhas e o
+    /// `uses:` da ação no `with:` de outra ação, ou num bloco `run:`, que
+    /// contavam como a conferência sem ela rodar, reprovam, cada linha uma
+    /// vez. O passo de hoje passa, e as formas simples: o `with:` com as
+    /// entradas e os comentários, o `uses:` na linha do `-`, o `-` sozinho,
+    /// uma linha vazia no meio; e uma ação local com o escape reprova
+    /// também.
+    #[test]
+    fn adversario_a11_a_leitura_do_passo_da_acao_falha_fechada() {
+        let passo = "      - name: O compilador\n        id: compilador\n        uses: ./.github/actions/compilador\n";
+        assert_eq!(OFICIAL.matches(passo).count(), 1);
+        let reprovam: Vec<(&str, String, Vec<&str>)> = vec![
+            (
+                "o escape do if",
+                format!("{passo}        \"i\\x66\": false\n"),
+                vec!["\"i\\x66\": false"],
+            ),
+            (
+                "o escape do continue-on-error",
+                format!("{passo}        \"continue-on-erro\\x72\": true\n"),
+                vec!["\"continue-on-erro\\x72\": true"],
+            ),
+            (
+                "a chave complexa",
+                format!("{passo}        ? continue-on-error\n        : true\n"),
+                vec!["? continue-on-error", ": true"],
+            ),
+            (
+                "a chave entre aspas",
+                passo.replacen("      - name:", "      - \"name\":", 1),
+                vec!["- \"name\": O compilador"],
+            ),
+            (
+                "a ancora",
+                passo.replacen("      - name:", "      - &passo\n        name:", 1),
+                vec!["- &passo"],
+            ),
+            (
+                "a fusao",
+                format!("{passo}        <<: *condicao\n"),
+                vec!["<<: *condicao"],
+            ),
+            (
+                "o apelido no with",
+                format!("{passo}        with: *entradas\n"),
+                vec!["with: *entradas"],
+            ),
+            (
+                "uma chave fora da lista",
+                format!("{passo}        timeout-minutes: 1\n"),
+                vec!["timeout-minutes: 1"],
+            ),
+            (
+                "o env por uma expressao",
+                format!("{passo}        env: ${{{{ fromJSON(vars.AMBIENTE) }}}}\n"),
+                vec!["env: ${{ fromJSON(vars.AMBIENTE) }}"],
+            ),
+            (
+                "o env em bloco",
+                format!("{passo}        env:\n          LD_PRELOAD: ./ferramentas/x.so\n"),
+                vec!["env:", "LD_PRELOAD: ./ferramentas/x.so"],
+            ),
+            (
+                "o valor em varias linhas",
+                passo.replacen(
+                    "      - name: O compilador\n",
+                    "      - name: O compilador\n          de fonte\n",
+                    1,
+                ),
+                vec!["de fonte"],
+            ),
+            (
+                "o uses da acao no with de outra",
+                "      - name: O compilador\n        id: compilador\n        with:\n          \
+                 uses: ./.github/actions/compilador\n          path: x\n          key: \
+                 x-${{ steps.compilador.outputs.canal }}\n        uses: actions/cache@v4\n"
+                    .to_string(),
+                vec![
+                    "uses: ./.github/actions/compilador",
+                    "uses: actions/cache@v4",
+                ],
+            ),
+            (
+                "o uses da acao num bloco run",
+                "      - name: O compilador\n        id: compilador\n        run: |\n          \
+                 cat > /dev/null <<'FIM'\n          uses: ./.github/actions/compilador\n          \
+                 FIM\n"
+                    .to_string(),
+                vec![
+                    "run: |",
+                    "cat > /dev/null <<'FIM'",
+                    "uses: ./.github/actions/compilador",
+                    "FIM",
+                ],
+            ),
+        ];
+        for (rotulo, novo, linhas) in &reprovam {
+            let texto = OFICIAL.replacen(passo, novo, 1);
+            assert_ne!(texto, OFICIAL, "{rotulo}");
+            let fora = um(".github/workflows/ci.yml", &texto);
+            assert!(
+                fora.len() == linhas.len()
+                    && fora.iter().zip(linhas).all(|(f, l)| {
+                        f.contains(&format!("`{l}` no passo da conferência do compilador"))
+                            && f.contains("que a conferência não lê")
+                    }),
+                "{rotulo}: {fora:#?}"
+            );
+        }
+        let passam = [
+            format!("{passo}        with:\n          invariantes: true\n"),
+            format!(
+                "{passo}        with:  # as entradas\n          # so no job de lints\n          \
+                 invariantes: 'true'  # a entrada\n          outra: \"x # y\"\n"
+            ),
+            "      - uses: ./.github/actions/compilador\n        id: compilador\n        name: O \
+             compilador\n"
+                .to_string(),
+            format!(
+                "      -\n{}",
+                passo.replacen("      - name:", "        name:", 1)
+            ),
+            passo.replacen("        id:", "\n        id:", 1),
+        ];
+        for novo in &passam {
+            let texto = OFICIAL.replacen(passo, novo, 1);
+            assert_ne!(texto, OFICIAL, "{novo}");
+            assert_eq!(
+                um(".github/workflows/ci.yml", &texto),
+                Vec::<String>::new(),
+                "{novo}"
+            );
+        }
+        for (nome, texto) in [
+            (CI, include_str!("../../.github/workflows/ci.yml")),
+            (
+                ".github/workflows/rede-principal.yml",
+                include_str!("../../.github/workflows/rede-principal.yml"),
+            ),
+        ] {
+            assert_eq!(um(nome, texto), Vec::<String>::new(), "{nome}");
+        }
+        let local = "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/compilador\n      \"i\\x66\": false\n";
+        assert_eq!(um(".github/actions/outra/action.yml", local).len(), 1);
     }
 
     #[test]
