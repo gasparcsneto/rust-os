@@ -45288,6 +45288,17 @@ static CASOS: &[Caso] = &[
         nome: "consoles: o log diz executado so depois da decisao do gate, o adiado uma vez, e a recusa e o parametro invalido em linha propria",
         f: consoles_o_executado_sai_depois_da_decisao,
     },
+    // O lote ICACHE-4, no fim pelo mesmo motivo: os controles da conferência
+    // da política em vigor e do registro de pessoas (o achado 2 do
+    // adversário do lote ICACHE-3).
+    Caso {
+        nome: "suite: o executor ve e devolve a politica em vigor que o caso mudou",
+        f: suite_o_executor_ve_e_devolve_a_politica_em_vigor,
+    },
+    Caso {
+        nome: "suite: o executor ve e devolve o registro de pessoas que o caso mudou",
+        f: suite_o_executor_ve_e_devolve_o_registro_de_pessoas,
+    },
 ];
 
 /// A cauda da suíte: os casos que rodam em **toda** parte, depois da fatia
@@ -63774,6 +63785,11 @@ pub fn executar_todos() -> ! {
     // devolve — ver `estado_da_suite_devolvido`.
     IMPRESSAO_DO_REGISTRO.store(crate::identidade::impressao_do_registro_de_teste(), SeqCst);
     anotar_o_registro_de_identidade("no comeco da suite");
+    // E a política em vigor e o registro de pessoas com que ela começa, que
+    // cada caso também devolve.
+    guardar_a_politica_e_as_pessoas_do_comeco();
+    anotar_a_politica("no comeco da suite");
+    anotar_as_pessoas("no comeco da suite");
 
     let mut falhas = 0usize;
     // Os casos que falharam, repetidos no fim: o log da suíte passa de oito
@@ -63926,18 +63942,41 @@ fn suite_o_executor_ve_e_devolve_o_coletor_e_o_journal() -> Resultado {
 /// a tirava, e os casos seguintes da mesma parte rodavam com ela; nenhum
 /// deles a contava, e por isso nada reprovava; um caso novo no meio da
 /// tabela poderia pôr depois dele um que contasse.
+///
+/// E a política em vigor e o registro de pessoas, contra os que o executor
+/// guarda no começo ([`POLITICA_DO_COMECO`] e [`PESSOAS_DO_COMECO`]): o caso
+/// que deixa um deles mudado reprova aqui, e o executor devolve o da imagem
+/// — a política lida de novo do disco, depois do registro de identidade
+/// (ver [`politica_e_pessoas_da_imagem`]), e as pessoas também, com a pessoa
+/// padrão da suíte de volta. O adversário do lote ICACHE-3 achou os dois
+/// vazando: o caso que termina num boot de teste deixava em vigor a última
+/// política que um caso de antes da mesma parte escreveu no journal, e
+/// `hora: o ponto de commit da rodada` deixava registrada a pessoa da
+/// rodada.
 fn estado_da_suite_devolvido() -> Resultado {
     let solto = !crate::persistencia::auditoria_pausada_de_teste();
     let segurado = crate::persistencia::auditoria_segurada_de_teste();
     let shift = crate::teclado::shift_apertado_de_teste();
     let registro =
         crate::identidade::impressao_do_registro_de_teste() != IMPRESSAO_DO_REGISTRO.load(SeqCst);
+    let politica = !politica_como_no_comeco();
+    let pessoas = !pessoas_como_no_comeco();
     crate::persistencia::pausar_a_auditoria_de_teste(true);
     crate::persistencia::segurar_a_auditoria_de_teste(false);
     crate::teclado::soltar_o_shift_de_teste();
     if registro {
         anotar_o_registro_de_identidade("depois do caso");
         registro_da_imagem();
+    }
+    // A política depois do registro: a leitura dela confere o alcance aos
+    // papéis dos administradores dele.
+    if politica {
+        anotar_a_politica("depois do caso");
+        crate::autorizacao::carregar();
+    }
+    if pessoas {
+        anotar_as_pessoas("depois do caso");
+        crate::pessoas::esquecer_registradas();
     }
     if solto {
         return Err("o caso deixou o coletor da auditoria solto");
@@ -63950,6 +63989,12 @@ fn estado_da_suite_devolvido() -> Resultado {
     }
     if registro {
         return Err("o caso deixou o registro de identidade mudado");
+    }
+    if politica {
+        return Err("o caso deixou a politica em vigor mudada");
+    }
+    if pessoas {
+        return Err("o caso deixou o registro de pessoas mudado");
     }
     Ok(())
 }
@@ -64014,6 +64059,302 @@ fn suite_o_executor_ve_e_devolve_o_registro_de_identidade() -> Resultado {
     }
     if !devolvido {
         return Err("o executor nao devolveu o registro de identidade: ele ficou mudado");
+    }
+    o_da_suite.map_err(|_| "o executor reprovou o estado da suite")
+}
+
+/// A política em vigor com que a suíte começa, guardada pelo executor antes
+/// do primeiro caso: a que cada caso devolve — ver
+/// [`estado_da_suite_devolvido`].
+static POLITICA_DO_COMECO: crate::trava::Mutex<Option<politica::Politica>> =
+    crate::trava::Mutex::new(None);
+
+/// O registro de pessoas com que a suíte começa, guardado pelo executor
+/// antes do primeiro caso: o que cada caso devolve — ver
+/// [`estado_da_suite_devolvido`] e [`pessoas_como_no_comeco`].
+static PESSOAS_DO_COMECO: crate::trava::Mutex<alloc::vec::Vec<sigilo::pessoas::Pessoa>> =
+    crate::trava::Mutex::new(alloc::vec::Vec::new());
+
+/// Guarda a política em vigor e o registro de pessoas de agora como os do
+/// começo da suíte: o executor, antes do primeiro caso.
+fn guardar_a_politica_e_as_pessoas_do_comeco() {
+    let politica = crate::autorizacao::com_politica(|p| p.clone());
+    let pessoas = crate::pessoas::todas();
+    // O que havia sai fora da trava.
+    let antes = crate::arch::sem_interrupcoes(|| {
+        (
+            POLITICA_DO_COMECO.lock().replace(politica),
+            core::mem::replace(&mut *PESSOAS_DO_COMECO.lock(), pessoas),
+        )
+    });
+    drop(antes);
+}
+
+/// A política em vigor é a do começo da suíte, campo a campo: os papéis —
+/// cada um com as permissões, os recursos, a taxa e as cotas —, a serial, o
+/// local, os serviços, o remoto, os apertos e os quóruns. A comparação é a
+/// da própria `politica::Politica`, e não uma impressão: a política não tem
+/// nada que mude a cada devolução, e nada nela é segredo.
+fn politica_como_no_comeco() -> bool {
+    let comeco = crate::arch::sem_interrupcoes(|| POLITICA_DO_COMECO.lock().clone());
+    crate::autorizacao::com_politica(|p| comeco.as_ref() == Some(p))
+}
+
+/// O registro de pessoas é o do começo da suíte: as mesmas pessoas, na
+/// mesma ordem, cada uma com o mesmo nome, papel, estado e credencial, e,
+/// menos a pessoa padrão da suíte, com o mesmo identificador. A pessoa
+/// padrão nasce de novo a cada devolução — `pessoas::esquecer_registradas`
+/// a registra com outro identificador (o informativo 9 do adversário do lote
+/// ICACHE-3) —, e a credencial dela é a da senha de teste, calculada sempre
+/// com o mesmo sal: só o identificador dela muda, e só ele fica de fora. A
+/// credencial e o identificador das outras entram: uma senha trocada, ou
+/// uma pessoa registrada de novo com o mesmo nome, seriam uma mudança que o
+/// nome, o papel e o estado não mostram.
+fn pessoas_como_no_comeco() -> bool {
+    let comeco = crate::arch::sem_interrupcoes(|| PESSOAS_DO_COMECO.lock().clone());
+    let agora = crate::pessoas::todas();
+    agora.len() == comeco.len()
+        && agora.iter().zip(&comeco).all(|(p, q)| {
+            p.nome == q.nome
+                && p.papel == q.papel
+                && p.estado == q.estado
+                && p.credencial == q.credencial
+                && (p.id == q.id || p.nome == crate::interpretador::PESSOA_DE_TESTE)
+        })
+}
+
+/// Diz no log a política em vigor — `quando`: no começo da suíte, ou depois
+/// do caso que a deixou mudada —: os papéis, a serial, o local, os serviços
+/// e o remoto, para quem lê a falha.
+fn anotar_a_politica(quando: &str) {
+    let p = crate::autorizacao::com_politica(|p| p.clone());
+    let papeis: alloc::vec::Vec<&str> = p.papeis().iter().map(|x| x.nome.as_str()).collect();
+    crate::log_info!(
+        "teste",
+        "a politica em vigor {}: {} papel(is) {:?}, a serial como `{}`, o local como `{}`, {} servico(s), remoto {:?}",
+        quando,
+        papeis.len(),
+        papeis,
+        p.serial(),
+        p.local(),
+        p.servicos().count(),
+        p.remoto()
+    );
+}
+
+/// Diz no log o registro de pessoas — `quando` —: o nome, o papel e o
+/// estado de cada uma, na ordem dele; o identificador e a credencial, não.
+fn anotar_as_pessoas(quando: &str) {
+    let pessoas: alloc::vec::Vec<_> = crate::pessoas::todas()
+        .iter()
+        .map(|p| (p.nome.clone(), p.papel.clone(), p.estado.nome()))
+        .collect();
+    crate::log_info!("teste", "o registro de pessoas {}: {:?}", quando, pessoas);
+}
+
+/// O executor confere a política em vigor que cada caso devolve
+/// ([`estado_da_suite_devolvido`]): cada mudança, uma de cada vez — um papel
+/// a mais, as permissões de um papel, a taxa de um papel, o papel da serial
+/// e os apertos —, reprova, e o executor põe de volta a do começo. O
+/// controle positivo da conferência que o adversário do lote ICACHE-3 pediu
+/// (o achado 2). As quatro mudanças que não mudam o número de papéis são a
+/// guarda de uma comparação reduzida às contas, que passaria pela primeira.
+fn suite_o_executor_ve_e_devolve_a_politica_em_vigor() -> Resultado {
+    if !politica_como_no_comeco() {
+        return Err("a politica em vigor nao era a do comeco da suite");
+    }
+    let comeco = crate::autorizacao::com_politica(|p| p.clone());
+    let texto = comeco.texto();
+    // O texto da política do começo com a primeira linha que `escolhe` aceita
+    // trocada pelo que `troca` diz dela, lido como um arquivo.
+    let com_a_linha = |escolhe: &dyn Fn(&str) -> bool,
+                       troca: &dyn Fn(&str) -> alloc::string::String|
+     -> Result<politica::Politica, &'static str> {
+        let mut achou = false;
+        let mut novo = alloc::string::String::new();
+        for linha in texto.lines() {
+            if !achou && escolhe(linha) {
+                achou = true;
+                novo.push_str(&troca(linha));
+            } else {
+                novo.push_str(linha);
+            }
+            novo.push('\n');
+        }
+        if !achou {
+            return Err("a politica do comeco nao tem a linha que o controle muda");
+        }
+        politica::Politica::ler(&novo).map_err(|_| "a politica mudada pelo controle nao se le")
+    };
+    // O último número da linha, mais um.
+    let mais_um = |linha: &str| -> alloc::string::String {
+        match linha.rsplit_once(' ') {
+            Some((resto, n)) => alloc::format!("{resto} {}", n.parse::<u64>().unwrap_or(0) + 1),
+            None => alloc::string::String::from(linha),
+        }
+    };
+    let sem_random = |linha: &str| {
+        linha.starts_with("papel ") && !linha.split_ascii_whitespace().any(|w| w == "random.read")
+    };
+    let outra_serial = comeco
+        .papeis()
+        .iter()
+        .filter(|p| p.nome != comeco.serial())
+        .find_map(|p| comeco.com_serial(&p.nome).ok())
+        .ok_or("nenhum outro papel pode ser o da serial")?;
+    let mudancas = [
+        (
+            "um papel a mais",
+            politica::Politica::ler(&alloc::format!("papel controle-da-suite ui.read\n{texto}"))
+                .map_err(|_| "a politica mudada pelo controle nao se le")?,
+        ),
+        (
+            "as permissoes de um papel",
+            com_a_linha(&sem_random, &|l| alloc::format!("{l} random.read"))?,
+        ),
+        (
+            "a taxa de um papel",
+            com_a_linha(&|l| l.starts_with("taxa "), &mais_um)?,
+        ),
+        ("o papel da serial", outra_serial),
+        (
+            "os apertos",
+            com_a_linha(&|l| l.starts_with("apertos "), &mais_um)?,
+        ),
+    ];
+    let esperado: Resultado = Err("o caso deixou a politica em vigor mudada");
+    let mut falhas: alloc::vec::Vec<&'static str> = alloc::vec::Vec::new();
+    for (qual, nova) in mudancas {
+        crate::autorizacao::trocar_politica(nova);
+        let mudou = !politica_como_no_comeco();
+        let visto = estado_da_suite_devolvido();
+        let devolvido = politica_como_no_comeco();
+        if !mudou || visto != esperado || !devolvido {
+            crate::log_error!(
+                "teste",
+                "{}: mudou {}, visto {:?}, devolvido {}",
+                qual,
+                mudou,
+                visto,
+                devolvido
+            );
+            falhas.push(qual);
+        }
+    }
+    let o_da_suite = estado_da_suite_devolvido();
+    if !falhas.is_empty() {
+        crate::log_error!("teste", "o executor nao viu, ou nao devolveu: {:?}", falhas);
+        return Err("o executor nao viu a politica em vigor mudada, ou nao a devolveu");
+    }
+    o_da_suite.map_err(|_| "o executor reprovou o estado da suite")
+}
+
+/// O executor confere o registro de pessoas que cada caso devolve
+/// ([`estado_da_suite_devolvido`]): cada mudança, uma de cada vez — uma
+/// pessoa a mais; o papel, o estado, a credencial e o identificador de uma
+/// pessoa da imagem; a credencial da pessoa padrão da suíte; e a ordem —,
+/// reprova, e o executor põe de volta o da imagem. E o identificador novo da
+/// pessoa padrão, que ela ganha a cada devolução, não conta. O controle
+/// positivo da conferência que o adversário do lote ICACHE-3 pediu (o achado
+/// 2). As mudanças que não mudam quantas pessoas há são a guarda de uma
+/// comparação reduzida às contas, que passaria pela primeira.
+fn suite_o_executor_ve_e_devolve_o_registro_de_pessoas() -> Resultado {
+    use crate::interpretador::PESSOA_DE_TESTE;
+    use alloc::vec::Vec;
+    use sigilo::pessoas::{Estado, IdPessoa, Pessoa};
+    if !pessoas_como_no_comeco() {
+        return Err("o registro de pessoas nao era o do comeco da suite");
+    }
+    let comeco = crate::pessoas::todas();
+    let da_imagem = comeco
+        .iter()
+        .position(|p| p.nome != PESSOA_DE_TESTE)
+        .ok_or("a imagem nao tem pessoa")?;
+    let padrao = comeco
+        .iter()
+        .position(|p| p.nome == PESSOA_DE_TESTE)
+        .ok_or("a suite nao tem a pessoa padrao")?;
+    let mudada = |mudar: &dyn Fn(&mut Vec<Pessoa>)| -> Vec<Pessoa> {
+        let mut lista = comeco.clone();
+        mudar(&mut lista);
+        lista
+    };
+    // O identificador novo da pessoa padrão não é mudança.
+    crate::pessoas::restaurar(&mudada(&|l| l[padrao].id = IdPessoa([0x5a; 8])));
+    let o_identificador_da_padrao_contou = !pessoas_como_no_comeco();
+    crate::pessoas::restaurar(&comeco);
+    if o_identificador_da_padrao_contou {
+        return Err("o identificador novo da pessoa padrao contou como mudanca");
+    }
+    let outra = crate::pessoas::credencial_de_teste(b"senha do controle da suite");
+    let mudancas = [
+        (
+            "o papel de uma pessoa da imagem",
+            mudada(&|l| {
+                let papel = if l[da_imagem].papel == "observador" {
+                    "operador"
+                } else {
+                    "observador"
+                };
+                l[da_imagem].papel = alloc::string::String::from(papel);
+            }),
+        ),
+        (
+            "o estado de uma pessoa da imagem",
+            mudada(&|l| {
+                l[da_imagem].estado = match l[da_imagem].estado {
+                    Estado::Ativa => Estado::Revogada,
+                    Estado::Revogada => Estado::Ativa,
+                }
+            }),
+        ),
+        (
+            "a credencial de uma pessoa da imagem",
+            mudada(&|l| l[da_imagem].credencial = outra.clone()),
+        ),
+        (
+            "o identificador de uma pessoa da imagem",
+            mudada(&|l| l[da_imagem].id = IdPessoa([0xa5; 8])),
+        ),
+        (
+            "a credencial da pessoa padrao",
+            mudada(&|l| l[padrao].credencial = outra.clone()),
+        ),
+        ("a ordem das pessoas", mudada(&|l| l.reverse())),
+    ];
+    let esperado: Resultado = Err("o caso deixou o registro de pessoas mudado");
+    let mut falhas: Vec<&'static str> = Vec::new();
+    let mut conferir = |qual: &'static str, mudar: &dyn Fn()| {
+        mudar();
+        let mudou = !pessoas_como_no_comeco();
+        let visto = estado_da_suite_devolvido();
+        let devolvido = pessoas_como_no_comeco();
+        if !mudou || visto != esperado || !devolvido {
+            crate::log_error!(
+                "teste",
+                "{}: mudou {}, visto {:?}, devolvido {}",
+                qual,
+                mudou,
+                visto,
+                devolvido
+            );
+            falhas.push(qual);
+        }
+    };
+    conferir("uma pessoa a mais", &|| {
+        let _ = crate::pessoas::registrar_de_teste(
+            "controle-da-suite",
+            "operador",
+            b"senha do controle da suite",
+        );
+    });
+    for (qual, lista) in &mudancas {
+        conferir(qual, &|| crate::pessoas::restaurar(lista));
+    }
+    let o_da_suite = estado_da_suite_devolvido();
+    if !falhas.is_empty() {
+        crate::log_error!("teste", "o executor nao viu, ou nao devolveu: {:?}", falhas);
+        return Err("o executor nao viu o registro de pessoas mudado, ou nao o devolveu");
     }
     o_da_suite.map_err(|_| "o executor reprovou o estado da suite")
 }
