@@ -1784,6 +1784,24 @@ fn forma_que_a_leitura_nao_le(texto: &str) -> Option<&'static str> {
     }
 }
 
+/// O valor de YAML sem as aspas que o fecham — `'compilador'` e
+/// `"compilador"` são o `compilador` do GitHub —, se ele está inteiro entre
+/// elas, sem escape nem outra aspa dentro; senão, o próprio valor. Desde o
+/// lote A13 (o M5 do adversário do lote A12): o `id: 'compilador'` não
+/// contava como o `id` nos workflows, nem o `id: 'ambiente'` achava o passo
+/// na ação.
+fn sem_aspas(valor: &str) -> &str {
+    match valor.as_bytes().first() {
+        Some(&aspa @ (b'"' | b'\''))
+            if fim_das_aspas(valor) == Some(valor.len())
+                && !valor[1..valor.len() - 1].contains(['\\', char::from(aspa)]) =>
+        {
+            &valor[1..valor.len() - 1]
+        }
+        _ => valor,
+    }
+}
+
 /// O nome da ação de um `uses:` — sem as aspas e sem a versão.
 fn nome_da_acao(valor: &str) -> &str {
     let valor = valor.trim_matches(|c| c == '"' || c == '\'');
@@ -1825,7 +1843,8 @@ fn item_da_linha(linhas: &[Linha<'_>], i: usize) -> Option<(usize, usize, Option
         .find(|&k| !linhas[k].texto.is_empty() && linhas[k].recuo <= traco.recuo)
         .unwrap_or(linhas.len());
     let depois = traco.texto[1..].trim_start();
-    let coluna = if depois.is_empty() {
+    // Um `-` só com um comentário é um `-` sozinho.
+    let coluna = if sem_comentario(depois).is_empty() {
         linhas[comeco + 1..fim]
             .iter()
             .find(|l| !l.texto.is_empty())
@@ -1846,7 +1865,7 @@ fn chaves_do_item<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<Chave<'a>> {
     };
     let depois = linhas[comeco].texto[1..].trim_start();
     let mut chaves = Vec::new();
-    if let Some(coluna) = coluna.filter(|_| !depois.is_empty())
+    if let Some(coluna) = coluna.filter(|_| !sem_comentario(depois).is_empty())
         && let Some((chave, valor)) = chave_e_valor(depois)
     {
         chaves.push(Chave {
@@ -1910,7 +1929,9 @@ fn chaves_de_dentro<'a>(linhas: &[Linha<'a>], chave: &Chave<'a>) -> Vec<Chave<'a
 /// ([`sem_comentario`]), vazio, entre aspas que fecham na linha, ou sem um
 /// indicador de YAML no começo — a âncora (`&`), o apelido (`*`), a
 /// etiqueta (`!`), o estilo de fluxo (`{`, `[`), o bloco (`|`, `>`), a
-/// chave complexa (`?`) e os outros.
+/// chave complexa (`?`) e os outros; o `-`, o `?` e o `:` só são
+/// indicadores seguidos de um espaço, ou no fim, como no YAML — desde o
+/// lote A13, o `name: -- o compilador --` é a forma simples.
 fn chave_simples(texto: &str) -> Option<(&str, &str)> {
     let (chave, resto) = texto.split_once(':')?;
     let chave = chave.trim_end();
@@ -1923,7 +1944,9 @@ fn chave_simples(texto: &str) -> Option<(&str, &str)> {
     let do_valor = match valor.as_bytes().first() {
         None => true,
         Some(b'"' | b'\'') => fim_das_aspas(valor) == Some(valor.len()),
-        Some(c) => !b"-?:,[]{}#&*!|>%@`".contains(c),
+        // O `-`, o `?` e o `:` só são indicadores seguidos de um espaço.
+        Some(b'-' | b'?' | b':') => !matches!(valor.as_bytes().get(1), None | Some(b' ' | b'\t')),
+        Some(c) => !b",[]{}#&*!|>%@`".contains(c),
     };
     (da_chave && separada && do_valor).then_some((chave, valor))
 }
@@ -1975,7 +1998,7 @@ fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str>
     // depois dele.
     let depois = linhas[comeco].texto[1..].trim_start();
     let mut passo: Vec<(usize, &'a str, usize)> = Vec::new();
-    if let Some(coluna) = coluna.filter(|_| !depois.is_empty()) {
+    if let Some(coluna) = coluna.filter(|_| !sem_comentario(depois).is_empty()) {
         passo.push((comeco, depois, coluna));
     }
     passo.extend(
@@ -2204,7 +2227,10 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
             .count();
         let ids = linhas
             .iter()
-            .filter(|l| chave_e_valor(l.texto) == Some(("id", "compilador")))
+            .filter(|l| {
+                chave_e_valor(l.texto)
+                    .is_some_and(|(chave, valor)| chave == "id" && sem_aspas(valor) == "compilador")
+            })
             .count();
         if usos != ids {
             fora.push(format!(
@@ -2290,9 +2316,10 @@ fn conferir_a_acao(texto: &str) -> Vec<String> {
     let mut fora = Vec::new();
     let linhas = linhas_de_codigo(texto);
     let posicao = |id: &str| {
-        linhas
-            .iter()
-            .position(|l| chave_e_valor(l.texto) == Some(("id", id)))
+        linhas.iter().position(|l| {
+            chave_e_valor(l.texto)
+                .is_some_and(|(chave, valor)| chave == "id" && sem_aspas(valor) == id)
+        })
     };
     let mut anterior: Option<(&str, usize)> = None;
     for (id, shell_esperado, marcas) in PASSOS_DA_ACAO {
@@ -2437,7 +2464,8 @@ fn linhas_que_o_passo_da_acao_nao_le<'a>(linhas: &[Linha<'a>], i: usize, id: &st
     let das_invariantes = id == "invariantes";
     let depois = linhas[comeco].texto[1..].trim_start();
     let mut passo: Vec<(usize, &'a str, usize)> = Vec::new();
-    if let Some(coluna) = coluna.filter(|_| !depois.is_empty()) {
+    // Um `-` só com um comentário é um `-` sozinho.
+    if let Some(coluna) = coluna.filter(|_| !sem_comentario(depois).is_empty()) {
         passo.push((comeco, depois, coluna));
     }
     passo.extend(
@@ -2583,7 +2611,7 @@ fn passo_cru<'a>(acao: &'a str, id: &str) -> Vec<&'a str> {
     let recuo = |l: &str| l.len() - l.trim_start().len();
     let Some(do_id) = linhas.iter().position(|l| {
         let t = l.trim();
-        chave_e_valor(t) == Some(("id", id))
+        chave_e_valor(t).is_some_and(|(chave, valor)| chave == "id" && sem_aspas(valor) == id)
     }) else {
         return Vec::new();
     };
@@ -5435,6 +5463,55 @@ jobs:
                 "{rotulo}: {fora:#?}"
             );
         }
+    }
+
+    /// Os falsos positivos do passo da ação (no lote A13, o M5 do adversário
+    /// do lote A12): o `id` entre aspas, o `-` só com um comentário e o nome
+    /// que começa por `-` são o passo de sempre para o YAML, e passam — na
+    /// ação do compilador, também o `id` entre aspas e o `-` com um
+    /// comentário; o `- ` seguido de um espaço e o `id` com um escape
+    /// continuam reprovando.
+    #[test]
+    fn adversario_a12_os_falsos_positivos_do_passo_da_acao() {
+        let nome = ".github/workflows/ci.yml";
+        let passo = "      - name: O compilador\n        id: compilador\n        uses: ./.github/actions/compilador\n";
+        assert_eq!(OFICIAL.matches(passo).count(), 1);
+        // O YAML que o GitHub lê como o passo de sempre passa.
+        for novo in [
+            passo.replacen("id: compilador", "id: 'compilador'", 1),
+            passo.replacen("id: compilador", "id: \"compilador\"", 1),
+            passo.replacen(
+                "      - name:",
+                "      - # O compilador oficial\n        name:",
+                1,
+            ),
+            passo.replacen("name: O compilador", "name: -- o compilador --", 1),
+        ] {
+            let texto = OFICIAL.replacen(passo, &novo, 1);
+            assert_ne!(texto, OFICIAL, "{novo}");
+            assert_eq!(um(nome, &texto), Vec::<String>::new(), "{novo}");
+        }
+        // O `-` seguido de um espaço continua um indicador; o `id` com um
+        // escape, um valor que a leitura não lê como o `compilador`.
+        for novo in [
+            passo.replacen("name: O compilador", "name: - o compilador", 1),
+            passo.replacen("id: compilador", "id: \"compil\\x61dor\"", 1),
+        ] {
+            let texto = OFICIAL.replacen(passo, &novo, 1);
+            assert!(!um(nome, &texto).is_empty(), "{novo}");
+        }
+        // Na ação do compilador, o mesmo: o `id` entre aspas acha o passo, e
+        // o `-` só com um comentário é um `-` sozinho.
+        let acao = ACAO
+            .replacen("    - id: ambiente\n", "    - id: 'ambiente'\n", 1)
+            .replacen(
+                "    - id: executor\n",
+                "    - # o executor\n      id: executor\n",
+                1,
+            );
+        assert_ne!(acao, ACAO);
+        assert_eq!(conferir_a_acao(&acao), Vec::<String>::new());
+        assert_eq!(um(ACAO_DO_COMPILADOR, &acao), Vec::<String>::new());
     }
 
     #[test]
