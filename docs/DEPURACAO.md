@@ -307,19 +307,47 @@ respondido enquanto a serial espera; na CI 527 reprovou com 2292 ms, e a
 causa não estava no que ela mede. Duas regras saíram dali:
 
 - **A janela contém só o que se mede.** O cronômetro começava na resposta
-  do aperto, e o kernel termina o aperto depois dela — a auditoria e uma
-  linha de log —; e um programa da sonda anterior, que ninguém esperava,
-  escrevia no log ao mesmo tempo, porque a espera por ele casava uma linha
-  igual, mais antiga. Uma espera pelo log lê só o que entrou no anel depois
-  do pedido (o `total_emitted` lido antes), e uma medida começa depois de
-  um pedido já respondido.
+  do aperto, e o kernel termina o aperto depois dela — a auditoria, uma
+  linha de log e a sessão estabelecida —; e um programa da sonda anterior,
+  que ninguém esperava, escrevia no log ao mesmo tempo, porque a espera por
+  ele casava uma linha igual, mais antiga. Uma espera pelo log lê só o que
+  entrou no anel depois do pedido (o `total_emitted` lido antes) — toda
+  espera, e não só a que falhou: na mesma fumaça, o clique do mouse e o
+  confirm da árvore casavam, a cada rodada, uma linha que a sonda anterior
+  deixava. Uma medida começa depois de um pedido já respondido, e o
+  cronômetro sai junto com o retrato que a abre. E uma conferência acha o
+  que procura: não ver uma linha na janela é também o que acontece quando a
+  leitura veio recusada, curta, ou quando a linha mudou de redação.
 - **O pulso de cada núcleo é a régua do tempo mascarado.** Um núcleo com as
   interrupções mascaradas não conta tique, e o relógio anda pelos outros
   (`tempo::avancar`): os tiques que o núcleo dos dispositivos contou a menos
   entre dois `system.info` são o tempo em que ele não atendeu nada. Foi a
-  conta que mostrou, sem instrumentar o kernel, que cada linha de log com o
-  console cheio o mascarava por centenas de milissegundos — e que, com o
-  console limpo e as mesmas linhas, não.
+  conta que mostrou, sem instrumentar o kernel, que as linhas de log com o
+  console cheio o mascaravam por centenas de milissegundos na janela — perto
+  de uma tela inteira apresentada a cada uma —, e que, com o console limpo e
+  as mesmas linhas, não. A régua é um piso, relativo ao núcleo que mais
+  contou, e tem pontos cegos: com todos os núcleos mascarados juntos, ou com
+  o hospedeiro parado, o relógio para com eles — um período em que núcleo
+  nenhum tiqueia não volta — e a conta diz zero, e só a hora do hospedeiro
+  entre as duas leituras mostra o atraso; o executor ocupado sem máscara —
+  um tratador longo — não aparece nela, e os avanços dele dizem quantos
+  foram, e não quanto levaram; e com um núcleo só não há com quem comparar.
+  Uma régua diz junto onde não enxerga.
+
+Uma medida de tempo na suíte tem a armadilha do outro lado: no emulador o
+contador de ciclos anda com o relógio do hospedeiro, e o ruído dele só soma
+tempo. Pela soma de poucos blocos, uma preempção decide a razão; pelo bloco
+mais rápido de cada lado, só se houver um bloco limpo de cada lado — e com o
+hospedeiro ocupado um bloco mais longo que a vez do fio do processador
+virtual nunca sai limpo, e o lado de bloco mais curto ganha a sorte. O caso
+da apresentação caiu nas duas, com oito laços ocupando o hospedeiro: pela
+soma de blocos de duas telas reprovou a 418% sem defeito, e pelo bloco mais
+rápido das mesmas duas telas, a 327%. Em faixas de um quarto da tela, que
+cabem numa vez do fio, alternando quem vem antes, a pior medida ficou a 187%
+no x86 e a 129% no ARM, contra 798% e 559% pelas somas das mesmas medidas. O
+que o mínimo não tira é um lado inteiro mais lento a medida toda: os 187%
+foram uma medida com os sete blocos da apresentação pelo menos uma vez e
+meia acima do de costume, e um da cópia no de costume.
 
 ### Quando a lente não acha nada
 

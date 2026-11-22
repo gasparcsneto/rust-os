@@ -3828,10 +3828,18 @@ dele, grava, ouve o conflito de versão, lê pelo descritor, vê o `MUDOU`, é
 recusado fora do alcance de quem o lançou, e manda binário pelo anexo. Na
 fumaça, o `xtask` o lança pela serial e espera a saída **dele**: a linha
 `processo encerrou com codigo 77` que entrou no anel depois do pedido. A
-espera casava a última linha com esse texto, e havia uma de antes — o filho
-do `contido` sai com o mesmo código —: ela passava na hora, a saída do
-`guardar` nunca era conferida, e ele corria por cima da sonda seguinte, a da
-rede (a CI 527).
+espera casava qualquer linha com esse texto entre as 32 últimas do anel, e
+havia uma de antes — o filho do `contido` sai com o mesmo código —: ela
+passava na hora, a saída do `guardar` nunca era conferida, e ele corria por
+cima da sonda seguinte, a da rede (a CI 527). E não era só ela: toda espera
+da fumaça pelo log passou a ler só o que entrou no anel depois do pedido —
+as saídas dos programas, as varreduras dos códigos de falha deles, o que
+eles disseram e as linhas da interface. Duas casavam uma linha velha a cada
+rodada: o clique da sonda do mouse, com o `press` que o F1 da sonda da
+barra deixa logo antes, e o confirm da sonda da árvore, com a mesma linha
+que a sonda do Terminal deixa pouco antes; nas duas, a linha velha bastava
+para passar. A espera casa o texto, e não o processo: a linha da saída não
+diz de que fio foi — ver `saida_desde`, no `xtask`.
 
 ### O que as mutações mostraram
 
@@ -4115,15 +4123,35 @@ respondido antes do prazo; a serial, só no prazo. O tempo conta a partir de
 um pedido do agente já respondido: o aperto termina no kernel depois de a
 resposta dele sair — a auditoria, a linha `entrou` no log e a sessão
 estabelecida vêm depois —, e medido da resposta ele caía dentro da janela.
+O cronômetro começa na última resposta do retrato de antes, tirado pela
+porta, e sai com ele de uma função só: não há como medir de outro ponto.
 A sonda diz sempre o que mediu: o tempo do ping, o da serial e, entre um
-retrato de antes e um de depois, quanto o relógio andou, os tiques de cada
-núcleo, as apresentações da tela e as linhas de log que entraram no anel; e
-confere que o fim do aperto ficou de fora. Um núcleo com as interrupções
-mascaradas não conta tique, e o relógio anda pelos outros: o que o núcleo
-dos dispositivos contou a menos é o tempo em que ele não colheu as portas
-nem rodou o executor do canal. Foi essa conta que achou a causa da
-reprovação da CI 527 — ver *O custo de uma linha*, em [O console
-rola](#o-console-rola).
+retrato de antes e um de depois — quatro relatórios seguidos cada um, e não
+um instante —, quanto o relógio andou e quanto o hospedeiro andou entre as
+duas leituras dele, os tiques do núcleo dos dispositivos contra os dos
+outros, os avanços do executor, as apresentações da tela e as linhas de log
+que entraram no anel. E confere que a linha `entrou` desta conexão ficou
+antes da janela: achada, e não só ausente dela — uma leitura recusada ou
+curta demais, ou uma redação nova da linha no kernel, reprovam, em vez de
+passar caladas. Um núcleo com as interrupções mascaradas não conta tique, e
+o relógio anda pelos outros: o que o núcleo dos dispositivos contou a menos
+é o tempo em que ele não colheu as portas nem rodou o executor do canal.
+Foi essa conta que achou a causa da reprovação da CI 527 — ver *O custo de
+uma linha*, em [O console rola](#o-console-rola).
+
+A régua tem limites, e a linha os diz. É um piso, relativo ao núcleo que
+mais contou. Com todos os núcleos mascarados juntos — os outros girando numa
+trava com as interrupções desligadas enquanto o primeiro apresenta —, ou com
+o hospedeiro parado, o relógio do kernel para junto, porque um período em
+que núcleo nenhum tiqueia não volta, e a conta diz ~0 ms sem tique com o
+ping lento: quem mostra é o hospedeiro, e a linha marca o relógio que ficou
+atrás dele. O executor ocupado sem máscara — um tratador longo, um pedido
+adiado pelo caminho da auditoria — não aparece nos tiques, na tela nem no
+log; os avanços dele dizem quantos foram, e não quanto cada um levou. Com
+um núcleo só, não há com quem comparar. E como o retrato não é um instante,
+uma linha que rola o console entre o `system.info` e o `log.tail` do
+retrato de depois entra nas apresentações e nas linhas sem o tempo
+mascarado dela.
 
 **A entrega é decidida de novo.** Acordado, o pedido é executado outra
 vez, inteiro, pelo mesmo gate: uma decisão nova, com a política, o
@@ -15412,23 +15440,52 @@ console inteiro que vai à tela — pelo núcleo dos dispositivos, com as
 interrupções mascaradas (ver [Vários núcleos](#vários-núcleos)). A
 apresentação copiava pixel a pixel, uma escrita volátil por pixel, e no
 kernel de depuração cada uma era uma chamada de função: uma tela inteira
-levava 126 ms no x86 (1280x800) e 135 ms no ARM (1280x720), a cada linha de
-log com o console cheio — e nesse tempo o canal do agente parava. A CI 527
-reprovou a fumaça do teclado USB por isso: a sonda da rede mediu 2292 ms num
-ping que leva dezenas. Medido numa fumaça local, em depuração, com a sonda
-de antes: com o console cheio, o núcleo dos dispositivos ficou de 450 a 623
-ms sem tique na janela do ping, com seis linhas de log nela; com o console
-ainda com espaço, de 20 a 40 ms, com as mesmas linhas. Agora o caminho
-rápido copia a linha inteira de uma vez, pelo `memcpy` do
-`compiler_builtins`, que vem otimizado com o `core` em qualquer perfil: 1,8
-ms no x86 e 2,3 no ARM, em depuração; em release, de 1,5 para 1,1 ms no x86,
-e de 3,5 para 1,5 no ARM. Com o `guardar` lançado logo antes da porta e o
-console cheio, o núcleo dos dispositivos ficava de 470 a 780 ms mascarado na
-janela, e passou a ficar de 80 a 190; com o hospedeiro ocupado como o runner
-da CI, o ping chegou a 1559 ms antes, e não passou de 263 depois. O caso
-`tela: apresentar nao regrediu em ordem de grandeza` mede a cada rodada,
-contra a mesma cópia para o mesmo framebuffer, e reprova em depuração a
-volta a pixel a pixel.
+levava 126 ms no x86 (1280x800) e 135 ms no ARM (1280x720), e o console —
+quase a tela inteira, 1280x752 no x86 — ia à tela a cada linha de log com o
+console cheio — e nesse tempo o canal do agente parava. A CI 527 reprovou a
+fumaça do teclado USB por isso: a sonda da rede mediu 2292 ms num ping que
+leva uns dez milissegundos. Medido numa fumaça local, em depuração, com a
+sonda de antes — a janela ia do retrato de antes de a porta conectar ao de
+depois do ping —: com o console cheio, o núcleo dos dispositivos ficou de
+450 a 623 ms sem tique na janela, com seis linhas de log nela; com o console
+ainda com espaço, de 20 a 40 ms, com as mesmas linhas (numa das três
+rodadas, só três delas). Agora o caminho rápido copia a linha inteira de uma
+vez, pelo `memcpy` do `compiler_builtins`, que vem otimizado com o `core` em
+qualquer perfil: 1,8 ms no x86 e 2,3 no ARM, em depuração; em release, de
+1,5 para 1,1 ms no x86, e de 3,5 para 1,5 no ARM. Com o `guardar` lançado
+logo antes da porta e o console cheio, o núcleo dos dispositivos ficava de
+470 a 780 ms mascarado na janela, e passou a ficar de 80 a 190; com o
+hospedeiro ocupado como o runner da CI, o ping chegou a 1559 ms antes, e não
+passou de 263 depois. O caso `tela: apresentar nao regrediu em ordem de
+grandeza` mede a cada rodada — menos na máquina da `virtio-gpu`, onde quem
+apresenta é o dispositivo —, contra a mesma cópia para o mesmo framebuffer,
+e reprova em depuração a volta a pixel a pixel.
+
+**O caso julga pelo bloco mais rápido.** A primeira versão dele julgava pela
+razão das somas de três pares de blocos, de duas telas cada, e reprovava sem
+defeito com o hospedeiro ocupado: no emulador o contador de ciclos anda com
+o relógio do hospedeiro, e uma preempção do processador virtual — dezenas de
+milissegundos — caía inteira num bloco de 3,5 ms e decidia a razão. Com oito
+laços ocupando o hospedeiro, ela chegou a 418% da cópia no x86, contra um
+teto de 300%, e a 262% no ARM (o adversário do lote FUMAÇA-USB). O ruído só
+soma tempo: agora são sete pares, e o caso julga o bloco mais rápido da
+apresentação contra o mais rápido da cópia — basta um bloco limpo de cada
+lado —, enquanto a volta a pixel a pixel põe todo bloco da apresentação
+dezenas de vezes acima da cópia, o mais rápido também. E cada bloco é uma
+faixa de um quarto da tela, e não duas telas: com o hospedeiro ocupado o fio
+do processador virtual roda em vezes de poucos milissegundos, e um bloco
+mais longo que a vez nunca sai limpo. Com sete pares de duas telas — 3,3 ms
+de apresentação contra 2,7 de cópia —, os oito laços puseram todo bloco da
+apresentação de 2,6 a 6,5 vezes acima do custo dela, um da cópia saiu limpo,
+e o caso reprovou a 327% sem defeito nenhum. Um quarto da tela, perto de
+meio milissegundo em depuração, cabe numa vez dos dois lados: com os mesmos
+oito laços e a medida repetida quinze vezes por boot, em dois boots no x86 e
+num no ARM, a pior ficou a 187% no x86 e a 129% no ARM, com as somas das
+mesmas medidas a até 798% e 559%; sem carga, de 112% a 149%; pixel a pixel,
+a 5931% e a 5472%. E os dois lados se alternam em quem vem antes: quem vem
+depois acha a faixa quente, e no ARM a cópia logo depois da apresentação
+levava dois terços do tempo dela. A razão das somas vai junto no log, sem
+julgamento: a distância entre as duas é o quanto o ruído pesou.
 
 Duas coisas sobem junto com o texto. A grade de caracteres, para a árvore
 semântica continuar descrevendo o que está na tela. E a linha de comando: o
@@ -16518,12 +16575,13 @@ pelo gate: "o agente na porta so foi respondido depois da espera da serial
 (2292 ms)".
 O job rodou de novo uma vez e passou, em 28,2 minutos. A medida confirmou
 a análise: num kernel de depuração com o console cheio, cada linha de log
-que rola apresenta a tela inteira no primeiro núcleo, com as interrupções
+que rola apresenta o console inteiro no primeiro núcleo, com as interrupções
 mascaradas, e o canal do agente só roda nele; e duas coisas da sonda punham
 linhas na janela que ela mede — o `guardar` da sonda do armazém, que ninguém
-esperava, e o fim do aperto da porta. As três foram corrigidas: ver *Na
-fumaça, o executor não espera*, em [Rede nativa](#rede-nativa), e *O custo
-de uma linha*, em [O console rola](#o-console-rola). O holdover da bancada de
+esperava, e o fim do aperto da porta. As três foram corrigidas: ver a espera
+do `guardar`, em [Armazenamento nativo](#armazenamento-nativo), *Na fumaça,
+o executor não espera*, em [Rede nativa](#rede-nativa), e *O custo de uma
+linha*, em [O console rola](#o-console-rola). O holdover da bancada de
 tempo, na parte 3/3: o x86 a -243 ppm (2056 s em 2056) e o ARM a -26 ppm
 (2056 s em 2056), os dois dentro da guarda. O último job foi o dos fluxos
 entre dispositivos (x86_64 e aarch64), que esperou 49,5 minutos na fila e

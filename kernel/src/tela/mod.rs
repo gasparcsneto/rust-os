@@ -836,13 +836,14 @@ impl Tela {
     /// esperas do relógio. No kernel de depuração cada escrita volátil é uma
     /// chamada de função, com as conferências dela: uma tela inteira levava
     /// 126 ms no x86 (1280x800) e 135 ms no ARM (1280x720), e cada linha de
-    /// log que rolava o console cheio a levava de novo. A CI 527 reprovou a
-    /// fumaça do teclado USB por isso: o agente de uma porta esperou 2,3 s
-    /// pelo núcleo mascarado. A cópia é o `memcpy` do `compiler_builtins`,
-    /// que vem compilado e otimizado com o `core`, em qualquer perfil: 1,8 e
-    /// 2,3 ms em depuração; em release, de 1,5 para 1,1 ms no x86, e de 3,5
-    /// para 1,5 ms no ARM. Quem mede, a cada rodada da suíte, é `tela:
-    /// apresentar nao regrediu em ordem de grandeza`.
+    /// log que rolava o console cheio levava o console — quase a tela
+    /// inteira — de novo. A CI 527 reprovou a fumaça do teclado USB por
+    /// isso: o agente de uma porta esperou 2,3 s pelo núcleo mascarado. A
+    /// cópia é o `memcpy` do `compiler_builtins`, que vem compilado e
+    /// otimizado com o `core`, em qualquer perfil: 1,8 e 2,3 ms em
+    /// depuração; em release, de 1,5 para 1,1 ms no x86, e de 3,5 para 1,5
+    /// ms no ARM. Quem mede, a cada rodada da suíte, é `tela: apresentar nao
+    /// regrediu em ordem de grandeza`.
     ///
     /// # Por que ela basta, sem `volatile`
     ///
@@ -857,7 +858,9 @@ impl Tela {
     /// `bochs-display`, mapeado por [`crate::mmio::mapear`] —, onde um acesso
     /// desalinhado é falha: o alvo `-softfloat` tem `strict-align`, e o
     /// `memcpy` dele alinha o destino a oito bytes com escritas de um byte e
-    /// só então escreve palavras alinhadas. No x86, é `rep movsq`.
+    /// só então escreve palavras alinhadas. No x86, é `rep movsq`, com um
+    /// `rep movsb` antes, que alinha o destino a oito bytes, e outro depois,
+    /// para o resto.
     pub fn copiar_linha(&self, x: u32, y: u32, pixels: &[u32]) {
         if y >= self.altura || x >= self.largura {
             return;
