@@ -3323,6 +3323,42 @@ fn redesenhar_em(console: Console, e: &Estado) {
 
 /// Manda o comando ao registro do agente e desenha a resposta — ou, se ele
 /// suspendeu, não desenha nada e devolve a espera.
+///
+/// # O log diz o que o gate decidiu, depois da decisão
+///
+/// No log, e não só na tela, porque é o que torna o interpretador
+/// observável de fora: o canal do agente lê `log.tail` e vê o que foi
+/// feito na máquina — por quem, e em qual console. Cada comando do registro
+/// deixa uma linha, no subsistema `console`, com o desfecho dele:
+///
+/// - `executado: <comando> (<origem>) em <console>` — o gate permitiu: a
+///   linha sai com a licença na mão, logo antes de executar;
+/// - `negado: <comando> (<origem>) em <console>: <codigo>`, com `;
+///   registro <n>` quando a recusa foi gravada — o gate recusou, também sem
+///   ninguém entrado no console;
+/// - `parametro invalido: <comando> (<origem>) em <console>: <campo>` — os
+///   parâmetros não passaram pelo que o comando declara.
+///
+/// O adiado pelo caminho da auditoria não deixa linha: nada foi decidido
+/// nem executado — ver [`autorizacao::Decisao::Adiada`] —, e a reexecução,
+/// quando a espera acaba, deixa a dela, uma vez. O comando que suspende
+/// sozinho — a leitura que espera dados — roda duas vezes, cada uma com a
+/// licença dela e o registro dela na auditoria, e deixa duas.
+///
+/// Antes do lote EXECUTADO, a `executado:` saía antes da validação e da
+/// decisão: um comando negado, ou de parâmetros inválidos, aparecia como
+/// executado, e o adiado, duas vezes — a primeira, sem ter rodado —; e uma
+/// espera da fumaça pela linha passava com o comando recusado (o
+/// informativo 9 do adversário do lote FUMAÇA-2).
+///
+/// A linha é diagnóstico: não substitui a auditoria nem a duplica — a
+/// decisão é o registro da auditoria, e a linha só aponta o número dele. E
+/// não leva nada do que se digitou além do nome de um comando que existe:
+/// sem ninguém entrado, a linha que não é comando vai com o marcador
+/// [`autorizacao::COMANDO_DESCONHECIDO`], como na auditoria; e o campo que
+/// o comando não declara, com [`CAMPO_NAO_DECLARADO`] — ver
+/// [`campo_para_o_log`]. O comando desconhecido, com alguém entrado, não
+/// deixa linha: não há decisão, e o nome dele é só o que se digitou.
 fn despachar(
     console: Console,
     nome: &str,
@@ -3336,7 +3372,8 @@ fn despachar(
     // gravado sem o resumo dos parâmetros: o nome do comando que existe, ou
     // o marcador do que não é comando. O que se digita ali pode ser uma
     // senha no lugar errado, também depois do nome de um comando — ver
-    // `autorizacao::recusar_sem_login`.
+    // `autorizacao::recusar_sem_login`. A linha do log leva o mesmo método
+    // que a auditoria, e nada mais do que se digitou.
     let chamador = match origem {
         Origem::Agente(sessao) => Chamador::Sessao(sessao),
         Origem::Pessoa => match sessao_valida(console) {
@@ -3345,6 +3382,14 @@ fn despachar(
                 let metodo = registry::encontrar(nome)
                     .map_or(autorizacao::COMANDO_DESCONHECIDO, |comando| comando.nome);
                 autorizacao::recusar_sem_login(console, metodo);
+                crate::log_info!(
+                    "console",
+                    "negado: {} ({}) em {}: {}",
+                    metodo,
+                    origem,
+                    console.texto(),
+                    politica::Codigo::DenyNotAuthenticated.nome()
+                );
                 saidaln!(
                     console,
                     "negado: DENY_NOT_AUTHENTICATED; `login` para entrar"
@@ -3364,17 +3409,6 @@ fn despachar(
         return None;
     };
 
-    // No log, e não só na tela, porque é o que torna o interpretador
-    // observável de fora: o canal do agente lê `log.tail` e vê o que foi
-    // executado na máquina — por quem, e em qual console.
-    crate::log_info!(
-        "console",
-        "executado: {} ({}) em {}",
-        nome,
-        origem,
-        console.texto()
-    );
-
     // A linha passa pelo mesmo crivo do canal: os parâmetros que o comando
     // declara, e a decisão. A pessoa decide pelo papel dela; um agente que
     // confirmou a linha no Terminal é a sessão dele, com o papel dele — o
@@ -3382,6 +3416,14 @@ fn despachar(
     let params = Json(params.as_bytes());
     if let Err(campo) = registry::validar(comando, params) {
         autorizacao::auditar_invalido(chamador, comando.nome, params.0, campo);
+        crate::log_info!(
+            "console",
+            "parametro invalido: {} ({}) em {}: {}",
+            comando.nome,
+            origem,
+            console.texto(),
+            campo_para_o_log(comando, campo)
+        );
         saidaln!(console, "parametro invalido: {}", campo);
         return None;
     }
@@ -3389,9 +3431,29 @@ fn despachar(
         Ok(autorizacao::Decisao::Licenca(l)) => l,
         // Adiado pelo caminho da auditoria: o console espera como espera um
         // comando que suspendeu, e o interpretador o executa de novo, pelo
-        // gate, quando a espera acabar — ver `crate::oleoduto`.
+        // gate, quando a espera acabar — ver `crate::oleoduto`. Sem linha no
+        // log: nada foi decidido nem executado ainda.
         Ok(autorizacao::Decisao::Adiada(espera)) => return Some(espera),
         Err(recusa) => {
+            match recusa.decisao {
+                0 => crate::log_info!(
+                    "console",
+                    "negado: {} ({}) em {}: {}",
+                    comando.nome,
+                    origem,
+                    console.texto(),
+                    recusa.codigo.nome()
+                ),
+                d => crate::log_info!(
+                    "console",
+                    "negado: {} ({}) em {}: {}; registro {}",
+                    comando.nome,
+                    origem,
+                    console.texto(),
+                    recusa.codigo.nome(),
+                    d
+                ),
+            }
             // A frase para a pessoa — o que ela pediu, o papel dela, o que
             // fazer —, e o código e o registro, para quem investiga
             // (`security.explain` lê o registro).
@@ -3409,6 +3471,16 @@ fn despachar(
         }
     };
 
+    // Com a licença na mão, e antes de executar: o gate permitiu. Um
+    // handler que lê o log — `log.tail` — já vê esta linha.
+    crate::log_info!(
+        "console",
+        "executado: {} ({}) em {}",
+        comando.nome,
+        origem,
+        console.texto()
+    );
+
     let mut saida = SaidaHumana::nova(console);
     let mut escritor = JsonWriter::new(&mut saida);
     let (escreveu, espera) =
@@ -3425,6 +3497,24 @@ fn despachar(
     None
 }
 
+/// O que a linha `parametro invalido:` do log diz no lugar de um campo que
+/// o comando não declara — ver [`campo_para_o_log`].
+pub const CAMPO_NAO_DECLARADO: &str = "(campo nao declarado)";
+
+/// O campo de um parâmetro inválido, como a linha do log o diz: o nome que
+/// o comando declara — texto do registro de comandos —, ou
+/// [`CAMPO_NAO_DECLARADO`] para o que ele não declara. Esse é texto de quem
+/// digitou — a chave de um objeto JSON qualquer —, e pode ser uma senha no
+/// lugar errado: o log, que todo papel com `log.read` lê, não o leva. A
+/// tela leva, como sempre: é a resposta a quem digitou.
+fn campo_para_o_log(comando: &registry::Command, campo: &str) -> &'static str {
+    comando
+        .params
+        .iter()
+        .find(|p| p.nome == campo)
+        .map_or(CAMPO_NAO_DECLARADO, |p| p.nome)
+}
+
 /// Lista o que se pode fazer neste console.
 ///
 /// Sai do mesmo registro que `agent.describe` publica. Uma lista escrita à
@@ -3432,6 +3522,12 @@ fn despachar(
 /// Sem ninguém entrado, a ajuda lista só as palavras do console — `login`,
 /// `logout`, `senha`, `aceitar`, `parear` e `ajuda` —, e não os comandos: ela
 /// não é privilegiada, e a lista do que o sistema faz é para quem entrou.
+///
+/// A linha `executado: ajuda` sai antes da lista, e não tem decisão a
+/// esperar: a ajuda é uma palavra do console, não um comando do registro —
+/// não passa pelo gate, não tem parâmetro que se valide e não se adia; ela
+/// sempre roda. A regra de [`despachar`] — a linha depois da decisão — não
+/// tem o que mudar aqui.
 fn ajuda(console: Console, origem: Origem) {
     crate::log_info!(
         "console",
