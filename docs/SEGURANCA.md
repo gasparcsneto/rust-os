@@ -174,8 +174,9 @@ pontos onde acontece — não num canal paralelo:
   `codegen-backend`, um arquivo do commit num diretório de saída — e,
   desde o lote A12, um link no commit ou no caminho de um diretório de
   saída, por onde os arquivos do commit chegavam a um `target` sem a regra
-  os ver —, e o config de um diretório de build fora da lista — na raiz,
-  outro que o apelido —;
+  os ver, e, desde o lote A13, um submódulo no commit ou o que não é pasta
+  nesse caminho —, e o config de um diretório de build fora da lista — na
+  raiz, outro que o apelido —;
   roda todo `cargo` dela no toolchain fixado pelo canal — uma exceção à
   letra do 4.1 do `CLAUDE.md`, que proíbe o `RUSTUP_TOOLCHAIN` no projeto,
   proposta ao dono do projeto: se ele preferir a letra, a fixação sai, e a
@@ -189,7 +190,12 @@ pontos onde acontece — não num canal paralelo:
   apelido, como ela. Desde o lote A12, a leitura desse passo falha
   fechada — uma linha dele que ela não lê, como um escape na chave que o
   YAML lê como `if:`, reprova —, e o comentário do fim de uma linha sai do
-  valor que ela compara. O que as guardas de texto do
+  valor que ela compara; e, desde o lote A13, a leitura falha fechada no
+  arquivo inteiro, em todo workflow e ação — as quebras de linha que só o
+  YAML vê e, fora do conteúdo dos blocos, as formas que ela não lê
+  reprovam —, e os passos da própria ação só têm as chaves que ela lê
+  neles, sem `if:`, `continue-on-error:` nem `env:` a mais. O que as
+  guardas de texto do
   `xtask` não fecham — quem escreve no kernel para contorná-las de
   propósito — e a definição da CI ficam com a revisão ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)).
   E as recusas das perguntas sobre quem

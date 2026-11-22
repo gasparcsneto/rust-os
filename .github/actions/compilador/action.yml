@@ -4,8 +4,12 @@
 #
 # Onde a confiança começa, desde o lote A10: a definição da CI — os
 # workflows e esta ação — é a raiz da confiança, e quem a protege é a
-# revisão. Um passo novo, o `env:` de um passo ou o script daqui mudam o
-# que a CI faz, e nada abaixo deles os confere. Abaixo dela, esta ação
+# revisão. Um passo novo, o `env:` de um passo do workflow ou o script
+# daqui mudam o que a CI faz, e nada abaixo deles os confere; desde o lote
+# A13, os passos daqui só têm as chaves que o `cargo xtask invariantes` lê
+# neles — o `name:`, o `id:`, o `shell:` e o `run:`, e, no das invariantes,
+# o `if:` da entrada e o `env:` com o toolchain fixado —, e um `if:`, um
+# `continue-on-error:` ou um `env:` a mais reprovam. Abaixo dela, esta ação
 # garante que o primeiro `cargo` que roda o código do repositório — o
 # `cargo xtask invariantes`, no job de lints — é o do toolchain oficial, no
 # ambiente conferido, sem nada do repositório antes.
@@ -15,8 +19,11 @@
 # passo que a usa não tem `if:` nem `continue-on-error:`, que a deixariam
 # sem rodar ou o job seguir com ela reprovada — desde o lote A12, numa
 # leitura que falha fechada: o passo só tem o `name:`, o `id:`, o `uses:` e
-# o `with:` com as entradas, e uma linha dele que ela não lê reprova), em
-# quatro passos:
+# o `with:` com as entradas, e uma linha dele que ela não lê reprova; e,
+# desde o lote A13, a leitura falha fechada no arquivo inteiro — as quebras
+# de linha que só o YAML vê e, fora do conteúdo dos blocos, as formas que
+# ela não lê reprovam, em todo workflow e nesta ação: um checkout escrito
+# numa delas não escapa da ordem), em quatro passos:
 #
 # 1. `ambiente`, em Python — o do sistema, `/usr/bin/python3`, e não o do
 #    PATH, que é o que ele confere —, antes de qualquer programa do
@@ -47,7 +54,11 @@
 #      do commit pelo que ele compilou. Desde o lote A12, também nenhum link
 #      no commit — o modo 120000 do índice — nem no caminho de um diretório
 #      de saída, no disco: um `target` que é link para uma pasta do commit
-#      escapava da regra, que casa o caminho do arquivo.
+#      escapava da regra, que casa o caminho do arquivo. Desde o lote A13,
+#      também nenhum submódulo no commit — o modo 160000 —, que num
+#      checkout com os submódulos traria outro repositório para a árvore, e,
+#      no caminho de um diretório de saída, nada que não seja pasta, como o
+#      `target` que é um arquivo do commit.
 # 2. `conferir`: o canal do `rust-toolchain.toml`, lido como o rustup o lê
 #    (é TOML), um nightly com data, e o arquivo — e o do modelo do SDK — o
 #    do commit; a instalação — o proxy do rustup instala o toolchain do

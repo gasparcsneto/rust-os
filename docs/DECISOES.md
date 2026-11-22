@@ -2416,8 +2416,10 @@ pendência #298.
     conforme lê como `if: false`, passava pelo `cargo xtask invariantes`,
     porque a leitura ignorava a linha que não reconhecia (o achado 1); e o
     `uses:` da ação numa entrada do `with:` de outra ação, ou numa linha
-    de um bloco `run:`, que contava como a conferência sem ela rodar,
-    também reprova;
+    de um bloco `run:` sem o `-` de um item, que contava como a
+    conferência sem ela rodar, também reprova — com o `-`, a leitura
+    tomava o texto do bloco por um passo (o M2 do adversário do lote A12,
+    que o lote A13 fecha);
   - o comentário do fim de uma linha sai do valor que as regras dos
     workflows comparam — o nome da ação, a contagem do `id`, a entrada do
     `with:`, a chave de cache —: o `invariantes: true  # x` reprovava sem
@@ -2433,7 +2435,10 @@ pendência #298.
   - o texto, pelas precisões do revisor.
 
   Fica o que fica dos lotes A10 e A11 — o `if:` e o `continue-on-error:`
-  de um job inteiro, e o resto da definição da CI, com a revisão. Três
+  de um job inteiro, e o resto da definição da CI, com a revisão —, e o
+  checkout que a leitura por linhas não reconhecia — em estilo de fluxo,
+  ou com um escape na chave —, que não pedia a conferência depois dele, e
+  que o lote A13 fecha. Três
   testes novos no hospedeiro e um reforçado, e as mutações do lote (*As do
   lote A12*, no
   [README](../README.md#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
@@ -2467,6 +2472,49 @@ pendência #298.
     as precisões do revisor nas CIs 533 a 536, no lote ICACHE-3 e no lote
     FUMAÇA-3 ([README](../README.md#vários-núcleos), "A remoção que não
     invalida em núcleo nenhum", e [Testes](../README.md#testes)).
+
+  Depois do lote ICACHE-4, o lote A13, [B], fez os achados do adversário
+  da rodada 5 sobre o lote A12 e sobre as esperas da fumaça do lote
+  EXECUTADO, e os itens do revisor da rodada 5 sobre o lote A12, na guarda
+  do compilador, na fumaça e no texto, sem autoridade, regra de acesso,
+  registro, identidade, persistência ou semântica de auditoria novos:
+  - a leitura dos workflows falha fechada no arquivo inteiro, em todo
+    workflow e ação — a do compilador inclusive —: as quebras de linha que
+    só o YAML vê — o CR sozinho, o NEL, o LS, o PS, e o BOM fora do começo
+    —, que escondiam o `if: false` do passo da ação, reprovam; o conteúdo
+    de um escalar em bloco fica marcado, e um passo da ação escrito como
+    texto, com o `-`, não conta mais como a conferência; e, fora dele, as
+    formas que a leitura não lê — o estilo de fluxo, a chave entre aspas
+    ou com escape, a chave complexa, a âncora, o apelido, a etiqueta, a
+    fusão, o texto entre aspas em várias linhas — reprovam: o checkout
+    escrito assim, a lacuna que o lote A12 deixou, não escapa mais da
+    ordem;
+  - os passos da própria ação só com as chaves que a leitura lê neles: um
+    `if: false` no do ambiente, um `continue-on-error: true` ou um
+    embrulho do compilador no `env:` do das invariantes passavam;
+  - três falsos positivos do passo da ação — o `id` entre aspas, o `-` só
+    com um comentário, o nome que começa por `-` —, que o YAML lê como o
+    passo de sempre, passam;
+  - o passo do ambiente da ação recusa todo submódulo do commit — um
+    gitlink, o modo 160000 —, como os links, e, no caminho de um diretório
+    de saída, o que não é pasta, como o `target` que é um arquivo;
+  - na fumaça, na espera do agente da porta 2, que lê o log por um
+    predicado, a recusa de uma leitura fica — a `executado:` do mesmo
+    pedido numa leitura seguinte não a faz passar —, e a espera pela
+    `executado:` só aceita a linha do console da sonda;
+  - o texto: o E1, o P1, o P2 e o P3 do revisor; o que o achado M2
+    desmente no texto do lote A12 — o `uses:` num bloco `run:` reprovava
+    só sem o `-` de um item —; a frase da linha `executado:`; e o que a
+    sonda do agente no Terminal confere
+    ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)).
+
+  Fica o que fica dos lotes A10 a A12 — o `if:` e o `continue-on-error:`
+  de um job inteiro, e o resto da definição da CI, com a revisão: um passo
+  novo na ação, ou o script de um passo dela, e a pasta da ação como link,
+  que o runner carregaria antes do passo do ambiente —. Oito testes novos
+  no hospedeiro, um reforçado e um ajustado, e as mutações do lote (*As do
+  lote A13*, no
+  [README](../README.md#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
 
 ### I7
 
