@@ -1496,6 +1496,45 @@ fn linhas_de_codigo(texto: &str) -> Vec<Linha<'_>> {
         .collect()
 }
 
+/// Os caracteres de um workflow, ou de uma ação, que o YAML lê de um jeito e
+/// a leitura por linhas daqui ([`linhas_de_codigo`]) de outro, cada um com o
+/// número da linha — a contada pelos `\n` — e o nome dele: o CR sozinho,
+/// fora do CRLF, o NEL (U+0085), o LS (U+2028) e o PS (U+2029), que o YAML
+/// lê como quebras de linha e o `str::lines` não; e o BOM (U+FEFF) fora do
+/// começo do arquivo, que a libyaml pula no começo de uma linha e que a
+/// leitura daqui não toma por recuo.
+///
+/// # Por quê, desde o lote A13
+///
+/// A leitura do passo da ação falha fechada nas linhas que ela vê, e
+/// `      - name: O compilador\r        if: false` é uma linha para ela — o
+/// `name:` com um valor comprido — e duas para o YAML, com o `if: false` do
+/// passo: o PyYAML e a libyaml a leram assim, e o YamlDotNet, que o runner
+/// usa para ler a ação, tem as mesmas cinco quebras (`\r`, `\n`, U+0085,
+/// U+2028 e U+2029). O `cargo xtask invariantes` passava, e o passo seria
+/// pulado, com as conferências que ele faz; numa linha de comentário, que a
+/// leitura tira inteira, também (o M1 do adversário do lote A12; o BOM no
+/// começo de uma linha do meio é o B1 dele). Sem esses caracteres, o texto
+/// tem as mesmas linhas para a leitura daqui, para o YAML 1.1 e para o 1.2.
+fn quebras_que_a_leitura_nao_ve(texto: &str) -> Vec<(usize, &'static str)> {
+    let mut achados = Vec::new();
+    for (n, linha) in texto.split('\n').enumerate() {
+        let linha = linha.strip_suffix('\r').unwrap_or(linha);
+        for (i, c) in linha.char_indices() {
+            let qual = match c {
+                '\r' => "um CR sozinho",
+                '\u{85}' => "um NEL (U+0085)",
+                '\u{2028}' => "um LS (U+2028)",
+                '\u{2029}' => "um PS (U+2029)",
+                '\u{feff}' if n > 0 || i > 0 => "um BOM (U+FEFF) fora do começo do arquivo",
+                _ => continue,
+            };
+            achados.push((n + 1, qual));
+        }
+    }
+    achados
+}
+
 /// A chave e o valor de uma linha `chave: valor` de YAML, com o `- ` de um
 /// item de lista e as aspas da chave tirados, e o valor sem o comentário do
 /// fim da linha ([`sem_comentario`]).
@@ -1802,10 +1841,22 @@ fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str>
 /// esconderia as chaves desta leitura, e nenhum `uses:` em várias linhas. O
 /// canário sobrepõe, mas não roda nos pushes, não usa o cache nem publica a
 /// proveniência. As ações locais seguem as regras dos workflows oficiais,
-/// menos a que confere o compilador, que cita o que recusa.
+/// menos a que confere o compilador, que cita o que recusa. E, desde o lote
+/// A13, antes de toda leitura, em todo arquivo — a ação do compilador
+/// inclusive —, nenhum caractere que o YAML leia como outra linha e a
+/// leitura por linhas não ([`quebras_que_a_leitura_nao_ve`]).
 fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
     let mut fora = Vec::new();
     for (nome, texto) in workflows {
+        // Antes de toda leitura, e também na ação do compilador: o que o YAML
+        // lê como outra linha, e a leitura por linhas não vê.
+        for (n, qual) in quebras_que_a_leitura_nao_ve(texto) {
+            fora.push(format!(
+                "{nome}:{n}: {qual} — o YAML lê ali uma quebra de linha, ou um caractere, que a \
+                 leitura por linhas do `xtask` não vê: uma chave do passo, como um `if:`, ou um \
+                 checkout, que ela não lê"
+            ));
+        }
         if nome == ACAO_DO_COMPILADOR {
             continue;
         }
@@ -4761,6 +4812,106 @@ jobs:
         }
         let local = "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/compilador\n      \"i\\x66\": false\n";
         assert_eq!(um(".github/actions/outra/action.yml", local).len(), 1);
+    }
+
+    /// As quebras de linha que a leitura por linhas não vê (no lote A13, o
+    /// M1 e o B1 do adversário do lote A12): o CR sozinho, o NEL, o LS e o
+    /// PS escondiam do `xtask` uma linha que o YAML lê — o `if: false` do
+    /// passo da ação, depois do `name:` ou de um comentário, e o checkout —,
+    /// e o BOM no começo de uma linha do meio a tirava do passo. Cada um
+    /// reprova, com a linha, também na ação do compilador; o BOM do começo
+    /// do arquivo e o CRLF, que o YAML e a leitura leem igual, passam; e os
+    /// arquivos do repositório não têm nenhum.
+    #[test]
+    fn adversario_a12_as_quebras_que_a_leitura_por_linhas_nao_ve() {
+        let nome = ".github/workflows/ci.yml";
+        // Só os erros desta regra: as outras podem acusar a mesma linha.
+        let quebras = |fora: Vec<String>| -> Vec<String> {
+            fora.into_iter()
+                .filter(|f| f.contains(" — o YAML lê ali uma quebra de linha"))
+                .collect()
+        };
+        let passo = "      - name: O compilador\n        id: compilador\n";
+        assert_eq!(OFICIAL.matches(passo).count(), 1);
+        for (quebra, qual) in [
+            ("\r", "um CR sozinho"),
+            ("\u{85}", "um NEL (U+0085)"),
+            ("\u{2028}", "um LS (U+2028)"),
+            ("\u{2029}", "um PS (U+2029)"),
+        ] {
+            // O `if: false` do passo, numa linha que só o YAML vê.
+            let texto = OFICIAL.replacen(
+                passo,
+                &format!(
+                    "      - name: O compilador{quebra}        if: false\n        id: compilador\n"
+                ),
+                1,
+            );
+            let fora = um(nome, &texto);
+            assert!(
+                fora.len() == 1 && fora[0].starts_with(&format!("{nome}:7: {qual} — ")),
+                "{qual}: {fora:#?}"
+            );
+            // Num comentário, que a leitura tira inteiro.
+            let comentario = OFICIAL.replacen(
+                passo,
+                &format!("{passo}        # a conferência{quebra}        if: false\n"),
+                1,
+            );
+            let fora = quebras(um(nome, &comentario));
+            assert!(
+                fora.len() == 1 && fora[0].starts_with(&format!("{nome}:9: {qual}")),
+                "{qual}: {fora:#?}"
+            );
+            // O checkout escondido, sem o passo da ação.
+            let checkout = "      - uses: actions/checkout@v4\n";
+            let escondido = OFICIAL
+                .replacen(
+                    "      - name: O compilador\n        id: compilador\n        uses: ./.github/actions/compilador\n",
+                    "",
+                    1,
+                )
+                .replacen(checkout, &format!("      - run: echo{quebra}{checkout}"), 1);
+            assert_eq!(quebras(um(nome, &escondido)).len(), 1, "{qual}");
+            // E na ação do compilador, que o runner lê com o YamlDotNet.
+            let acao = ACAO.replacen(
+                "    - id: ambiente\n",
+                &format!("    - id: ambiente{quebra}      if: false\n"),
+                1,
+            );
+            assert_ne!(acao, ACAO);
+            let fora = quebras(um(ACAO_DO_COMPILADOR, &acao));
+            assert!(
+                fora.len() == 1 && fora[0].contains(qual),
+                "{qual}: {fora:#?}"
+            );
+        }
+        // O BOM: no começo do arquivo, o YAML o pula; no começo de uma linha
+        // do meio, ele não é recuo para a leitura daqui.
+        assert_eq!(
+            um(nome, &format!("\u{feff}{OFICIAL}")),
+            Vec::<String>::new()
+        );
+        let bom = OFICIAL.replacen(passo, &format!("{passo}\u{feff}       if: false\n"), 1);
+        let fora = quebras(um(nome, &bom));
+        assert!(
+            fora.len() == 1 && fora[0].starts_with(&format!("{nome}:9: um BOM (U+FEFF)")),
+            "{fora:#?}"
+        );
+        // O CRLF é uma quebra só, para os dois: passa.
+        assert_eq!(
+            um(nome, &OFICIAL.replace('\n', "\r\n")),
+            Vec::<String>::new()
+        );
+        // Os workflows e a ação do repositório não têm nenhum.
+        for texto in [
+            include_str!("../../.github/workflows/ci.yml"),
+            include_str!("../../.github/workflows/rede-principal.yml"),
+            include_str!("../../.github/workflows/canario.yml"),
+            ACAO,
+        ] {
+            assert_eq!(quebras_que_a_leitura_nao_ve(texto), Vec::new());
+        }
     }
 
     #[test]
