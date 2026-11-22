@@ -802,6 +802,51 @@ pub unsafe fn mapear_frame(
     fisico: u64,
     permissoes: Permissoes,
 ) -> Result<(), &'static str> {
+    // SAFETY: o contrato é o desta função, e passa adiante.
+    unsafe { mapear_frame_com(virtual_, fisico, permissoes, true) }
+}
+
+/// Só para a suíte: [`mapear_frame`] sem o `tlbi` da entrada compartilhada
+/// — ela só publica, como a privada de um processo.
+///
+/// Na entrada compartilhada, o `tlbi` difundido do `mapear_frame` derruba,
+/// em todo núcleo, qualquer tradução do endereço que ainda estivesse na TLB
+/// — e com isso cobre a falta de uma remoção que não a tivesse derrubado nos
+/// outros núcleos: o caso `smp: desmapear do kernel vale em todo nucleo`
+/// passava com a remoção invalidando só a TLB deste núcleo (o achado 1 do
+/// adversário do lote ICACHE-2). Remapeando por aqui, só o `tlbi` da remoção
+/// derruba a tradução velha. É o par do `mapear_frame_sem_invalidar_de_teste`
+/// do x86.
+///
+/// Sem o `tlbi`, um núcleo que lê a página depois de um aviso precisa do
+/// `dsb; isb` dele entre o aviso e a leitura — a segunda das três saídas de
+/// [`privada_de_um_processo`] —, e é o que o caso faz.
+///
+/// # Safety
+///
+/// O contrato de [`mapear_frame`].
+#[cfg(feature = "modo-teste")]
+pub unsafe fn mapear_frame_sem_invalidar_de_teste(
+    virtual_: u64,
+    fisico: u64,
+    permissoes: Permissoes,
+) -> Result<(), &'static str> {
+    // SAFETY: o contrato é o desta função, e passa adiante.
+    unsafe { mapear_frame_com(virtual_, fisico, permissoes, false) }
+}
+
+/// [`mapear_frame`], com o `tlbi` difundido da entrada compartilhada só se
+/// `difundir`.
+///
+/// # Safety
+///
+/// O contrato de [`mapear_frame`].
+unsafe fn mapear_frame_com(
+    virtual_: u64,
+    fisico: u64,
+    permissoes: Permissoes,
+    difundir: bool,
+) -> Result<(), &'static str> {
     validar_endereco(virtual_, fisico)?;
 
     // Mascarar interrupções não é zelo excessivo: `TRAVA` é um spinlock, e
@@ -840,11 +885,12 @@ pub unsafe fn mapear_frame(
         // um processo, resta publicar a escrita ([`publicar`]); na
         // compartilhada, o `tlbi` difundido do endereço ordena também os
         // percursos dos outros núcleos — a regra, e o motivo, em
-        // [`privada_de_um_processo`].
+        // [`privada_de_um_processo`]. Sem `difundir`, que só a suíte pede,
+        // a compartilhada também só publica.
         //
         // SAFETY: a entrada foi escrita; resta publicá-la.
         unsafe {
-            if privada_de_um_processo(virtual_, l1) {
+            if privada_de_um_processo(virtual_, l1) || !difundir {
                 publicar();
             } else {
                 invalidar(virtual_);
@@ -1193,7 +1239,8 @@ pub fn tlbi_de_fora_de_teste(par: &[usize]) -> Option<u64> {
 
 /// Publica a troca de uma entrada **inválida** por uma válida, na entrada
 /// privada de um processo — a página nova de [`mapear_frame`], e as tabelas
-/// que [`descer`] cria no caminho —, sem invalidar a TLB.
+/// que [`descer`] cria no caminho —, sem invalidar a TLB. Na suíte, também
+/// a da compartilhada que `mapear_frame_sem_invalidar_de_teste` mapeia.
 ///
 /// # Por que sem `tlbi`
 ///
