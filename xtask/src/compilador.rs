@@ -228,6 +228,17 @@ const PASSO_DO_EXECUTOR: &str = "executor";
 /// do `xtask`: dentro dele chegaria tarde, com o binário já montado pelo
 /// ligador do perfil. O passo do ambiente recusa o `cargo-features` em
 /// todo manifesto, e os `rustflags` e o `codegen-backend` em todo perfil.
+///
+/// # Os links, desde o lote A12
+///
+/// O passo do ambiente recusava o arquivo do commit num diretório de saída
+/// do cargo pelo caminho dele, e um `target` que é um link — o modo 120000
+/// do índice, sem a barra — para uma pasta do commit passava: os arquivos
+/// dela não começam por `target/`, e, num experimento fora da árvore, com
+/// as horas dos arquivos postas a favor do ataque, o cargo rodou o `xtask`
+/// plantado nela (o achado 3 do adversário do lote A11). O passo recusa
+/// todo link do commit, pelo modo do índice — o repositório não tem nenhum
+/// —, e todo link no caminho de um diretório de saída, no disco.
 const PASSOS_DA_ACAO: [(&str, &str, &[&str]); 4] = [
     (
         "ambiente",
@@ -245,6 +256,8 @@ const PASSOS_DA_ACAO: [(&str, &str, &[&str]); 4] = [
             "erros.extend(manifesto_fora(arquivo))",
             "os.path.samefile(achado, rustup)",
             "arquivo.startswith(saidas)",
+            "if modo == \"120000\":",
+            "if os.path.islink(atual):",
         ],
     ),
     (
@@ -3029,6 +3042,14 @@ mod testes {
                 acao.replacen(", \"RUSTUP_HOME\", \"RUST_BACKTRACE\")", ", \"RUSTUP_HOME\", \"RUST_BACKTRACE\", \"RUSTFLAGS\")", 1),
             ),
             (
+                "sem os links do commit",
+                acao.replace("if modo == \"120000\":", "if modo == \"0\":"),
+            ),
+            (
+                "sem os links no caminho das saídas",
+                acao.replace("if os.path.islink(atual):", "if False:"),
+            ),
+            (
                 "sem o canal fixado no executor",
                 acao.replace("env=ambiente,\n", "\n"),
             ),
@@ -3142,6 +3163,21 @@ mod testes {
         ambiente: &[(&str, String)],
         antes_no_path: Option<&str>,
     ) -> NaAcao {
+        rodar_a_acao_com_links(base, nome, arquivos, &[], forcados, ambiente, antes_no_path)
+    }
+
+    /// Como [`rodar_a_acao`], com os `links` do caso na árvore — o caminho e
+    /// para onde ele aponta —, no commit como os arquivos: o `.gitignore`
+    /// do caso, se ele tem um, decide.
+    fn rodar_a_acao_com_links(
+        base: &Path,
+        nome: &str,
+        arquivos: &[(&str, String)],
+        links: &[(&str, &str)],
+        forcados: &[&str],
+        ambiente: &[(&str, String)],
+        antes_no_path: Option<&str>,
+    ) -> NaAcao {
         let acao = include_str!("../../.github/actions/compilador/action.yml");
         let projeto = super::super::raiz_do_projeto();
         let arvore = base.join(nome);
@@ -3173,6 +3209,11 @@ mod testes {
             if relativo.starts_with("ferramentas/") {
                 tornar_executavel(&arvore.join(relativo));
             }
+        }
+        for (relativo, destino) in links {
+            let caminho = arvore.join(relativo);
+            std::fs::create_dir_all(caminho.parent().expect("a pasta")).expect("a pasta");
+            std::os::unix::fs::symlink(destino, &caminho).expect(relativo);
         }
         let git = |args: &[&str]| {
             let feito = Command::new("git")
@@ -3400,6 +3441,95 @@ mod testes {
                 .collect();
             let r = rodar_a_acao(&base, nome, arquivos, &forcados, ambiente, None);
             if r.passou || !r.saida.contains(&format!("::error::{esperado}")) {
+                cegos.push(format!("{nome}: {}", r.saida));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(cegos.is_empty(), "{cegos:#?}");
+    }
+
+    /// O diretório de saída por um link (no lote A12, o achado 3 do
+    /// adversário do lote A11): um `target` que é um link — o modo 120000 do
+    /// índice, sem a barra — para uma pasta do commit passava pela regra dos
+    /// arquivos do commit num diretório de saída, que casa o caminho, e o
+    /// cargo podia tomar o `xtask` plantado nela pelo que compilou. O passo
+    /// do ambiente recusa, pelo índice, todo link do commit, e, pelo disco,
+    /// todo link no caminho de um diretório de saída: o link `target` e o
+    /// `target` de um diretório de build que é um link reprovam pelas duas
+    /// regras; o link para dentro de um `target`, só pelo índice; e o link
+    /// fora do commit, que o `.gitignore` do caso esconde do índice, só pelo
+    /// disco — cada um com os erros dele, e só eles. Os controles — o
+    /// `target` de verdade, fora do commit, e nenhum — passam.
+    #[test]
+    fn adversario_a11_o_diretorio_de_saida_por_um_link() {
+        let base = base_da_acao("acao-a11-links");
+        let falso = String::from("#!/bin/sh\necho \"o xtask do commit\"\n");
+        let no_indice = "um link no commit";
+        let no_disco = "o diretório de saída do cargo passa pelo link";
+        type Caso = (
+            &'static str,
+            Vec<(&'static str, String)>,
+            Vec<(&'static str, &'static str)>,
+            Vec<String>,
+        );
+        let casos: Vec<Caso> = vec![
+            (
+                "o-link-target",
+                vec![("zz/debug/xtask", falso.clone())],
+                vec![("target", "zz")],
+                vec![
+                    format!("target: {no_indice}"),
+                    format!("target: {no_disco} target, para zz"),
+                ],
+            ),
+            (
+                "o-link-de-um-diretorio-de-build",
+                vec![("zzk/debug/xtask", falso.clone())],
+                vec![("kernel/target", "../zzk")],
+                vec![
+                    format!("kernel/target: {no_indice}"),
+                    format!("kernel/target: {no_disco} kernel/target, para ../zzk"),
+                ],
+            ),
+            (
+                "o-link-para-dentro-de-um-target",
+                vec![],
+                vec![("xtask/src/gerado.rs", "../../target/gerado.rs")],
+                vec![format!("xtask/src/gerado.rs: {no_indice}")],
+            ),
+            (
+                "o-link-fora-do-commit",
+                vec![
+                    (".gitignore", String::from("target\n")),
+                    ("zz/debug/xtask", falso.clone()),
+                ],
+                vec![("target", "zz")],
+                vec![format!("target: {no_disco} target, para zz")],
+            ),
+        ];
+        let mut cegos = Vec::new();
+        for (nome, arquivos, links, esperados) in &casos {
+            let r = rodar_a_acao_com_links(&base, nome, arquivos, links, &[], &[], None);
+            let erros = r
+                .saida
+                .lines()
+                .filter(|l| l.starts_with("::error::"))
+                .count();
+            if r.passou
+                || erros != esperados.len()
+                || !esperados
+                    .iter()
+                    .all(|e| r.saida.contains(&format!("::error::{e}")))
+            {
+                cegos.push(format!("{nome}: {}", r.saida));
+            }
+        }
+        for (nome, arquivos) in [
+            ("o-target-de-verdade", vec![("target/debug/xtask", falso)]),
+            ("sem-link", vec![]),
+        ] {
+            let r = rodar_a_acao_com_links(&base, nome, &arquivos, &[], &[], &[], None);
+            if !r.passou {
                 cegos.push(format!("{nome}: {}", r.saida));
             }
         }
