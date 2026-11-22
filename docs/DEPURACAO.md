@@ -375,7 +375,7 @@ revisão: a referência de uma medida não pode deixar o mesmo rastro que a
 coisa medida — com a cópia de referência escrevendo o mesmo padrão, a
 conferência do fim não via uma apresentação que não escrevesse nada —; e o
 número de uma medida é do emulador em que foi tirado: no QEMU da CI, uma
-tela do ARM custa de três a três vezes e meia a desta máquina.
+tela do ARM custa de três a mais de quatro vezes a desta máquina.
 
 ### Quando a lente não acha nada
 

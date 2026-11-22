@@ -2463,9 +2463,11 @@ pendência #298.
     a pessoa da rodada. A varredura achou mais um caso, o mesmo nas duas
     arquiteturas — `consoles: reabrir encerra a sessao`, que deixava
     registrada a pessoa que entrou —, e ele a tira agora;
-  - os controles do executor provam o laço — ele conta as conferências, e
-    um caso no fim da tabela exige uma por caso começado — e cada campo da
-    impressão do registro, um de cada vez;
+  - os controles do executor provam que o laço chama a conferência depois
+    de cada caso — ele conta as conferências, e um caso no fim da tabela
+    exige uma por caso começado antes dele — e que a impressão do registro
+    vê cinco campos, um de cada vez: o papel de um agente, uma lápide, a
+    ordem dos administradores, as fontes de hora e os editores;
   - o texto: o que o caso da remoção discrimina; que o boot de teste repõe
     também a política, as pessoas e os dispositivos, e o que isso diz da
     ordem dos casos; o que a conferência não devolve; e os erros de fato e
@@ -2515,6 +2517,46 @@ pendência #298.
   no hospedeiro, um reforçado e um ajustado, e as mutações do lote (*As do
   lote A13*, no
   [README](../README.md#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
+
+  Depois do lote A13, o lote ICACHE-5, [B], fez os achados do
+  adversário da rodada 5 no kernel e os itens do revisor da rodada 5 sobre
+  os lotes EXECUTADO e ICACHE-4, sem autoridade, regra, registro,
+  identidade, persistência ou semântica de auditoria novos, e só na suíte —
+  a anotação da remoção mora nos backends da paginação, atrás de
+  `#[cfg(feature = "modo-teste")]`, e fora da suíte o kernel compila igual,
+  menos o número da linha dos pânicos que vêm depois dela:
+  - `smp: desmapear do kernel vale em todo nucleo` vê a ordem da remoção: a
+    que avisa os outros núcleos antes de tirar a entrada da tabela passava
+    nas duas arquiteturas — o emulador não percorre por especulação, e os
+    leitores não tocam a página na janela —; cada backend anota agora o
+    último aviso, com o endereço e se a entrada ainda estava na tabela, e o
+    caso reprova o que saiu com ela;
+  - a conferência dos segredos procura também cada palavra inteira de seis
+    bytes ou mais de cada senha, e lê o log do caso inteiro, desde a marca
+    que o executor tira no começo dele: a primeira palavra de uma senha ia
+    ao log e à auditoria sem ela ver;
+  - o laço do executor junta ao resultado o que a conferência diz, e um
+    controle o prova; o da política muda nove coisas, e o estendido do
+    registro, doze — os campos que a comparação e a impressão veem e que
+    os controles do lote ICACHE-4 não mudavam;
+  - os casos que conferem um `person.login` o procuram desde uma marca, e
+    não no anel inteiro, onde a devolução do registro de pessoas grava o
+    dela;
+  - o texto: a ordem da remoção, a conferência dos segredos e os controles
+    do executor, e os erros de fato e as precisões do revisor da rodada 5
+    nos lotes EXECUTADO e ICACHE-4 ([README](../README.md#vários-núcleos),
+    "A ordem da remoção"; [Consoles](../README.md#consoles), "A conferência
+    dos segredos"; e [Testes](../README.md#testes)).
+
+  Fica: a chave de um objeto JSON que uma pessoa entrada digita no console
+  vai como veio ao `detalhe` da auditoria e ao journal — o log não a leva
+  —, e o que a auditoria grava ali é a AUD-CAMPO, uma decisão [C] com o
+  dono do projeto; as corridas da remoção que o emulador não mostra — a
+  que não espera a confirmação dos outros núcleos, ou que grava o endereço
+  do descarte depois de avisar — e o percurso especulativo, que só um
+  processador de verdade faz; o laço que jogasse fora o resultado inteiro
+  do caso, que um controle de dentro não alcança; e a `executado:`, que diz
+  que o gate permitiu e o comando começou, e não que ele teve efeito.
 
 ### I7
 

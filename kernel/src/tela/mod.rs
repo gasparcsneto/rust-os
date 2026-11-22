@@ -843,9 +843,10 @@ impl Tela {
     /// otimizado com o `core`, em qualquer perfil: uma tela em 1,8 ms no x86
     /// e em 2,3 no ARM, em depuração; em release, de 1,5 para 1,1 ms no
     /// x86, e de 3,5 para 1,5 ms no ARM — no QEMU 8.2 de onde a correção foi
-    /// medida. No QEMU 10.2 da CI, o x86 fica perto disso, de 1,4 a 1,7 ms,
-    /// e o ARM custa de duas a três vezes mais: de 5,4 a 7,0 ms em
-    /// depuração, e 4,9 em release (as CIs 532 a 536; o release, da 535).
+    /// medida. No QEMU 10.2 da CI, o x86 fica perto disso, de 1,4 a 2,2 ms,
+    /// e o ARM custa de duas a três vezes e meia mais: de 5,4 a 7,8 ms em
+    /// depuração, e 4,9 em release (as CIs 532 a 536 e a 538; o release, da
+    /// 535).
     /// Quem mede, a cada rodada da suíte, é `tela: apresentar nao regrediu
     /// em ordem de grandeza`.
     ///

@@ -2854,9 +2854,9 @@ fn medir_o_desenho(tela: &crate::tela::Tela) -> Resultado {
 /// das mesmas rodadas chegaram a 798% e a 559%.
 ///
 /// A premissa é do QEMU 8.2. No QEMU 10.2 da CI, uma tela do ARM custa de
-/// 5,4 a 7,0 ms em depuração (as CIs 532 a 536), umas três vezes a daqui, e
-/// uma faixa perto de um milissegundo e meio; a CI 535 passou com o
-/// hospedeiro quieto, a 104%.
+/// 5,4 a 7,8 ms em depuração (as CIs 532 a 536 e a 538), de três a mais de
+/// quatro vezes a daqui, e uma faixa perto de um milissegundo e meio; a CI
+/// 535 passou com o hospedeiro quieto, a 104%.
 ///
 /// # Por que quinze pares
 ///
