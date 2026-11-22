@@ -19262,6 +19262,285 @@ fn consoles_sem_ninguem_o_comando_vai_sem_o_resumo() -> Resultado {
     resultado
 }
 
+/// As linhas que o interpretador deixou no log — as do subsistema
+/// `console` — desde `marca`, na ordem. Erro se o anel já não alcança a
+/// marca: lida num anel que rolou por cima dela, uma ausência diria "não
+/// saiu" sem ter lido.
+fn linhas_do_console_desde(
+    marca: u64,
+) -> Result<alloc::vec::Vec<alloc::string::String>, &'static str> {
+    // O anel guarda 128 registros: lidos todos, o primeiro é o mais antigo
+    // que ainda está nele.
+    let mut primeira = None;
+    let mut linhas = alloc::vec::Vec::new();
+    crate::log::ultimos(128, crate::log::Level::Trace, |r| {
+        primeira.get_or_insert(r.seq);
+        if r.seq >= marca && r.subsistema == "console" {
+            linhas.push(alloc::string::String::from(r.mensagem()));
+        }
+    });
+    if primeira.is_some_and(|p| p > marca) {
+        return Err("o anel do log rolou por cima das linhas que o caso ia ler");
+    }
+    Ok(linhas)
+}
+
+/// O lote EXECUTADO: a linha `executado:` do interpretador sai só depois
+/// que o gate decidiu permitir — com a licença na mão, antes de executar —,
+/// e a recusa e o parâmetro inválido deixam a linha deles, que não começa
+/// por `executado:` (ver `interpretador::despachar`). A linha saía antes da
+/// validação e da decisão: o comando negado aparecia como executado, e uma
+/// espera da fumaça pelo `executado:` passava com ele (o informativo 9 do
+/// adversário do lote FUMAÇA-2). Num console de Terminal sem programa nele:
+///
+/// - sem ninguém entrado, o comando que existe e a linha que não é comando:
+///   `negado:`, com `DENY_NOT_AUTHENTICATED` e o método da auditoria — o
+///   nome do comando, ou o marcador —, nada do que se digitou, e nenhum
+///   `executado:`;
+/// - com a pessoa de teste (`operador`), o comando que o papel dela não
+///   alcança (`keyboard.read`): `negado:`, com o código e o número da
+///   recusa na auditoria, e nenhum `executado:`;
+/// - o parâmetro inválido: `parametro invalido:`, com o campo que o comando
+///   declara; o que ele não declara — texto de quem digitou — vai como o
+///   marcador, e não fica no log;
+/// - o comando permitido (`log.tail`): `executado:` uma vez, com a decisão
+///   gravada, e o próprio handler já vê a linha no anel — ela sai antes de
+///   executar;
+/// - o adiado pelo caminho da auditoria — o `net.send` com `wait`, com o
+///   caminho cheio —: nada na primeira vez, nem linha nem registro, e
+///   `executado:` uma vez só, quando a reexecução roda — e o eco devolve o
+///   que ela mandou.
+///
+/// E a frase na tela é a de sempre, em cada um.
+fn consoles_o_executado_sai_depois_da_decisao() -> Resultado {
+    use crate::autorizacao::{COMANDO_DESCONHECIDO, Chamador};
+    use crate::interpretador::{CAMPO_NAO_DECLARADO, PAPEL_DA_PESSOA_DE_TESTE, PESSOA_DE_TESTE};
+    use crate::oleoduto::TETO;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    /// Texto de quem digitou, que o log não leva: a linha que não é
+    /// comando, e a chave que o comando não declara.
+    const NAO_E_COMANDO: &str = "carambola-no-pe";
+    const CHAVE_DE_QUEM_DIGITOU: &str = "graviola-madura";
+    let k = crate::pseudoterminal::donos()
+        .iter()
+        .position(Option::is_none)
+        .ok_or("nenhum pseudo-terminal livre para o console do caso")?;
+    let console = Console::Terminal(k as u16);
+    let em = console.texto();
+    // O que o console imprimiu desde a última leitura.
+    let tela = || {
+        alloc::string::String::from_utf8_lossy(&crate::pseudoterminal::tirar_de_teste(k as u8))
+            .into_owned()
+    };
+    // As linhas trazem `linha` uma vez, e nenhum outro desfecho do mesmo
+    // comando neste console: nem um `executado:` junto do `negado:`, nem
+    // dois `executado:`.
+    let uma_e_so = |linhas: &[alloc::string::String], linha: &str, comando: &str| {
+        let desfechos = ["executado: ", "negado: ", "parametro invalido: "];
+        let deste = |l: &str| {
+            desfechos.iter().any(|d| {
+                l.strip_prefix(d)
+                    .and_then(|resto| resto.strip_prefix(comando))
+                    .and_then(|resto| resto.strip_prefix(" ("))
+                    .and_then(|resto| resto.split_once(") em "))
+                    .is_some_and(|(_, onde)| {
+                        onde == em
+                            || onde
+                                .strip_prefix(em.as_str())
+                                .is_some_and(|r| r.starts_with(':'))
+                    })
+            })
+        };
+        linhas.iter().filter(|l| l.as_str() == linha).count() == 1
+            && linhas.iter().filter(|l| deste(l)).count() == 1
+    };
+    let nada_que_se_digitou = |marca: u64, digitado: &str| {
+        let mut levou = false;
+        crate::log::ultimos(128, crate::log::Level::Trace, |r| {
+            levou |= r.seq >= marca && r.mensagem().contains(digitado);
+        });
+        !levou
+    };
+    crate::interpretador::abrir_console(console);
+    let _ = tela();
+    let resultado = (|| -> Resultado {
+        // Sem ninguém entrado: a recusa do gate, com o método da auditoria.
+        for (linha, metodo) in [
+            ("agent.ping", "agent.ping"),
+            (NAO_E_COMANDO, COMANDO_DESCONHECIDO),
+        ] {
+            let marca = crate::log::total_emitidos();
+            crate::interpretador::confirmar_de_teste(console, linha);
+            let linhas = linhas_do_console_desde(marca)?;
+            let negado =
+                alloc::format!("negado: {metodo} (pessoa) em {em}: DENY_NOT_AUTHENTICATED");
+            if !uma_e_so(&linhas, &negado, metodo) {
+                crate::log_error!("teste", "linhas: {:?}", linhas);
+                return Err("sem ninguem entrado, o log nao disse so o negado do comando");
+            }
+            if !nada_que_se_digitou(marca, NAO_E_COMANDO) {
+                return Err("sem ninguem entrado, a linha que nao e comando foi ao log");
+            }
+            if !tela().contains("negado: DENY_NOT_AUTHENTICATED; `login` para entrar") {
+                return Err("sem ninguem entrado, a frase da recusa na tela mudou");
+            }
+        }
+
+        let id = crate::interpretador::entrar_para_teste(
+            console,
+            PESSOA_DE_TESTE,
+            PAPEL_DA_PESSOA_DE_TESTE,
+        );
+
+        // A recusa do gate: o código, e o número do registro dela.
+        let antes = crate::autorizacao::ultimo_registro();
+        let marca = crate::log::total_emitidos();
+        crate::interpretador::confirmar_de_teste(console, "keyboard.read");
+        let gravadas = registros_depois(antes, |e| e.metodo == "keyboard.read");
+        let [(registro, recusa)] = gravadas.as_slice() else {
+            return Err("a recusa do keyboard.read nao foi gravada uma vez");
+        };
+        if recusa.codigo != Codigo::DenyPermission {
+            crate::log_error!("teste", "{:?}", recusa);
+            return Err("o keyboard.read do operador nao foi DENY_PERMISSION");
+        }
+        let linhas = linhas_do_console_desde(marca)?;
+        let negado = alloc::format!(
+            "negado: keyboard.read (pessoa) em {em}: DENY_PERMISSION; registro {registro}"
+        );
+        if !uma_e_so(&linhas, &negado, "keyboard.read") {
+            crate::log_error!("teste", "linhas: {:?}", linhas);
+            return Err("o comando negado pelo gate nao deixou so o negado no log");
+        }
+        let na_tela = tela();
+        if !na_tela.contains("negado: Seu papel (operador) nao permite keyboard.read")
+            || !na_tela.contains(&alloc::format!("(DENY_PERMISSION; registro {registro})"))
+        {
+            crate::log_error!("teste", "tela: {:?}", na_tela);
+            return Err("a frase da recusa do gate na tela mudou");
+        }
+
+        // O parâmetro inválido: o campo que o comando declara, e o marcador
+        // no lugar do que ele não declara.
+        let nao_declarado = alloc::format!(r#"{{"{CHAVE_DE_QUEM_DIGITOU}":1}}"#);
+        for (params, campo, dito) in [
+            (r#"{"count":"quatro"}"#, "count", "count"),
+            (
+                nao_declarado.as_str(),
+                CAMPO_NAO_DECLARADO,
+                CHAVE_DE_QUEM_DIGITOU,
+            ),
+        ] {
+            let antes = crate::autorizacao::ultimo_registro();
+            let marca = crate::log::total_emitidos();
+            crate::interpretador::confirmar_de_teste(console, &alloc::format!("log.tail {params}"));
+            let gravados = registros_depois(antes, |e| e.metodo == "log.tail");
+            if gravados.len() != 1 || gravados[0].1.codigo != Codigo::InvalidArgument {
+                crate::log_error!("teste", "{:?}", gravados);
+                return Err("o parametro invalido nao foi gravado uma vez");
+            }
+            let linhas = linhas_do_console_desde(marca)?;
+            let invalido = alloc::format!("parametro invalido: log.tail (pessoa) em {em}: {campo}");
+            if !uma_e_so(&linhas, &invalido, "log.tail") {
+                crate::log_error!("teste", "linhas: {:?}", linhas);
+                return Err("o parametro invalido nao deixou so a linha dele no log");
+            }
+            if !nada_que_se_digitou(marca, CHAVE_DE_QUEM_DIGITOU) {
+                return Err("a chave que o comando nao declara foi ao log");
+            }
+            if !tela().contains(&alloc::format!("parametro invalido: {dito}")) {
+                return Err("a frase do parametro invalido na tela mudou");
+            }
+        }
+
+        // O permitido: `executado:` uma vez, com a decisão gravada — e o
+        // handler do `log.tail` já vê a linha no anel: ela saiu antes de
+        // executar.
+        let antes = crate::autorizacao::ultimo_registro();
+        let marca = crate::log::total_emitidos();
+        crate::interpretador::confirmar_de_teste(console, r#"log.tail {"count":16}"#);
+        let gravados = registros_depois(antes, |e| e.metodo == "log.tail");
+        if gravados.len() != 1 || gravados[0].1.codigo != Codigo::Allow {
+            crate::log_error!("teste", "{:?}", gravados);
+            return Err("o log.tail permitido nao foi gravado uma vez");
+        }
+        let linhas = linhas_do_console_desde(marca)?;
+        let executado = alloc::format!("executado: log.tail (pessoa) em {em}");
+        if !uma_e_so(&linhas, &executado, "log.tail") {
+            crate::log_error!("teste", "linhas: {:?}", linhas);
+            return Err("o comando permitido nao deixou so o executado no log");
+        }
+        if !tela().contains(&executado) {
+            return Err("a linha executado saiu depois de executar: o log.tail nao a viu");
+        }
+
+        // O adiado pelo caminho da auditoria: nada na primeira vez; a linha
+        // sai uma vez, quando a reexecução roda.
+        esperar_cedendo(
+            || crate::rede::pilha::resumo().is_some_and(|r| r.endereco.is_some()),
+            500,
+        )
+        .map_err(|_| "a pilha nao tem endereco para a conexao do caso")?;
+        let quem = Chamador::Pessoa(id);
+        let c = aberta_com_o_eco(quem)?;
+        let r = (|| -> Resultado {
+            cabeca_acima_do_teto_do_caminho()?;
+            let cabeca = crate::autorizacao::ultimo_registro();
+            crate::oleoduto::consumidor_de_teste(Some(cabeca.saturating_sub(TETO)));
+            let marca = crate::log::total_emitidos();
+            crate::interpretador::confirmar_de_teste(
+                console,
+                &alloc::format!(r#"net.send {{"connection":{c},"content":"adiado","wait":10000}}"#),
+            );
+            if !crate::interpretador::ocupado(console) {
+                return Err("o envio da pessoa nao foi adiado com o caminho da auditoria cheio");
+            }
+            let linhas = linhas_do_console_desde(marca)?;
+            if linhas.iter().any(|l| l.contains("net.send")) {
+                crate::log_error!("teste", "linhas: {:?}", linhas);
+                return Err("o envio adiado deixou linha no log antes de rodar");
+            }
+            if !registros_depois(cabeca, |e| e.metodo == "net.send").is_empty() {
+                return Err("o envio adiado foi gravado antes de rodar");
+            }
+            // O journal anda: a espera acaba, e o interpretador executa o
+            // envio de novo, pelo gate.
+            crate::oleoduto::consumidor_de_teste(Some(crate::autorizacao::ultimo_registro()));
+            let h = crate::autorizacao::ultimo_registro();
+            esperar_cedendo(
+                || {
+                    let _ = crate::interpretador::retomar_suspensos();
+                    !crate::interpretador::ocupado(console)
+                },
+                800,
+            )
+            .map_err(|_| "a espera do envio adiado nao acabou")?;
+            let linhas = linhas_do_console_desde(marca)?;
+            let executado = alloc::format!("executado: net.send (pessoa) em {em}");
+            if !uma_e_so(&linhas, &executado, "net.send") {
+                crate::log_error!("teste", "linhas: {:?}", linhas);
+                return Err("o envio adiado nao deixou um executado so, o da reexecucao");
+            }
+            let gravados = registros_depois(h, |e| e.metodo == "net.send");
+            if gravados.len() != 1 || gravados[0].1.codigo != Codigo::Allow {
+                crate::log_error!("teste", "{:?}", gravados);
+                return Err("a reexecucao do envio adiado nao foi uma decisao nova do gate");
+            }
+            if ler_da_conexao(quem, c, 6)? != b"adiado" {
+                return Err("o eco nao devolveu o envio da reexecucao");
+            }
+            Ok(())
+        })();
+        crate::oleoduto::consumidor_de_teste(None);
+        fechar_conexao(quem, c);
+        r
+    })();
+    crate::interpretador::fechar_console(console, "fim do caso");
+    let _ = tela();
+    resultado
+}
+
 /// A troca da própria senha antes do login — o item 8 do adversário do
 /// lote B do #448: `senha <algo>` num console sem ninguém era recusado no
 /// console, antes da pergunta de quem está entrado, e não gravava nada,
@@ -44914,6 +45193,13 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "suite: o executor ve e devolve o registro de identidade que o caso mudou",
         f: suite_o_executor_ve_e_devolve_o_registro_de_identidade,
+    },
+    // O lote EXECUTADO, no fim pelo mesmo motivo: a linha `executado:` do
+    // interpretador depois da decisão do gate, e as linhas da recusa e do
+    // parâmetro inválido (o informativo 9 do adversário do lote FUMAÇA-2).
+    Caso {
+        nome: "consoles: o log diz executado so depois da decisao do gate, o adiado uma vez, e a recusa e o parametro invalido em linha propria",
+        f: consoles_o_executado_sai_depois_da_decisao,
     },
 ];
 

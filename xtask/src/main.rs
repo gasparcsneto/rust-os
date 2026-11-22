@@ -30666,6 +30666,128 @@ mod testes {
         assert_eq!(diz_desde(resposta, 116, press, "mouse"), Ok(false));
     }
 
+    /// A espera pelo `executado:` reprova com a recusa do mesmo comando pela
+    /// mesma origem (o lote EXECUTADO): o kernel escreve a `executado:` só
+    /// depois que o gate permitiu, e no lugar dela, o `negado:` — com o
+    /// código e o registro — ou o `parametro invalido:` — com o campo —, em
+    /// qualquer console. Mesmo com a esperada junto, a recusa reprova, com a
+    /// linha dela na mensagem. A de outro comando, a de outra origem, a que
+    /// só começa igual, a de outro subsistema e uma linha que não é recusa
+    /// não reprovam; e as outras esperas não leem recusa de comando.
+    #[test]
+    fn a_espera_pelo_executado_reprova_a_recusa_do_mesmo_comando() {
+        use super::*;
+        let r = |seq: u64, subsistema: &str, mensagem: &str| RegistroDoLog {
+            seq,
+            uptime_ms: seq * 10,
+            subsistema: subsistema.into(),
+            mensagem: mensagem.into(),
+        };
+        let executado = Esperada::Executado("executado: agent.ping (pessoa)");
+        let feito = r(140, "console", "executado: agent.ping (pessoa) em console");
+        assert_eq!(
+            executado.nas(std::slice::from_ref(&feito), "interpretador"),
+            Ok(true)
+        );
+        // O negado e o parâmetro inválido, no console físico e num Terminal.
+        let negado = r(
+            141,
+            "console",
+            "negado: agent.ping (pessoa) em console: DENY_PERMISSION; registro 812",
+        );
+        assert_eq!(
+            executado.nas(std::slice::from_ref(&negado), "interpretador"),
+            Err("interpretador: o kernel recusou o comando: [141] negado: agent.ping (pessoa) em console: DENY_PERMISSION; registro 812".into())
+        );
+        let sem_login = r(
+            142,
+            "console",
+            "negado: agent.ping (pessoa) em terminal:1: DENY_NOT_AUTHENTICATED",
+        );
+        assert!(executado.nas(&[sem_login], "interpretador").is_err());
+        let invalido = r(
+            143,
+            "console",
+            "parametro invalido: agent.ping (pessoa) em console: (campo nao declarado)",
+        );
+        assert!(executado.nas(&[invalido], "interpretador").is_err());
+        assert!(
+            executado
+                .nas(&[negado.clone(), feito.clone()], "interpretador")
+                .is_err()
+        );
+        assert!(executado.nas(&[feito, negado], "interpretador").is_err());
+        // Não são a recusa deste pedido.
+        let outras = [
+            r(
+                150,
+                "console",
+                "negado: agent.ping (agente 0) em console: DENY_ROLE; registro 9",
+            ),
+            r(
+                151,
+                "console",
+                "negado: agent.pings (pessoa) em console: DENY_PERMISSION",
+            ),
+            r(
+                152,
+                "console",
+                "negado: system.info (pessoa) em console: DENY_PERMISSION",
+            ),
+            r(
+                153,
+                "console",
+                "negado: agent.ping (pessoas) em console: DENY_PERMISSION",
+            ),
+            r(
+                154,
+                "ui",
+                "negado: agent.ping (pessoa) em console: DENY_PERMISSION",
+            ),
+            r(155, "console", "negado: agent.ping (pessoa)"),
+            r(
+                156,
+                "console",
+                "executado: agent.ping (agente 0) em console",
+            ),
+            r(
+                157,
+                "console",
+                "o console mudou durante a espera; nada a mostrar",
+            ),
+        ];
+        assert_eq!(executado.nas(&outras, "interpretador"), Ok(false));
+        // A ação e a linha de um programa não leem a recusa de um comando.
+        let press = Esperada::Acao {
+            origem: "pessoa",
+            acao: "press",
+            elemento: 5,
+        };
+        let dita = Esperada::DoPrograma("negado: agent.ping (pessoa) em console: DENY_PERMISSION");
+        let recusa = [r(
+            160,
+            "console",
+            "negado: agent.ping (pessoa) em console: DENY_PERMISSION",
+        )];
+        assert_eq!(press.nas(&recusa, "mouse"), Ok(false));
+        assert_eq!(dita.nas(&recusa, "formulario"), Ok(false));
+        // Pela resposta do `log.tail`, como a espera a lê: o negado de
+        // depois do pedido reprova; o de antes, não.
+        let resposta = r#"{"jsonrpc":"2.0","id":7,"result":{"records":[{"seq":170,"uptime_ms":24090,"level":"info","subsystem":"console","message":"negado: system.uptime (agente 0) em console: DENY_PERMISSION; registro 31"}],"total_emitted":171}}"#;
+        let uptime = Esperada::Executado("executado: system.uptime (agente 0)");
+        assert!(diz_desde(resposta, 170, uptime, "arvore").is_err());
+        assert_eq!(diz_desde(resposta, 171, uptime, "arvore"), Ok(false));
+        // E numa espera por um predicado: a recusa conta como não achada, e
+        // vai na mensagem do prazo.
+        let leitura = LeituraDoLog::desde(170, "terminal");
+        assert!(!leitura.achou(resposta, uptime));
+        let prazo = leitura.no_prazo("terminal: prazo".into());
+        assert!(
+            prazo.ends_with("terminal: o kernel recusou o comando: [170] negado: system.uptime (agente 0) em console: DENY_PERMISSION; registro 31"),
+            "{prazo}"
+        );
+    }
+
     /// Uma leitura do log que não alcança a primeira linha que a espera
     /// ainda não leu é erro, com quantas faltaram: entraram mais linhas que o
     /// `count`, e a procurada podia estar entre elas (o achado 6 do
