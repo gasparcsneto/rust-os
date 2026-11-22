@@ -77,7 +77,10 @@
 //!   A12 — os links do commit, e o config do cargo — o do executor desde o
 //!   lote A9, os outros desde o lote A10 —, e o das invariantes, que o job
 //!   de lints liga pela entrada `invariantes: true` no `with:` do passo dela
-//!   ([`conferir_a_acao`], [`as_invariantes_na_acao`]); e o canário, o
+//!   ([`conferir_a_acao`], [`as_invariantes_na_acao`]) — desde o lote A13,
+//!   cada passo dela só com as chaves que a leitura lê nele, sem `if:`,
+//!   `continue-on-error:` nem `env:` a mais
+//!   ([`linhas_que_o_passo_da_acao_nao_le`]) —; e o canário, o
 //!   único que sobrepõe — ele
 //!   testa o candidato —, não roda nos pushes, não usa o cache da CI, não
 //!   publica proveniência e repete os comandos do job de lints;
@@ -365,6 +368,16 @@ const CHAVES_FORA_DO_PASSO_DA_ACAO: [&str; 2] = ["if", "continue-on-error"];
 /// entra aqui, de propósito, com a revisão. Desde o lote A12 (o achado 1 do
 /// adversário do lote A11): a leitura falha fechada.
 const CHAVES_DO_PASSO_DA_ACAO: [&str; 4] = ["name", "id", "uses", "with"];
+
+/// As chaves que a leitura de um passo da ação do compilador
+/// ([`PASSOS_DA_ACAO`]) aceita em todos eles, na forma simples: o nome, o
+/// `id` e o `shell`; mais o `run: |` com o script e, só no das invariantes, o
+/// `if:` da entrada e o `env:` com o toolchain fixado, que
+/// [`conferir_a_acao`] exige. Outra — o `if:` de outro passo, o
+/// `continue-on-error:`, um `env:` a mais, o `working-directory:` — reprova
+/// ([`linhas_que_o_passo_da_acao_nao_le`]). Desde o lote A13 (o M4 do
+/// adversário do lote A12).
+const CHAVES_DOS_PASSOS_DA_ACAO: [&str; 3] = ["name", "id", "shell"];
 
 /// O workflow do canário: o único que sobrepõe o compilador.
 const CANARIO: &str = ".github/workflows/canario.yml";
@@ -2241,8 +2254,10 @@ fn chaves_de_cache<'a>(linhas: &[Linha<'a>]) -> Vec<&'a str> {
 }
 
 /// A ação do compilador — `texto`, o [`ACAO_DO_COMPILADOR`] — tem os passos
-/// de [`PASSOS_DA_ACAO`], na ordem, cada um com o `shell:` dele e com cada
-/// marca dele numa linha de código do script; nos dois em Python, a tupla
+/// de [`PASSOS_DA_ACAO`], na ordem, cada um com o `shell:` dele, só com as
+/// chaves que a leitura lê nele ([`linhas_que_o_passo_da_acao_nao_le`],
+/// desde o lote A13) e com cada marca dele numa linha de código do script;
+/// nos dois em Python, a tupla
 /// `DIRETORIOS` com cada diretório de build do `xtask` como um item
 /// ([`DIRETORIOS_DOS_BUILDS`]); no do executor, as formas dos rustflags de
 /// [`FORMAS_DOS_RUSTFLAGS`] e as tabelas de [`TABELAS_DO_CONFIG`]; a entrada
@@ -2298,6 +2313,14 @@ fn conferir_a_acao(texto: &str) -> Vec<String> {
             ));
         }
         anterior = Some((id, aqui));
+        for linha in linhas_que_o_passo_da_acao_nao_le(&linhas, aqui, id) {
+            fora.push(format!(
+                "{ACAO_DO_COMPILADOR}: `{linha}` no passo `{id}`, que a conferência não lê — ela lê \
+                 nele só o `name:`, o `id:`, o `shell:` e o `run:`, e, no das invariantes, o `if:` \
+                 da entrada e o `env:` com o toolchain fixado: um `if:`, um `continue-on-error:` ou \
+                 um `env:` a mais mudam se ele roda, se o job para com ele, e o que ele roda"
+            ));
+        }
         let Some((shell, script)) = passo_da_acao(texto, id) else {
             fora.push(format!(
                 "{ACAO_DO_COMPILADOR}: o passo `{id}` sem `shell:` e `run:` que se leiam"
@@ -2385,6 +2408,78 @@ fn conferir_a_acao(texto: &str) -> Vec<String> {
                  passos seguintes",
                 l.texto
             ));
+        }
+    }
+    fora
+}
+
+/// As linhas do passo `id` da ação do compilador — o item de `linhas`, as
+/// de código dela, que tem a linha `i`, a do `id:` — que a leitura não
+/// reconhece ([`CHAVES_DOS_PASSOS_DA_ACAO`]). Ela falha fechada, como a do
+/// passo que usa a ação nos workflows ([`linhas_que_o_passo_nao_le`]).
+///
+/// # Por quê, desde o lote A13
+///
+/// [`conferir_a_acao`] conferia que cada passo existe, na ordem, com o
+/// `shell:` e as marcas do script, mas nenhuma regra lia as outras chaves
+/// dele: um `if: false` no passo do ambiente o pulava, um
+/// `continue-on-error: true` no das invariantes deixava o job de lints verde
+/// com elas reprovadas, e um `RUSTC_WRAPPER` no `env:` delas escolhia o
+/// programa que compila o `xtask` — e o `cargo xtask invariantes` passava. A
+/// regra do lote A11 (sem `if:` nem `continue-on-error:`) valia para o passo
+/// do workflow que usa a ação, e não para os passos de dentro dela (o M4 do
+/// adversário do lote A12). A ação continua a raiz da confiança: um passo
+/// novo, ou o script de um deles, muda o que ela faz, com a revisão.
+fn linhas_que_o_passo_da_acao_nao_le<'a>(linhas: &[Linha<'a>], i: usize, id: &str) -> Vec<&'a str> {
+    let Some((comeco, fim, coluna)) = item_da_linha(linhas, i) else {
+        return vec![linhas[i].texto];
+    };
+    let das_invariantes = id == "invariantes";
+    let depois = linhas[comeco].texto[1..].trim_start();
+    let mut passo: Vec<(usize, &'a str, usize)> = Vec::new();
+    if let Some(coluna) = coluna.filter(|_| !depois.is_empty()) {
+        passo.push((comeco, depois, coluna));
+    }
+    passo.extend(
+        (comeco + 1..fim)
+            .filter(|&k| !linhas[k].texto.is_empty())
+            .map(|k| (k, linhas[k].texto, linhas[k].recuo)),
+    );
+    // A chave aberta — o `run:` com o script, o `env:` com as entradas — e
+    // a coluna dela; e a das entradas do `env:`.
+    let mut aberta: Option<(&str, usize)> = None;
+    let mut entradas: Option<usize> = None;
+    let mut fora = Vec::new();
+    for (k, texto, recuo) in passo {
+        let lida = if Some(recuo) == coluna {
+            aberta = None;
+            entradas = None;
+            match chave_e_valor(texto) {
+                Some(("run", "|" | "|-")) => {
+                    aberta = Some(("run", recuo));
+                    true
+                }
+                Some(("env", "")) if das_invariantes => {
+                    aberta = Some(("env", recuo));
+                    true
+                }
+                Some(("if", "inputs.invariantes == 'true'")) if das_invariantes => true,
+                _ => chave_simples(texto)
+                    .is_some_and(|(chave, _)| CHAVES_DOS_PASSOS_DA_ACAO.contains(&chave)),
+            }
+        } else {
+            match aberta {
+                Some(("run", da_chave)) => recuo > da_chave,
+                Some(("env", da_chave)) if recuo > da_chave => {
+                    *entradas.get_or_insert(recuo) == recuo
+                        && chave_e_valor(texto)
+                            == Some(("RUSTUP_TOOLCHAIN", "${{ steps.conferir.outputs.canal }}"))
+                }
+                _ => false,
+            }
+        };
+        if !lida {
+            fora.push(linhas[k].texto);
         }
     }
     fora
@@ -5273,6 +5368,72 @@ jobs:
                     l.texto
                 );
             }
+        }
+    }
+
+    /// Os passos da própria ação falham fechados (no lote A13, o M4 do
+    /// adversário do lote A12): o `if:` no passo do ambiente, o
+    /// `continue-on-error:` e o embrulho do compilador no `env:` das
+    /// invariantes, o `working-directory:` no do executor, o `env:` no do
+    /// conferir e outro `if:` nas invariantes reprovam, cada linha uma vez,
+    /// com o passo; a ação de hoje passa.
+    #[test]
+    fn adversario_a12_os_passos_da_acao_falham_fechados() {
+        let lidas = |acao: &str| -> Vec<String> {
+            conferir_a_acao(acao)
+                .into_iter()
+                .filter(|f| f.contains("que a conferência não lê"))
+                .collect()
+        };
+        assert_eq!(lidas(ACAO), Vec::<String>::new());
+        for (rotulo, velho, novo, linhas) in [
+            (
+                "o if no ambiente",
+                "    - id: ambiente\n",
+                "    - id: ambiente\n      if: false\n",
+                vec!["`if: false` no passo `ambiente`"],
+            ),
+            (
+                "o continue-on-error nas invariantes",
+                "      if: inputs.invariantes == 'true'\n",
+                "      if: inputs.invariantes == 'true'\n      continue-on-error: true\n",
+                vec!["`continue-on-error: true` no passo `invariantes`"],
+            ),
+            (
+                "o embrulho no env das invariantes",
+                "        RUSTUP_TOOLCHAIN: ${{ steps.conferir.outputs.canal }}\n",
+                "        RUSTUP_TOOLCHAIN: ${{ steps.conferir.outputs.canal }}\n        RUSTC_WRAPPER: ./x\n",
+                vec!["`RUSTC_WRAPPER: ./x` no passo `invariantes`"],
+            ),
+            (
+                "o diretorio do executor",
+                "    - id: executor\n",
+                "    - id: executor\n      working-directory: kernel\n",
+                vec!["`working-directory: kernel` no passo `executor`"],
+            ),
+            (
+                "o env no conferir",
+                "    - id: conferir\n",
+                "    - id: conferir\n      env:\n        RUSTFLAGS: -Clinker=./x\n",
+                vec![
+                    "`env:` no passo `conferir`",
+                    "`RUSTFLAGS: -Clinker=./x` no passo `conferir`",
+                ],
+            ),
+            (
+                "outro if nas invariantes",
+                "      if: inputs.invariantes == 'true'\n",
+                "      if: inputs.invariantes == 'true' && false\n",
+                vec!["`if: inputs.invariantes == 'true' && false` no passo `invariantes`"],
+            ),
+        ] {
+            let acao = ACAO.replacen(velho, novo, 1);
+            assert_ne!(acao, ACAO, "{rotulo}");
+            let fora = lidas(&acao);
+            assert!(
+                fora.len() == linhas.len() && fora.iter().zip(&linhas).all(|(f, l)| f.contains(l)),
+                "{rotulo}: {fora:#?}"
+            );
         }
     }
 
