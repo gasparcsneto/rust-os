@@ -24827,12 +24827,14 @@ const PERIODO_DO_TIMER_MS: u64 = 10;
 /// que rola o console logo depois do `system.info` de depois entra nas
 /// apresentações e nas linhas da janela, e o tempo em que ela mascarou o
 /// núcleo dos dispositivos, não — fica fora dos tiques. No retrato de antes
-/// é o contrário: o que acontece entre o `system.info` e o `log.tail` dele
-/// conta nos tiques, e não nas apresentações nem nas linhas. A borda é de
-/// uns poucos pedidos, mas uma apresentação inteira cabe nela: a linha pode
-/// contar a menos, no tempo mascarado, até a apresentação que ela mostra
-/// (o revisor do lote FUMAÇA-USB, numa rodada com uma rolagem e ~30 ms sem
-/// tique). O ping não muda: o cronômetro para antes do retrato de depois.
+/// é o contrário: o que acontece entre o `system.info` e o `display.info`
+/// dele conta nos tiques, e não nas apresentações nem nas linhas; entre o
+/// `display.info` e o `log.tail`, nos tiques e nas apresentações, e não nas
+/// linhas. A borda é de uns poucos pedidos, mas uma apresentação inteira
+/// cabe nela: a linha pode contar a menos, no tempo mascarado, até a
+/// apresentação que ela mostra (o revisor do lote FUMAÇA-USB, numa rodada
+/// com uma rolagem e ~30 ms sem tique). O ping não muda: o cronômetro para
+/// antes do retrato de depois.
 ///
 /// # Por que a sonda da rede tira retratos
 ///
@@ -24953,12 +24955,12 @@ impl Retrato {
     ///   máximo, de quando o de antes foi pedido a quando o de depois
     ///   respondeu. O relógio mais de um período ([`PERIODO_DO_TIMER_MS`])
     ///   atrás do mínimo vai marcado;
-    /// - quantos tiques cada núcleo contou. Um núcleo com as interrupções
-    ///   mascaradas não conta tique, e o relógio anda pelos outros — ver
-    ///   `tempo::avancar`, no kernel. O que o núcleo dos dispositivos contou
-    ///   a menos que o que mais contou é o tempo que ele passou mascarado,
-    ///   em períodos do timer, e vai convertido pela conta do próprio
-    ///   relógio;
+    /// - quantos tiques o núcleo dos dispositivos contou, e o menor e o maior
+    ///   dos outros. Um núcleo com as interrupções mascaradas não conta
+    ///   tique, e o relógio anda pelos outros — ver `tempo::avancar`, no
+    ///   kernel. O que o núcleo dos dispositivos contou a menos que o que
+    ///   mais contou é o tempo que ele passou mascarado, em períodos do
+    ///   timer, e vai convertido pela conta do próprio relógio;
     /// - quantas vezes o executor avançou uma tarefa e quantas foi acordado
     ///   — os pedidos da própria sonda entram na conta;
     /// - quantas apresentações chegaram à tela, e o tamanho da última;
@@ -27789,7 +27791,10 @@ fn sob_interpretador(
     // Em laço, pelo mesmo motivo da sonda anterior: entre a tecla e o log há
     // o pulso do relógio, o executor e o despacho, cada um com o seu tempo.
     // Com a origem: foi uma pessoa, pelo teclado. É a metade da auditoria
-    // que a sonda da árvore semântica não alcança.
+    // que a sonda da árvore semântica não alcança. A linha sai antes da
+    // decisão — ver `interpretador`, onde ela é escrita —, e um `agent.ping`
+    // negado também a deixaria: quem confere a resposta é a sonda seguinte,
+    // a do Terminal (o informativo 9 do adversário do lote FUMAÇA-2).
     let pessoa = Esperada::Executado("executado: agent.ping (pessoa)");
     let leitura = LeituraDoLog::desde(desde, "interpretador");
     // O mesmo comando executado em nome de outro, se aparecer.

@@ -304,7 +304,8 @@ do QEMU.
 Uma sonda de tempo reprova por um número, e o número sozinho não diz para
 onde o tempo foi. A da rede, na fumaça, mede se o agente de uma porta é
 respondido enquanto a serial espera; na CI 527 reprovou com 2292 ms, e a
-causa não estava no que ela mede. Duas regras saíram dali:
+causa não estava no que ela mede. Três regras saíram dali e da revisão da
+correção:
 
 - **A janela contém só o que se mede.** O cronômetro começava na resposta
   do aperto, e o kernel termina o aperto depois dela — a auditoria, uma
@@ -313,11 +314,22 @@ causa não estava no que ela mede. Duas regras saíram dali:
   ele casava uma linha igual, mais antiga. Uma espera pelo log lê só o que
   entrou no anel depois do pedido (o `total_emitted` lido antes) — toda
   espera, e não só a que falhou: na mesma fumaça, o clique do mouse e o
-  confirm da árvore casavam, a cada rodada, uma linha que a sonda anterior
-  deixava. Uma medida começa depois de um pedido já respondido, e o
-  cronômetro sai junto com o retrato que a abre. E uma conferência acha o
-  que procura: não ver uma linha na janela é também o que acontece quando a
-  leitura veio recusada, curta, ou quando a linha mudou de redação.
+  confirm da árvore casavam, a cada rodada, uma linha que uma sonda de
+  antes deixava — a da barra, logo antes do mouse; a do Terminal, duas
+  sondas antes da árvore. Uma medida começa depois de um pedido já
+  respondido, e o cronômetro sai junto com o retrato que a abre. E uma
+  conferência acha o que procura: não ver uma linha na janela é também o
+  que acontece quando a leitura veio recusada, curta, ou quando a linha
+  mudou de redação.
+- **A conferência casa a coisa inteira, e só a nova.** Um pedaço de texto
+  casa outra linha: a recusa de uma ação começa com o texto da ação feita,
+  e o elemento 57 começa com o 5. Com o kernel recusando o press da pessoa
+  no botão da barra, a fumaça inteira passou, e duas sondas disseram que a
+  pessoa tinha pressionado. O que vale para o log vale para o que mais se
+  lê: a árvore inteira traz a resposta velha de outra área de texto, e as
+  últimas da auditoria, a recusa velha de outra conexão. E uma leitura que
+  não alcança o que a conferência ainda não leu é erro — as linhas que
+  faltam podiam ser as que ela procura —, e não uma lista mais curta.
 - **O pulso de cada núcleo é a régua do tempo mascarado.** Um núcleo com as
   interrupções mascaradas não conta tique, e o relógio anda pelos outros
   (`tempo::avancar`): os tiques que o núcleo dos dispositivos contou a menos
@@ -338,16 +350,31 @@ Uma medida de tempo na suíte tem a armadilha do outro lado: no emulador o
 contador de ciclos anda com o relógio do hospedeiro, e o ruído dele só soma
 tempo. Pela soma de poucos blocos, uma preempção decide a razão; pelo bloco
 mais rápido de cada lado, só se houver um bloco limpo de cada lado — e com o
-hospedeiro ocupado um bloco mais longo que a vez do fio do processador
-virtual nunca sai limpo, e o lado de bloco mais curto ganha a sorte. O caso
-da apresentação caiu nas duas, com oito laços ocupando o hospedeiro: pela
-soma de blocos de duas telas reprovou a 418% sem defeito, e pelo bloco mais
-rápido das mesmas duas telas, a 327%. Em faixas de um quarto da tela, que
-cabem numa vez do fio, alternando quem vem antes, a pior medida ficou a 187%
-no x86 e a 129% no ARM, contra 798% e 559% pelas somas das mesmas medidas. O
+hospedeiro ocupado um bloco longo sai limpo menos vezes que um curto, e o
+lado de bloco mais curto ganha a sorte. O caso da apresentação caiu nas
+duas, com oito laços ocupando o hospedeiro: pela soma de blocos de duas
+telas reprovou a 418% sem defeito, e pelo bloco mais rápido das mesmas duas
+telas, a 327%. Em faixas de um quarto da tela, que cabem numa vez do fio no
+QEMU desta máquina, alternando quem vem antes, a pior medida ficou a 187% no
+x86 e a 129% no ARM, e as somas das mesmas rodadas chegaram a 798% e 559%. O
 que o mínimo não tira é um lado inteiro mais lento a medida toda: os 187%
 foram uma medida com os sete blocos da apresentação pelo menos uma vez e
-meia acima do de costume, e um da cópia no de costume.
+meia acima do de costume, e um da cópia no de costume; e, sem carga, uma
+medida a 91% foi o espelho, com a cópia inteira mais lenta. Mais pares
+encurtam isso: um trecho lento do hospedeiro cobria às vezes os sete pares
+inteiros, e com quinze o caso ficou de 113% a 135%, com e sem carga.
+
+E o mínimo só filtra o ruído entre repetições do mesmo trabalho. Entre
+partes diferentes da tela, ele escolhe também a mais barata, e uma
+regressão que poupe uma parte passa por ele: o caso passou com três quartos
+da tela pixel a pixel. Quando o que um juiz filtra não é só ruído, ele
+precisa de outro ao lado — aqui, a mediana de cada lado, com um teto
+folgado —, e o caso diz o que ainda passa. Duas coisas mais, da mesma
+revisão: a referência de uma medida não pode deixar o mesmo rastro que a
+coisa medida — com a cópia de referência escrevendo o mesmo padrão, a
+conferência do fim não via uma apresentação que não escrevesse nada —; e o
+número de uma medida é do emulador em que foi tirado: no QEMU da CI, uma
+tela do ARM custa perto de três vezes a desta máquina.
 
 ### Quando a lente não acha nada
 

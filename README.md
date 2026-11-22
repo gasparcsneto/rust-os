@@ -3917,10 +3917,28 @@ da fumaça pelo log passou a ler só o que entrou no anel depois do pedido —
 as saídas dos programas, as varreduras dos códigos de falha deles, o que
 eles disseram e as linhas da interface. Duas casavam uma linha velha a cada
 rodada: o clique da sonda do mouse, com o `press` que o F1 da sonda da
-barra deixa logo antes, e o confirm da sonda da árvore, com a mesma linha
-que a sonda do Terminal deixa pouco antes; nas duas, a linha velha bastava
-para passar. A espera casa o texto, e não o processo: a linha da saída não
-diz de que fio foi — ver `saida_desde`, no `xtask`.
+barra deixa logo antes, e o confirm da sonda da árvore, com uma linha de
+mesmo texto que a sonda do Terminal deixa pouco antes; nas duas, a linha
+velha bastava para passar. A espera casa o texto, e não o processo: a linha
+da saída não diz de que fio foi — ver `saida_desde`, no `xtask`.
+
+E a linha que conta é a inteira, e não um pedaço dela. O clique do mouse e
+o F1 da barra procuravam `pessoa: press no elemento 5` por `contains`, e o
+kernel registra a recusa do mesmo press com o mesmo começo — `pessoa: press
+no elemento 5 recusado: <motivo>` —, como registraria o press no elemento
+57: com o kernel recusando o press da pessoa no botão da barra, a fumaça
+inteira passava, e as duas sondas diziam "pela pessoa" (o adversário do
+lote FUMAÇA-2). Agora uma ação na interface é a linha igual, no subsistema
+`ui`; um comando executado, o texto seguido do console (`executado:
+system.uptime (agente 0) em console`); a linha de um programa, igual; e uma
+recusa no mesmo elemento, na janela da espera, a reprova. Uma leitura que
+não alcança a primeira linha que a espera ainda não leu — entraram mais
+linhas que o `count` dela — é erro, com quantas faltaram, e não uma lista
+curta que venceria o prazo pelo motivo errado; a espera que lê muitas vezes
+continua de onde a leitura anterior parou. E a resposta do confirm, que a
+sonda da árvore lê pela própria árvore, é a que o console passou a mostrar
+depois dele: procurada na árvore inteira, ela casava a resposta de um
+`system.uptime` que a sonda do Terminal deixa na grade dele.
 
 ### O que as mutações mostraram
 
@@ -4205,7 +4223,8 @@ um pedido do agente já respondido: o aperto termina no kernel depois de a
 resposta dele sair — a auditoria, a linha `entrou` no log e a sessão
 estabelecida vêm depois —, e medido da resposta ele caía dentro da janela.
 O cronômetro começa na última resposta do retrato de antes, tirado pela
-porta, e sai com ele de uma função só: não há como medir de outro ponto.
+porta, e sai com ele de uma função só: não há outro ponto de onde a sonda
+mede.
 A sonda diz sempre o que mediu: o tempo do ping, o da serial e, entre um
 retrato de antes e um de depois — quatro relatórios seguidos cada um, e não
 um instante —, quanto o relógio andou e quanto o hospedeiro andou entre as
@@ -4213,26 +4232,28 @@ duas leituras dele, os tiques do núcleo dos dispositivos contra os dos
 outros, os avanços do executor, as apresentações da tela e as linhas de log
 que entraram no anel. E confere que a linha `entrou` desta conexão ficou
 antes da janela: achada, e não só ausente dela — uma leitura recusada ou
-curta demais, ou uma redação nova da linha no kernel, reprovam, em vez de
-passar caladas. Um núcleo com as interrupções mascaradas não conta tique, e
-o relógio anda pelos outros: o que o núcleo dos dispositivos contou a menos
-é o tempo em que ele não colheu as portas nem rodou o executor do canal.
-Foi essa conta que achou a causa da reprovação da CI 527 — ver *O custo de
-uma linha*, em [O console rola](#o-console-rola).
+curta demais, ou uma redação nova do começo da linha no kernel, até o
+`entrou (`, reprovam, em vez de passar caladas. Um núcleo com as
+interrupções mascaradas não conta tique, e o relógio anda pelos outros: o
+que o núcleo dos dispositivos contou a menos é o tempo em que ele não
+colheu as portas nem rodou o executor do canal. Foi essa conta que achou a
+causa da reprovação da CI 527 — ver *O custo de uma linha*, em [O console
+rola](#o-console-rola).
 
-A régua tem limites, e a linha os diz. É um piso, relativo ao núcleo que
-mais contou. Com todos os núcleos mascarados juntos — os outros girando numa
-trava com as interrupções desligadas enquanto o primeiro apresenta —, ou com
-o hospedeiro parado, o relógio do kernel para junto, porque um período em
-que núcleo nenhum tiqueia não volta, e a conta diz ~0 ms sem tique com o
-ping lento: quem mostra é o hospedeiro, e a linha marca o relógio que ficou
-atrás dele. O executor ocupado sem máscara — um tratador longo, um pedido
-adiado pelo caminho da auditoria — não aparece nos tiques, na tela nem no
-log; os avanços dele dizem quantos foram, e não quanto cada um levou. Com
-um núcleo só, não há com quem comparar. E como o retrato não é um instante,
-uma linha que rola o console entre o `system.info` e o `log.tail` do
-retrato de depois entra nas apresentações e nas linhas sem o tempo
-mascarado dela.
+A régua tem limites, e a linha mostra o que pode deles. É um piso,
+relativo ao núcleo que mais contou. Com todos os núcleos mascarados juntos
+— os outros girando numa trava com as interrupções desligadas enquanto o
+primeiro apresenta —, ou com o hospedeiro parado, o relógio do kernel para
+junto, porque um período em que núcleo nenhum tiqueia não volta, e a conta
+diz ~0 ms sem tique com o ping lento: quem mostra é o hospedeiro, e a linha
+marca o relógio que ficou atrás dele. O executor ocupado sem máscara — um
+tratador longo, um pedido adiado pelo caminho da auditoria — não aparece
+nos tiques, na tela nem no log; os avanços dele dizem quantos foram, e não
+quanto cada um levou. Com um núcleo só, não há com quem comparar. E como o
+retrato não é um instante, uma linha que rola o console logo depois do
+`system.info` do retrato de depois — antes do `display.info` — entra nas
+apresentações e nas linhas sem o tempo mascarado dela; entre o
+`display.info` e o `log.tail`, só nas linhas.
 
 **A entrega é decidida de novo.** Acordado, o pedido é executado outra
 vez, inteiro, pelo mesmo gate: uma decisão nova, com a política, o
@@ -4597,6 +4618,14 @@ produção, `agent::atender`, andada à mão pela suíte.
   soltava; o vencimento, pelo relógio, caía onde caísse, e com a perna
   TCP passou a cair na janela do tecido. A etapa solta agora a linha que
   editou, e nenhuma deixa um prazo correndo para as seguintes.
+- **A fumaça conferia as recusas olhando para trás.** Ela lia as últimas
+  da auditoria e procurava dois textos soltos: `"method":"session.open"`,
+  que as recusas das duas chaves, pouco antes na mesma perna, já
+  satisfaziam, e o detalhe do pedido em claro. A recusa gravada com outro
+  método passava pelo registro velho de outra recusa (o adversário do
+  lote FUMAÇA-2). Agora ela lê o `audit.head` antes de cada conexão que
+  confere, e procura só depois dele um registro com o método, o código e
+  o detalhe juntos — o do pedido em claro, e o do aperto que não veio.
 
 ### O HTTP de um programa
 
@@ -15653,8 +15682,8 @@ máquina vê o comando aparecer e a resposta ser desenhada — nada acontece por
 trás da tela. E o log diz quem foi:
 
 ```
-info console  executado: system.uptime (agente 0)
-info console  executado: agent.ping (pessoa)
+info console  executado: system.uptime (agente 0) em console
+info console  executado: agent.ping (pessoa) em console
 ```
 
 É o começo do que a fase 13 chama de auditoria: se um agente pode fazer tudo
@@ -15922,7 +15951,10 @@ ainda com espaço, de 20 a 40 ms, com as mesmas linhas (numa das três
 rodadas, só três delas). Agora o caminho rápido copia a linha inteira de uma
 vez, pelo `memcpy` do `compiler_builtins`, que vem otimizado com o `core` em
 qualquer perfil: 1,8 ms no x86 e 2,3 no ARM, em depuração; em release, de
-1,5 para 1,1 ms no x86, e de 3,5 para 1,5 no ARM. Com o `guardar` lançado
+1,5 para 1,1 ms no x86, e de 3,5 para 1,5 no ARM — no QEMU 8.2 de onde a
+correção foi medida. No QEMU 10.2 da CI, o x86 fica perto disso, de 1,4 a
+1,7 ms, e o ARM custa perto de três vezes mais: de 6,3 a 7,0 ms em
+depuração, e 4,9 em release (as CIs 532, 534 e 535). Com o `guardar` lançado
 logo antes da porta e o console cheio, o núcleo dos dispositivos ficava de
 470 a 780 ms mascarado na janela, e passou a ficar de 80 a 190; com o
 hospedeiro ocupado como o runner da CI, o ping chegou a 1559 ms antes, e não
@@ -15938,24 +15970,71 @@ o relógio do hospedeiro, e uma preempção do processador virtual — dezenas d
 milissegundos — caía inteira num bloco de 3,5 ms e decidia a razão. Com oito
 laços ocupando o hospedeiro, ela chegou a 418% da cópia no x86, contra um
 teto de 300%, e a 262% no ARM (o adversário do lote FUMAÇA-USB). O ruído só
-soma tempo: agora são sete pares, e o caso julga o bloco mais rápido da
-apresentação contra o mais rápido da cópia — basta um bloco limpo de cada
-lado —, enquanto a volta a pixel a pixel põe todo bloco da apresentação
-dezenas de vezes acima da cópia, o mais rápido também. E cada bloco é uma
-faixa de um quarto da tela, e não duas telas: com o hospedeiro ocupado o fio
-do processador virtual roda em vezes de poucos milissegundos, e um bloco
-mais longo que a vez nunca sai limpo. Com sete pares de duas telas — 3,3 ms
-de apresentação contra 2,7 de cópia —, os oito laços puseram todo bloco da
-apresentação de 2,6 a 6,5 vezes acima do custo dela, um da cópia saiu limpo,
-e o caso reprovou a 327% sem defeito nenhum. Um quarto da tela, perto de
-meio milissegundo em depuração, cabe numa vez dos dois lados: com os mesmos
-oito laços e a medida repetida quinze vezes por boot, em dois boots no x86 e
-num no ARM, a pior ficou a 187% no x86 e a 129% no ARM, com as somas das
-mesmas medidas a até 798% e 559%; sem carga, de 112% a 149%; pixel a pixel,
-a 5931% e a 5472%. E os dois lados se alternam em quem vem antes: quem vem
-depois acha a faixa quente, e no ARM a cópia logo depois da apresentação
-levava dois terços do tempo dela. A razão das somas vai junto no log, sem
-julgamento: a distância entre as duas é o quanto o ruído pesou.
+soma tempo: o lote FUMAÇA-2 passou a sete pares, e o caso a julgar o bloco
+mais rápido da apresentação contra o mais rápido da cópia — basta um bloco
+limpo de cada lado —, enquanto a volta a pixel a pixel põe todo bloco da
+apresentação dezenas de vezes acima da cópia, o mais rápido também. E cada
+bloco é uma faixa de um quarto da tela, e não duas telas: com o hospedeiro
+ocupado o fio do processador virtual roda em vezes de poucos milissegundos,
+e quanto mais longo o bloco, menos vezes ele sai limpo. Com sete pares de
+duas telas — 3,3 ms de apresentação contra 2,7 de cópia — e os oito laços,
+o bloco mais rápido da apresentação saiu limpo em seis de quinze medidas, e
+o da cópia em dez; numa delas, todo bloco da apresentação ficou de 2,6 a 6,5
+vezes acima do custo dela, um da cópia saiu limpo, e o caso reprovou a 327%
+sem defeito nenhum. Um quarto da tela, perto de meio milissegundo em
+depuração no QEMU 8.2 desta máquina, cabe numa vez dos dois lados: com os
+mesmos oito laços e a medida repetida quinze vezes por boot, em dois boots
+no x86 e num no ARM, a pior ficou a 187% no x86 e a 129% no ARM, com as
+somas das mesmas medidas a até 798% e 559%; sem carga, em dois boots de
+cada, de 112% a 149%, menos uma medida a 91% no x86 — a cópia inteira mais
+lenta, o espelho dos 187% —; pixel a pixel, a 5931% e a 5472%. E os dois
+lados se alternam em quem vem antes: quem vem depois acha a faixa quente, e
+no ARM a cópia logo depois da apresentação levava dois terços do tempo dela.
+A razão das somas vai junto no log, sem julgamento: a distância entre ela e
+as outras é o quanto o ruído pesou.
+
+**O mínimo escolhe também a faixa.** Ele só filtra o ruído entre repetições
+do mesmo trabalho; entre faixas diferentes da tela, escolhe também a mais
+barata. Com três quartos da tela pixel a pixel, o caso de sete pares passou
+nas quatro medidas, de 156% a 186%, e uma regressão que poupasse qualquer
+das quatro faixas passaria; e a cópia de referência, da mesma linha do
+padrão, deixava na tela o que a apresentação deixaria, e a conferência do
+último pixel não via uma apresentação que não escrevesse nada (o adversário
+do lote FUMAÇA-2). Agora:
+
+- o caso tem um segundo juiz, a mediana de cada lado — o bloco do meio —,
+  com um teto folgado, dez vezes: os três quartos da tela pixel a pixel
+  põem onze dos quinze blocos da apresentação dezenas de vezes acima, e a
+  mediana de 4152% a 5855% nas oito medidas, com o bloco mais rápido de
+  120% a 174%; sem defeito, ela ficou de 94% a 151%, com e sem os oito
+  laços;
+- o que passa está escrito no caso: em depuração, uma regressão de menos
+  que o triplo — a cópia feita duas vezes por linha passa sempre, de 180% a
+  245%; três vezes fica no teto, de 250% a 309%, e passou nas quatro
+  medidas do x86 e em uma das quatro do ARM —, a que poupe metade da tela,
+  e a de um quarto;
+- em release, onde pixel a pixel fica perto da cópia, os dois juízes vão
+  até dez vezes, contra uma regressão de ordem de grandeza que só o release
+  tenha: sem defeito, ficaram de 95% a 125%;
+- a cópia de referência leva a cada linha a linha de baixo do padrão, com
+  o mesmo laço de antes — em depuração o laço pesa na conta, e um laço de
+  índices fazia a razão subir de seis a treze pontos —, e a `copiar_linha`
+  que não escreve nada reprova pelo último pixel, nos dois perfis: a razão
+  dela ficou a 32% em depuração no x86, e a 2% em release no ARM — o caso
+  não tem piso, e quem a pega é o pixel;
+- e são quinze pares, e não sete. Um trecho lento do hospedeiro cobria às
+  vezes os sete primeiros pares inteiros: sem carga, os sete deram 151% e
+  90% em duas medidas do x86, e os quinze, nas mesmas, 126% e 119%. Com os
+  quinze, o bloco mais rápido ficou de 113% a 135% em depuração, com e sem
+  os oito laços, nas duas arquiteturas; a mediana de sete chegava a 171% no
+  ARM com os laços, e a de quinze, a 151%. Custam uns oito milissegundos a
+  mais por medida em depuração nesta máquina, sem carga, e perto de vinte e
+  cinco no ARM da CI.
+
+A premissa de que um quarto da tela cabe numa vez do fio é do QEMU 8.2
+desta máquina. No QEMU 10.2 da CI, uma tela do ARM custa de 6,3 a 7,0 ms em
+depuração, e uma faixa perto de um milissegundo e meio; a CI 535 passou com
+o hospedeiro quieto, a 104% no ARM e a 113% no x86.
 
 Duas coisas sobem junto com o texto. A grade de caracteres, para a árvore
 semântica continuar descrevendo o que está na tela. E a linha de comando: o
@@ -17043,12 +17122,13 @@ A7) passou 47 de 48 na primeira tentativa, em 90,8 minutos e 1358 de
 máquina. Reprovou a fumaça do teclado USB do x86, em depuração, na rede
 pelo gate: "o agente na porta so foi respondido depois da espera da serial
 (2292 ms)".
-O job rodou de novo uma vez e passou, em 28,2 minutos. A medida confirmou
-a análise: num kernel de depuração com o console cheio, cada linha de log
-que rola apresenta o console inteiro no primeiro núcleo, com as interrupções
-mascaradas, e o canal do agente só roda nele; e duas coisas da sonda punham
-linhas na janela que ela mede — o `guardar` da sonda do armazém, que ninguém
-esperava, e o fim do aperto da porta. As três foram corrigidas: ver a espera
+O job rodou de novo uma vez e passou, em 28,2 minutos. A medida local,
+numa reprodução da reprovação, confirmou a análise: num kernel de depuração
+com o console cheio, cada linha de log que rola apresenta o console inteiro
+no primeiro núcleo, com as interrupções mascaradas, e o canal do agente só
+roda nele; e duas coisas da sonda punham linhas na janela que ela mede — o
+`guardar` da sonda do armazém, que ninguém esperava, e o fim do aperto da
+porta. As três foram corrigidas: ver a espera
 do `guardar`, em [Armazenamento nativo](#armazenamento-nativo), *Na fumaça,
 o executor não espera*, em [Rede nativa](#rede-nativa), e *O custo de uma
 linha*, em [O console rola](#o-console-rola). O holdover da bancada de
