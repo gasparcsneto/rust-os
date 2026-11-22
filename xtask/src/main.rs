@@ -24768,7 +24768,8 @@ impl Esperada<'_> {
 /// as duas do formulário — só dizem sim ou não. Com [`Self::achou`], o erro
 /// de uma leitura — a resposta que não se lê, as linhas que ela não
 /// alcançou, a recusa — conta como não achada, fica guardado, e vai na
-/// mensagem do prazo, por [`Self::no_prazo`].
+/// mensagem do prazo, por [`Self::no_prazo`]. E, desde o lote A13, a recusa
+/// fica: depois dela, a espera não acha mais nada.
 struct LeituraDoLog<'q> {
     /// O número da primeira linha que a espera ainda não leu.
     proxima: std::cell::Cell<u64>,
@@ -24776,6 +24777,9 @@ struct LeituraDoLog<'q> {
     /// O erro da última leitura que não se completou, numa espera por um
     /// predicado.
     motivo: std::cell::RefCell<Option<String>>,
+    /// Se uma leitura já trouxe a recusa do que a espera espera: daí em
+    /// diante, numa espera por um predicado, nada mais acha.
+    recusada: std::cell::Cell<bool>,
 }
 
 impl<'q> LeituraDoLog<'q> {
@@ -24786,6 +24790,7 @@ impl<'q> LeituraDoLog<'q> {
             proxima: std::cell::Cell::new(desde),
             quem,
             motivo: Default::default(),
+            recusada: Default::default(),
         }
     }
 
@@ -24807,9 +24812,28 @@ impl<'q> LeituraDoLog<'q> {
     }
 
     /// [`Self::diz`] numa espera por um predicado: o erro conta como não
-    /// achada, e fica guardado para a mensagem do prazo.
+    /// achada, e fica guardado para a mensagem do prazo. A recusa fica: uma
+    /// leitura que a trouxe faz a espera não achar mais nada, também com a
+    /// esperada numa leitura seguinte — como [`Esperada::nas`] reprova a
+    /// recusa com a esperada junto, numa leitura só. A leitura que não se
+    /// completou, não: a seguinte pode ler o que faltou.
+    ///
+    /// # Por quê, desde o lote A13
+    ///
+    /// A leitura anda a cada vez ([`Self::novas`]): a recusa de uma leitura
+    /// não estava na seguinte, e o `executado:` dela fazia a espera passar —
+    /// a recusa ficava esquecida, e o motivo, sem uso (o B2 do adversário do
+    /// lote EXECUTADO, na rodada 5).
     fn achou(&self, resposta: &str, esperada: Esperada<'_>) -> bool {
-        self.diz(resposta, esperada).unwrap_or_else(|motivo| {
+        if self.recusada.get() {
+            return false;
+        }
+        let lida = self.novas(resposta).and_then(|novas| {
+            esperada
+                .nas(&novas, self.quem)
+                .inspect_err(|_| self.recusada.set(true))
+        });
+        lida.unwrap_or_else(|motivo| {
             self.motivo.replace(Some(motivo));
             false
         })
@@ -30786,6 +30810,33 @@ mod testes {
             prazo.ends_with("terminal: o kernel recusou o comando: [170] negado: system.uptime (agente 0) em console: DENY_PERMISSION; registro 31"),
             "{prazo}"
         );
+    }
+
+    /// Numa espera por um predicado, a recusa de uma leitura fica: a
+    /// leitura seguinte, com o `executado:` do mesmo comando pela mesma
+    /// origem, não a faz passar, e o prazo diz a recusa (no lote A13, o B2
+    /// do adversário do lote EXECUTADO). A leitura que não se completou não
+    /// fica.
+    #[test]
+    fn a_recusa_numa_espera_por_um_predicado_fica() {
+        use super::*;
+        let esperada = Esperada::Executado("executado: system.info (agente 2)");
+        let negado = r#"{"jsonrpc":"2.0","id":7,"result":{"records":[{"seq":170,"uptime_ms":24090,"level":"info","subsystem":"console","message":"negado: system.info (agente 2) em terminal:0: DENY_PERMISSION; registro 31"}],"total_emitted":171}}"#;
+        let depois = r#"{"jsonrpc":"2.0","id":8,"result":{"records":[{"seq":170,"uptime_ms":24090,"level":"info","subsystem":"console","message":"negado: system.info (agente 2) em terminal:0: DENY_PERMISSION; registro 31"},{"seq":171,"uptime_ms":24100,"level":"info","subsystem":"console","message":"executado: system.info (agente 2) em terminal:0"}],"total_emitted":172}}"#;
+        let leitura = LeituraDoLog::desde(170, "agentes");
+        assert!(!leitura.achou(negado, esperada));
+        assert!(!leitura.achou(depois, esperada));
+        let prazo = leitura.no_prazo("agentes: prazo".into());
+        assert!(
+            prazo.ends_with("agentes: o kernel recusou o comando: [170] negado: system.info (agente 2) em terminal:0: DENY_PERMISSION; registro 31"),
+            "{prazo}"
+        );
+        // A leitura que não alcança o que falta ler não fica: a seguinte,
+        // que alcança, acha.
+        let curta = r#"{"jsonrpc":"2.0","id":9,"result":{"records":[{"seq":172,"uptime_ms":24110,"level":"info","subsystem":"console","message":"x"}],"total_emitted":173}}"#;
+        let leitura = LeituraDoLog::desde(171, "agentes");
+        assert!(!leitura.achou(curta, esperada));
+        assert!(leitura.achou(depois, esperada));
     }
 
     /// Uma leitura do log que não alcança a primeira linha que a espera
