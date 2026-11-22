@@ -23847,16 +23847,30 @@ struct Retrato {
 }
 
 impl Retrato {
-    /// Pelo canal de `pedir`: a serial, ou um agente com `system.read`,
-    /// `ui.read` e `log.read` no papel — o observador, e quem herda dele.
+    /// Pelo canal de `pedir`: a serial, ou um agente com `system.read` e
+    /// `log.read` no papel — o `display.info` também é de `system.read` —,
+    /// como o observador e quem herda dele.
+    ///
+    /// Devolve também a hora, no hospedeiro, em que a última resposta
+    /// chegou: o começo do cronômetro de uma medida que comece neste
+    /// retrato. Os dois saem juntos daqui para que a medida não possa
+    /// começar noutro ponto. Com o cronômetro antes do retrato, as idas e
+    /// voltas dele — e o que o kernel fizesse enquanto isso, como o fim de
+    /// um aperto — voltariam ao número medido sem nada na janela que o
+    /// mostrasse: a linha `entrou` de uma porta, por exemplo, sai antes do
+    /// primeiro pedido que ela decifra, e ficaria fora da janela do mesmo
+    /// jeito (o adversário do lote FUMAÇA-USB).
     fn tirar(
         pedir: &mut dyn FnMut(&str, &str) -> Result<String, String>,
-    ) -> Result<Retrato, String> {
+    ) -> Result<(Retrato, Instant), String> {
         let info = pedir("system.info", "{}")?;
         let tela = pedir("display.info", "{}")?;
         let log = pedir("log.tail", r#"{"count":0}"#)?;
-        Retrato::de(&info, &tela, &log)
-            .ok_or_else(|| format!("retrato: um relatorio nao se le\n  {info}\n  {tela}\n  {log}"))
+        let fim = Instant::now();
+        let retrato = Retrato::de(&info, &tela, &log).ok_or_else(|| {
+            format!("retrato: um relatorio nao se le\n  {info}\n  {tela}\n  {log}")
+        })?;
+        Ok((retrato, fim))
     }
 
     /// O retrato das respostas de `system.info`, `display.info` e
@@ -23945,9 +23959,7 @@ impl Retrato {
         let na_janela = self.linhas(depois, registros);
         let esperadas = depois.emitidos.saturating_sub(self.emitidos);
         let mut log = format!("log: {esperadas} linha(s)");
-        // A leitura de depois pode não alcançar as primeiras da janela: o
-        // anel e o `count` têm teto.
-        let fora = esperadas.saturating_sub(na_janela.len() as u64);
+        let fora = self.fora_da_leitura(depois, registros);
         if fora > 0 {
             log.push_str(&format!(" ({fora} fora da leitura)"));
         }
@@ -23983,6 +23995,89 @@ impl Retrato {
             .iter()
             .filter(|r| (self.emitidos..depois.emitidos).contains(&r.seq))
             .collect()
+    }
+
+    /// Quantas linhas da janela de `self` a `depois` não estão em
+    /// `registros`: a leitura de depois não as alcançou — o anel e o
+    /// `count` têm teto.
+    fn fora_da_leitura(&self, depois: &Retrato, registros: &[RegistroDoLog]) -> u64 {
+        depois
+            .emitidos
+            .saturating_sub(self.emitidos)
+            .saturating_sub(self.linhas(depois, registros).len() as u64)
+    }
+}
+
+/// Quantos registros o kernel já emitiu — o número do próximo —, pelo
+/// `log.tail` de `pedir`: o `desde` de uma conferência pelo log, lido antes
+/// do pedido cujas linhas ela procura (ver [`saida_desde`]). Uma resposta
+/// que não se lê é erro, e não um zero: um `desde` zero daria por novas
+/// todas as linhas do anel.
+fn desde_do_log(
+    pedir: &mut dyn FnMut(&str, &str) -> Result<String, String>,
+    quem: &str,
+) -> Result<u64, String> {
+    let resposta = pedir("log.tail", r#"{"count":0}"#)?;
+    registros_do_log(&resposta)
+        .map(|(_, emitidos)| emitidos)
+        .ok_or_else(|| format!("{quem}: o log.tail nao se le\n  {resposta}"))
+}
+
+/// A conferência de que o aperto de uma porta terminou antes da janela que
+/// a sonda mede, pela leitura do log feita depois do retrato de `depois`:
+///
+/// - a leitura alcança todas as linhas da janela — senão a conferência não
+///   se completa;
+/// - a linha `entrou` desta conexão — a última que começa com `entrada`, no
+///   subsistema `agent`, de `desde` (o log de antes de a porta conectar) ao
+///   fim da janela — está na leitura, e antes da janela.
+///
+/// Devolve a linha achada.
+///
+/// # Por que achar, e não só não ver
+///
+/// Porque não ver é também o que acontece quando a conferência não roda. A
+/// de antes procurava a linha só dentro da janela, numa leitura que, se
+/// viesse recusada, virava uma lista vazia: com o fim do aperto de volta à
+/// janela, ela passava calada se a leitura fosse recusada — por uma taxa,
+/// por uma mudança de papel —, se mais linhas que o `count` entrassem
+/// depois da `entrou`, ou se o kernel mudasse a redação da linha (o
+/// adversário do lote FUMAÇA-USB). Achada antes da janela, a linha diz que
+/// a conferência leu o que precisava ler; não achada, a sonda reprova.
+fn aperto_fora_da_janela<'r>(
+    antes: &Retrato,
+    depois: &Retrato,
+    registros: &'r [RegistroDoLog],
+    desde: u64,
+    entrada: &str,
+) -> Result<&'r RegistroDoLog, String> {
+    let fora = antes.fora_da_leitura(depois, registros);
+    if fora > 0 {
+        return Err(format!(
+            "a leitura do log depois da janela nao alcancou {fora} linha(s) dela: a conferencia do aperto nao se completa"
+        ));
+    }
+    let achada = registros.iter().rev().find(|r| {
+        (desde..depois.emitidos).contains(&r.seq)
+            && r.subsistema == "agent"
+            && r.mensagem.starts_with(entrada)
+    });
+    match achada {
+        Some(r) if r.seq >= antes.emitidos => Err(format!(
+            "o aperto terminou dentro da janela medida ([{}] {})",
+            r.seq, r.mensagem
+        )),
+        Some(r) => Ok(r),
+        None => {
+            let lidos = match (registros.first(), registros.last()) {
+                (Some(a), Some(b)) => format!("os registros {} a {}", a.seq, b.seq),
+                _ => "nenhum registro".into(),
+            };
+            Err(format!(
+                "a linha `{entrada}...` desta conexao nao esta na leitura do log ({lidos}; procurada de {desde} a {}): a conferencia do aperto nao se completa",
+                depois.emitidos
+            ))
+        }
     }
 }
 
@@ -24125,6 +24220,10 @@ fn sob_a_rede(
     // No silêncio a serial espera, e o executor não: um agente numa porta é
     // respondido enquanto isso.
     const SILENCIO_MS: u64 = 1500;
+    // De onde o log estava antes de a porta conectar: a linha `entrou`
+    // desta conexão é procurada daqui em diante — ver
+    // [`aperto_fora_da_janela`].
+    let desde = desde_do_log(&mut |m, p| serial.pedir(m, p), "rede")?;
     // A porta conecta antes: o aperto do kernel de depuração leva centenas
     // de milissegundos, e o que se mede é o pedido.
     let mut agente = AgenteNaPorta::conectar(arch, 2)?;
@@ -24135,11 +24234,12 @@ fn sob_a_rede(
     // depuração, com o console cheio, a linha `entrou` rolava a tela, e o
     // núcleo ficava mascarado por ela dentro da janela (CI 527). O primeiro
     // pedido pela porta só é respondido depois dele: o retrato de antes,
-    // tirado por ela, deixa o aperto inteiro fora da janela. O de depois
-    // vem pela porta também, logo depois do ping: o que a janela tiver de
-    // atraso fica entre os dois — ver [`Retrato`].
-    let antes = Retrato::tirar(&mut |m, p| agente.pedir(m, p))?;
-    let comeco = std::time::Instant::now();
+    // tirado por ela, deixa o aperto inteiro fora da janela, e o cronômetro
+    // começa na última resposta dele — os dois saem juntos de
+    // [`Retrato::tirar`]. O de depois vem pela porta também, logo depois do
+    // ping: o que a janela tiver de atraso fica entre os dois — ver
+    // [`Retrato`].
+    let (antes, comeco) = Retrato::tirar(&mut |m, p| agente.pedir(m, p))?;
     let silencio_id = serial.mandar(
         "net.recv",
         &format!(r#"{{"connection":{conexao},"wait":{SILENCIO_MS}}}"#),
@@ -24156,7 +24256,7 @@ fn sob_a_rede(
             let pela_porta = (|| -> Result<_, String> {
                 let ping = agente.pedir("agent.ping", "{}")?;
                 let respondido = comeco.elapsed();
-                let depois = Retrato::tirar(&mut |m, p| agente.pedir(m, p))?;
+                let (depois, _) = Retrato::tirar(&mut |m, p| agente.pedir(m, p))?;
                 let registros = agente.pedir("log.tail", r#"{"count":64}"#)?;
                 Ok((ping, respondido, depois, registros))
             })();
@@ -24171,9 +24271,15 @@ fn sob_a_rede(
             "rede: o agente na porta nao foi respondido\n  {ping}"
         ));
     }
+    // A leitura que confere o aperto: recusada, ou ilegível, ela não vira
+    // uma lista vazia — ver [`aperto_fora_da_janela`].
     let registros = registros_do_log(&registros)
         .map(|(r, _)| r)
-        .unwrap_or_default();
+        .ok_or_else(|| {
+            format!(
+                "rede: a leitura do log depois da janela nao se le, e sem ela a conferencia do aperto nao se faz\n  {registros}"
+            )
+        })?;
     let janela = antes.janela(&depois, &registros);
     // O que se mediu vai sempre, e não só na reprovação: uma rodada que
     // passa perto do teto é a evidência que falta quando outra o passa.
@@ -24183,18 +24289,13 @@ fn sob_a_rede(
         durou.as_millis()
     );
     // O aperto inteiro fica fora da janela — é o que o retrato de antes,
-    // pela porta, garante. A linha `entrou` da porta dentro dela diria que a
-    // medida voltou a levar o fim do aperto.
-    if let Some(r) = antes.linhas(&depois, &registros).into_iter().find(|r| {
-        r.subsistema == "agent"
-            && r.mensagem.starts_with("porta 2: ")
-            && r.mensagem.contains(" entrou")
-    }) {
-        return Err(format!(
-            "rede: o aperto da porta 2 terminou dentro da janela medida ([{}] {}); na janela: {janela}",
-            r.seq, r.mensagem
-        ));
-    }
+    // pela porta, garante —, e a linha `entrou` desta conexão é achada
+    // antes dela: dentro, a medida voltou a levar o fim do aperto; em lugar
+    // nenhum, a conferência não leu o que precisava.
+    let entrada = format!("porta 2: {} entrou (", chaves::nome_do_agente(2));
+    let entrou = aperto_fora_da_janela(&antes, &depois, &registros, desde, &entrada)
+        .map_err(|e| format!("rede: porta 2: {e}; na janela: {janela}"))?
+        .seq;
     if !silencio.contains(r#""returned":0"#) || !silencio.contains(r#""state":"established""#) {
         return Err(format!(
             "rede: a leitura no silencio nao veio vazia\n  {silencio}"
@@ -24213,9 +24314,10 @@ fn sob_a_rede(
         ));
     }
     println!(
-        "  [rede] ok  a serial esperou {} ms no silencio; a porta 2 foi atendida em {} ms",
+        "  [rede] ok  a serial esperou {} ms no silencio; a porta 2 foi atendida em {} ms, com o aperto dela terminado antes da janela: a linha `entrou` no registro {entrou}, a janela a partir do {}",
         durou.as_millis(),
-        respondido.as_millis()
+        respondido.as_millis(),
+        antes.emitidos
     );
 
     // O console espera também, e quem confirmou a linha não: o agente da
@@ -29040,6 +29142,139 @@ mod testes {
         assert_eq!(
             saida_desde(&[r(150, "processo encerrou com codigo 77")], 150, 77),
             Some(150)
+        );
+    }
+
+    /// O retrato e o começo do cronômetro saem juntos de `Retrato::tirar`,
+    /// e o cronômetro começa depois da última resposta do retrato: com ele
+    /// antes, as idas e voltas do retrato — e o fim de um aperto que corresse
+    /// enquanto isso — voltariam ao número medido (a M2b do adversário do
+    /// lote FUMAÇA-USB).
+    #[test]
+    fn o_cronometro_comeca_depois_do_retrato() {
+        use super::*;
+        let mut chegadas: Vec<(String, Instant)> = Vec::new();
+        let mut pedir = |metodo: &str, _: &str| -> Result<String, String> {
+            // Cada ida e volta leva um tempo, como pelo canal de verdade.
+            std::thread::sleep(Duration::from_millis(5));
+            let resposta = match metodo {
+                "system.info" => {
+                    r#"{"jsonrpc":"2.0","id":1,"result":{"cores":[{"index":0,"state":"online","ticks":7}],"uptime_ms":70}}"#
+                }
+                "display.info" => r#"{"jsonrpc":"2.0","id":2,"result":{"present":false}}"#,
+                "log.tail" => {
+                    r#"{"jsonrpc":"2.0","id":3,"result":{"records":[],"total_emitted":9}}"#
+                }
+                outro => return Err(format!("pedido inesperado: {outro}")),
+            };
+            chegadas.push((metodo.to_string(), Instant::now()));
+            Ok(resposta.to_string())
+        };
+        let (retrato, comeco) = Retrato::tirar(&mut pedir).expect("o retrato se tira");
+        assert_eq!((retrato.uptime_ms, retrato.emitidos), (70, 9));
+        let (ultimo, chegou) = chegadas.last().cloned().expect("o retrato pediu");
+        assert_eq!(ultimo, "log.tail");
+        assert!(
+            comeco >= chegou,
+            "o cronometro comecou antes da ultima resposta do retrato"
+        );
+        // E um relatório que não se lê é erro, e não um retrato.
+        let mut recusado = |metodo: &str, _: &str| -> Result<String, String> {
+            Ok(match metodo {
+                "log.tail" => r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32000}}"#,
+                "display.info" => r#"{"jsonrpc":"2.0","id":2,"result":{"present":false}}"#,
+                _ => r#"{"jsonrpc":"2.0","id":1,"result":{"cores":[],"uptime_ms":1}}"#,
+            }
+            .to_string())
+        };
+        assert!(Retrato::tirar(&mut recusado).is_err());
+    }
+
+    /// A conferência do aperto da porta falha fechada: a linha `entrou`
+    /// desta conexão tem de ser achada antes da janela. Dentro dela, só a de
+    /// uma conexão anterior, em lugar nenhum — uma leitura recusada, curta,
+    /// ou uma redação que mudou —, ou com linhas da janela fora da leitura,
+    /// a sonda reprova (o achado 3 do adversário do lote FUMAÇA-USB).
+    #[test]
+    fn o_aperto_da_porta_e_achado_antes_da_janela() {
+        use super::*;
+        let retrato = |emitidos: u64| {
+            Retrato::de(
+                r#"{"jsonrpc":"2.0","id":1,"result":{"cores":[{"index":0,"state":"online","ticks":7}],"uptime_ms":70}}"#,
+                r#"{"jsonrpc":"2.0","id":2,"result":{"present":false}}"#,
+                &format!(
+                    r#"{{"jsonrpc":"2.0","id":3,"result":{{"records":[],"total_emitted":{emitidos}}}}}"#
+                ),
+            )
+            .expect("o retrato se le")
+        };
+        let (antes, depois) = (retrato(162), retrato(164));
+        let r = |seq: u64, subsistema: &str, mensagem: &str| RegistroDoLog {
+            seq,
+            uptime_ms: seq * 10,
+            subsistema: subsistema.into(),
+            mensagem: mensagem.into(),
+        };
+        let entrada = "porta 2: agente-2 entrou (";
+        let conferir = |registros: &[RegistroDoLog]| {
+            aperto_fora_da_janela(&antes, &depois, registros, 158, entrada).map(|r| r.seq)
+        };
+        // A de uma conexão anterior, a desta e as duas linhas da janela.
+        let lida = [
+            r(157, "agent", "porta 2: agente-2 entrou (aaaa1111)"),
+            r(160, "agent", "porta 2: agente-2 entrou (cc3d388b)"),
+            r(161, "usuario", "processo encerrou com codigo 77"),
+            r(162, "mem", "coletor recolheu 1 fio(s)"),
+            r(163, "usuario", "guardar conferido"),
+        ];
+        assert_eq!(conferir(&lida), Ok(160));
+        // Dentro da janela: a medida levou o fim do aperto.
+        let dentro = [
+            r(157, "agent", "porta 2: agente-2 entrou (aaaa1111)"),
+            r(161, "usuario", "processo encerrou com codigo 77"),
+            r(162, "mem", "coletor recolheu 1 fio(s)"),
+            r(163, "agent", "porta 2: agente-2 entrou (cc3d388b)"),
+        ];
+        let erro = conferir(&dentro).expect_err("o aperto na janela reprova");
+        assert!(erro.contains("dentro da janela medida ([163]"), "{erro}");
+        // Só a de antes do pedido de conexão não é desta conexão; a de
+        // outra porta, ou de outro subsistema, também não.
+        let alheias = [
+            r(157, "agent", "porta 2: agente-2 entrou (aaaa1111)"),
+            r(159, "agent", "porta 3: agente-3 entrou (bbbb2222)"),
+            r(160, "usuario", "porta 2: agente-2 entrou (cc3d388b)"),
+            r(162, "mem", "coletor recolheu 1 fio(s)"),
+            r(163, "usuario", "guardar conferido"),
+        ];
+        let erro = conferir(&alheias).expect_err("sem a linha desta conexao reprova");
+        assert!(
+            erro.contains("nao esta na leitura do log (os registros 157 a 163"),
+            "{erro}"
+        );
+        // A redação mudou no kernel: a conferência não casa mais, e diz.
+        let reescrita = [
+            r(160, "agent", "porta 2: agente-2 chegou (cc3d388b)"),
+            r(162, "mem", "coletor recolheu 1 fio(s)"),
+            r(163, "usuario", "guardar conferido"),
+        ];
+        assert!(conferir(&reescrita).is_err());
+        // Uma linha da janela fora da leitura: a conferência não se completa,
+        // ache o que achar.
+        let curta = [
+            r(160, "agent", "porta 2: agente-2 entrou (cc3d388b)"),
+            r(163, "usuario", "guardar conferido"),
+        ];
+        let erro = conferir(&curta).expect_err("a leitura curta reprova");
+        assert!(erro.contains("nao alcancou 1 linha(s)"), "{erro}");
+        // A leitura vazia — o que uma recusa lida como vazia daria —
+        // reprova, com a janela vazia também.
+        assert!(conferir(&[]).is_err());
+        let vazia = retrato(162);
+        let erro = aperto_fora_da_janela(&antes, &vazia, &[], 158, entrada)
+            .expect_err("sem linha nenhuma reprova");
+        assert!(
+            erro.contains("(nenhum registro; procurada de 158 a 162)"),
+            "{erro}"
         );
     }
 }
