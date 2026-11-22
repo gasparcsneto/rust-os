@@ -67,7 +67,12 @@
 //!   `continue-on-error:`, que, desde o lote A12, a leitura lê inteiro e
 //!   falha fechada ([`linhas_que_o_passo_nao_le`]) — depois de cada
 //!   checkout, antes do cache e de qualquer `cargo`, com o canal em toda
-//!   chave de cache; a ação tem os passos que conferem, fora do cargo, o
+//!   chave de cache — desde o lote A13, numa leitura que falha fechada no
+//!   arquivo inteiro: as quebras de linha que só o YAML vê e, fora do
+//!   conteúdo dos blocos, as formas que ela não lê reprovam
+//!   ([`quebras_que_a_leitura_nao_ve`], [`forma_que_a_leitura_nao_le`]), e
+//!   um checkout escrito numa delas não escapa da ordem —; a ação tem os
+//!   passos que conferem, fora do cargo, o
 //!   ambiente, o PATH, os `rust-toolchain`, os artefatos e — desde o lote
 //!   A12 — os links do commit, e o config do cargo — o do executor desde o
 //!   lote A9, os outros desde o lote A10 —, e o das invariantes, que o job
@@ -1655,6 +1660,117 @@ fn sem_comentario(valor: &str) -> &str {
         .map_or(valor, |i| valor[..i].trim_end())
 }
 
+/// A forma do YAML de uma linha de código — `texto`, sem as bordas, fora do
+/// conteúdo de um escalar em bloco — que a leitura por linhas não lê, ou
+/// nenhuma. Ela lê a chave simples — letras, dígitos, `-` e `_`, sem aspas —
+/// com o `:` seguido de um espaço ou do fim; o valor numa linha — sem aspas,
+/// entre aspas que fecham nela, um bloco (`|`, `>`), ou uma sequência em
+/// estilo de fluxo só de escalares simples (`[x86_64, aarch64]`); e o item
+/// de uma lista com um desses. Não lê o item em estilo de fluxo (`- { … }`,
+/// `- [ … ]`), a chave complexa (`?`, `:`), a chave entre aspas — com um
+/// escape, ela é outra para o YAML (`"u\x73es"`) —, a âncora, o apelido, a
+/// etiqueta, a fusão (`<<`), o texto entre aspas em várias linhas, e o valor
+/// que começa por outro indicador do YAML — também o estilo de fluxo no
+/// valor de uma chave (`chave: { … }`), que a regra de antes recusava nos
+/// workflows e nas outras ações, e não na do compilador.
+///
+/// # Por quê, desde o lote A13
+///
+/// As regras dos workflows leem as chaves linha a linha
+/// ([`chave_e_valor`]), e pulam o que não reconhecem: o checkout escrito em
+/// estilo de fluxo, com um escape na chave ou numa chave complexa não pedia
+/// a conferência depois dele — a lacuna que o lote A12 deixou relatada —;
+/// uma ação de fora de [`ACOES_OFICIAIS`] em estilo de fluxo — uma que
+/// instala outro toolchain — passava; e um texto entre aspas em várias
+/// linhas esconde dela um `#` que é do valor, ou lhe mostra um passo que o
+/// YAML lê como texto. A leitura do passo da ação já falhava fechada (o lote
+/// A12); esta é a mesma regra no arquivo inteiro (o M3 do adversário do lote
+/// A12).
+fn forma_que_a_leitura_nao_le(texto: &str) -> Option<&'static str> {
+    let mut corpo = texto;
+    let mut traco = false;
+    while corpo == "-" || corpo.starts_with("- ") {
+        corpo = corpo[1..].trim_start();
+        traco = true;
+    }
+    let b = corpo.as_bytes();
+    let separado = |i: usize| b.get(i).is_none_or(|c| *c == b' ' || *c == b'\t');
+    let bloco = |v: &str| {
+        v.strip_prefix(['|', '>']).is_some_and(|indicadores| {
+            indicadores.len() <= 2
+                && indicadores
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || c == b'+' || c == b'-')
+        })
+    };
+    match b.first() {
+        None | Some(b'#') => return None,
+        Some(b'|' | b'>') if traco && bloco(sem_comentario(corpo)) => return None,
+        Some(b'{' | b'[') => return Some("um nó em estilo de fluxo"),
+        Some(b'?' | b':') if separado(1) => return Some("uma chave complexa"),
+        Some(b'&' | b'*' | b'!') => return Some("uma âncora, um apelido ou uma etiqueta"),
+        Some(b'"' | b'\'') => {
+            return match fim_das_aspas(corpo) {
+                None => Some("um texto entre aspas que não fecha na linha"),
+                Some(fim) if sem_comentario(corpo[fim..].trim()).is_empty() => None,
+                Some(_) => Some("uma chave entre aspas"),
+            };
+        }
+        Some(b'%' | b'@' | b'`' | b',' | b']' | b'}' | b'|' | b'>') => {
+            return Some("uma linha que começa por um indicador do YAML");
+        }
+        _ => {}
+    }
+    // A chave: até o `:` seguido de um espaço, ou no fim, antes de um
+    // comentário. Sem ele, é um escalar simples — o valor de um item, ou a
+    // continuação de um valor.
+    let comentario =
+        (0..b.len()).find(|&i| b[i] == b'#' && (i == 0 || b[i - 1] == b' ' || b[i - 1] == b'\t'));
+    let dois_pontos = (0..b.len())
+        .find(|&i| b[i] == b':' && separado(i + 1))
+        .filter(|&i| comentario.is_none_or(|c| i < c))?;
+    let chave = corpo[..dois_pontos].trim_end();
+    if chave.is_empty()
+        || !chave
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        return Some("uma chave que não é simples — entre aspas, com espaço, a fusão `<<`");
+    }
+    let valor = sem_comentario(corpo[dois_pontos + 1..].trim());
+    let v = valor.as_bytes();
+    match v.first() {
+        None => None,
+        Some(b'|' | b'>') if bloco(valor) => None,
+        Some(b'"' | b'\'') => (fim_das_aspas(valor) != Some(valor.len()))
+            .then_some("um texto entre aspas que não fecha na linha"),
+        Some(b'[') => {
+            let simples = valor
+                .strip_prefix('[')
+                .and_then(|v| v.strip_suffix(']'))
+                .is_some_and(|dentro| {
+                    dentro.trim().is_empty()
+                        || dentro.split(',').all(|item| {
+                            let item = item.trim();
+                            !item.is_empty()
+                                && item.bytes().all(|c| !b"[]{}\"'&*!|>%@`#:?".contains(&c))
+                        })
+                });
+            (!simples)
+                .then_some("uma sequência em estilo de fluxo que não é só de escalares simples")
+        }
+        Some(b'{') => Some("um nó em estilo de fluxo"),
+        Some(b'&' | b'*' | b'!') => Some("uma âncora, um apelido ou uma etiqueta"),
+        Some(b'%' | b'@' | b'`' | b',' | b']' | b'}' | b'|' | b'>') => {
+            Some("um valor que começa por um indicador do YAML")
+        }
+        Some(b'?' | b'-' | b':') if v.len() == 1 || v[1] == b' ' || v[1] == b'\t' => {
+            Some("um valor que começa por um indicador do YAML")
+        }
+        _ => None,
+    }
+}
+
 /// O nome da ação de um `uses:` — sem as aspas e sem a versão.
 fn nome_da_acao(valor: &str) -> &str {
     let valor = valor.trim_matches(|c| c == '"' || c == '\'');
@@ -1892,14 +2008,25 @@ fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str>
 /// [`CHAVES_FORA_DO_PASSO_DA_ACAO`] e que a leitura lê inteiro, só com as de
 /// [`CHAVES_DO_PASSO_DA_ACAO`], na forma simples
 /// ([`linhas_que_o_passo_nao_le`]); e toda chave de cache, a principal e as
-/// de restauração, leva o canal. Nada em estilo de fluxo (`{ ... }`), que
-/// esconderia as chaves desta leitura, e nenhum `uses:` em várias linhas. O
-/// canário sobrepõe, mas não roda nos pushes, não usa o cache nem publica a
+/// de restauração, leva o canal. Nenhum `uses:` em várias linhas. O canário
+/// sobrepõe, mas não roda nos pushes, não usa o cache nem publica a
 /// proveniência. As ações locais seguem as regras dos workflows oficiais,
-/// menos a que confere o compilador, que cita o que recusa. E, desde o lote
-/// A13, antes de toda leitura, em todo arquivo — a ação do compilador
-/// inclusive —, nenhum caractere que o YAML leia como outra linha e a
-/// leitura por linhas não ([`quebras_que_a_leitura_nao_ve`]).
+/// menos a que confere o compilador, que cita o que recusa: nela vale só a
+/// leitura que falha fechada, abaixo, e o resto é de [`conferir_a_acao`].
+///
+/// # A leitura falha fechada no arquivo inteiro, desde o lote A13
+///
+/// As regras leem o YAML linha a linha. Em todo arquivo — a ação do
+/// compilador inclusive —, antes delas, reprova o que essa leitura não lê
+/// como o YAML lê: os caracteres que o YAML toma por outra linha
+/// ([`quebras_que_a_leitura_nao_ve`]) e, fora do conteúdo dos blocos, as
+/// formas que ela não lê ([`forma_que_a_leitura_nao_le`]) — o estilo de
+/// fluxo, a chave entre aspas ou com escape, a chave complexa, a âncora, o
+/// apelido, a etiqueta, a fusão, o texto entre aspas em várias linhas. Um
+/// checkout, ou uma ação de fora da lista, escrito numa delas reprova por
+/// ela, e não escapa mais da ordem nem da lista: antes, um checkout em
+/// estilo de fluxo ou com um escape na chave não pedia a conferência depois
+/// dele (o M3 do adversário do lote A12, e o E1 do revisor da rodada 5).
 fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
     let mut fora = Vec::new();
     for (nome, texto) in workflows {
@@ -1912,10 +2039,22 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
                  checkout, que ela não lê"
             ));
         }
+        let linhas = linhas_de_codigo(texto);
+        // A forma do YAML que a leitura não lê, fora do conteúdo dos blocos;
+        // também na ação do compilador.
+        for l in linhas.iter().filter(|l| !l.escalar) {
+            if let Some(forma) = forma_que_a_leitura_nao_le(l.texto) {
+                fora.push(format!(
+                    "{nome}: `{}` — {forma}, que a leitura por linhas do `xtask` não lê: o YAML \
+                     pode ler ali um passo, um checkout ou uma chave que as regras dos workflows \
+                     não veem",
+                    l.texto
+                ));
+            }
+        }
         if nome == ACAO_DO_COMPILADOR {
             continue;
         }
-        let linhas = linhas_de_codigo(texto);
         let canario = nome == CANARIO;
         let permitidas: &[&str] = if canario {
             &ACOES_DO_CANARIO
@@ -1927,12 +2066,6 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
             let Some((chave, valor)) = chave_e_valor(l.texto) else {
                 continue;
             };
-            if valor.starts_with('{') {
-                fora.push(format!(
-                    "{nome}: `{}` — o estilo de fluxo esconde as chaves da conferência",
-                    l.texto
-                ));
-            }
             if chave == "uses" {
                 if valor.is_empty() || valor.starts_with(['>', '|']) {
                     fora.push(format!(
@@ -4822,7 +4955,12 @@ jobs:
         for (rotulo, novo, linhas) in &reprovam {
             let texto = OFICIAL.replacen(passo, novo, 1);
             assert_ne!(texto, OFICIAL, "{rotulo}");
-            let fora = um(".github/workflows/ci.yml", &texto);
+            // Só os erros desta leitura: a das formas do arquivo inteiro
+            // acusa também algumas destas linhas (desde o lote A13).
+            let fora: Vec<String> = um(".github/workflows/ci.yml", &texto)
+                .into_iter()
+                .filter(|f| f.contains("no passo da conferência do compilador"))
+                .collect();
             assert!(
                 fora.len() == linhas.len()
                     && fora.iter().zip(linhas).all(|(f, l)| {
@@ -4866,7 +5004,13 @@ jobs:
             assert_eq!(um(nome, texto), Vec::<String>::new(), "{nome}");
         }
         let local = "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/compilador\n      \"i\\x66\": false\n";
-        assert_eq!(um(".github/actions/outra/action.yml", local).len(), 1);
+        assert_eq!(
+            um(".github/actions/outra/action.yml", local)
+                .iter()
+                .filter(|f| f.contains("no passo da conferência do compilador"))
+                .count(),
+            1
+        );
     }
 
     /// As quebras de linha que a leitura por linhas não vê (no lote A13, o
@@ -5037,6 +5181,99 @@ jobs:
             1,
         );
         assert_eq!(um(nome, &com_bloco), Vec::<String>::new());
+    }
+
+    /// As formas que a leitura não lê, no arquivo inteiro (no lote A13, o M3
+    /// do adversário do lote A12, e a lacuna que o lote A12 deixou relatada):
+    /// o checkout em estilo de fluxo, com um escape na chave ou por uma chave
+    /// complexa, sem o passo da ação, não pedia a conferência; um passo num
+    /// texto entre aspas em várias linhas era lido como um passo; e uma ação
+    /// de fora da lista em estilo de fluxo, a âncora, a fusão, a sequência
+    /// com um mapa e o item em fluxo passavam. Cada um reprova pela forma — o
+    /// estilo de fluxo no valor de uma chave, também na ação do compilador.
+    /// O que os workflows usam passa, e nenhuma linha dos workflows e da ação
+    /// do repositório é acusada.
+    #[test]
+    fn adversario_a12_as_formas_que_a_leitura_nao_le_no_arquivo_inteiro() {
+        let nome = ".github/workflows/ci.yml";
+        let da_forma = |fora: &[String]| {
+            fora.iter()
+                .any(|f| f.contains("que a leitura por linhas do `xtask` não lê"))
+        };
+        let passo = "      - name: O compilador\n        id: compilador\n        uses: ./.github/actions/compilador\n";
+        assert_eq!(OFICIAL.matches(passo).count(), 1);
+        let sem = OFICIAL.replacen(passo, "", 1);
+        let checkout = "      - uses: actions/checkout@v4\n";
+        // O checkout que a ordem não via, sem o passo da ação; e um passo,
+        // como texto, num texto entre aspas em várias linhas.
+        for (rotulo, outro) in [
+            (
+                "em estilo de fluxo",
+                "      - { uses: actions/checkout@v4 }\n",
+            ),
+            (
+                "com um escape na chave",
+                "      - \"u\\x73es\": actions/checkout@v4\n",
+            ),
+            (
+                "numa chave complexa",
+                "      - ? uses\n        : actions/checkout@v4\n",
+            ),
+            (
+                "um passo num texto entre aspas",
+                "      - uses: actions/checkout@v4\n      - name: Nada\n        run: \"echo\n          \
+                 - name: O compilador\n            id: compilador\n            uses: \
+                 ./.github/actions/compilador\n          \"\n",
+            ),
+        ] {
+            let texto = sem.replacen(checkout, outro, 1);
+            assert_ne!(texto, sem, "{rotulo}");
+            assert!(da_forma(&um(nome, &texto)), "{rotulo}");
+        }
+        // Uma ação de fora da lista em estilo de fluxo, a âncora, a fusão e a
+        // sequência com um mapa dentro.
+        for novo in [
+            "      - { uses: dtolnay/rust-toolchain@master }\n",
+            "      - &x\n        run: echo\n",
+            "      - name: x\n        <<: *x\n",
+            "      - name: x\n        with:\n          lista: [a: b]\n",
+            "      - [ run, echo ]\n",
+        ] {
+            let texto = format!("{OFICIAL}{novo}");
+            assert!(da_forma(&um(nome, &texto)), "{novo}");
+        }
+        // O estilo de fluxo no valor de uma chave: a regra de antes não o via
+        // na ação do compilador, e a leitura o recusa também nela.
+        let na_acao = format!("{ACAO}x: {{ y: z }}\n");
+        assert!(da_forma(&um(ACAO_DO_COMPILADOR, &na_acao)));
+        // O que os workflows usam passa: a sequência de escalares simples, a
+        // vazia, o texto entre aspas numa linha, com `: ` e `#` dentro, o
+        // bloco com os indicadores, o item só com um comentário.
+        let passam = format!(
+            "{OFICIAL}      - name: \"a: b # c\"  # d\n        if: ${{{{ !cancelled() }}}}\n        \
+             with:\n          lista: [x86_64, aarch64, 1/3]\n          vazia: []\n          texto: \
+             '17 4 * * 1'\n          bloco: >-\n            {{ nada: [ disto ] }}\n        uses: \
+             actions/cache@v4\n      - # um passo\n        run: echo\n"
+        );
+        assert_eq!(um(nome, &passam), Vec::<String>::new());
+        for (n, texto) in [
+            (CI, include_str!("../../.github/workflows/ci.yml")),
+            (
+                ".github/workflows/rede-principal.yml",
+                include_str!("../../.github/workflows/rede-principal.yml"),
+            ),
+            (CANARIO, include_str!("../../.github/workflows/canario.yml")),
+            (ACAO_DO_COMPILADOR, ACAO),
+        ] {
+            for l in linhas_de_codigo(texto).iter().filter(|l| !l.escalar) {
+                assert_eq!(
+                    forma_que_a_leitura_nao_le(l.texto),
+                    None,
+                    "{n}: {}",
+                    l.texto
+                );
+            }
+        }
     }
 
     #[test]
