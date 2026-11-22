@@ -991,6 +991,113 @@ pub fn esquecer_registrados() {
     carregar();
 }
 
+/// Só para a suíte: uma impressão do registro — os agentes, os
+/// administradores, os editores, as fontes de hora e as lápides —, que o
+/// executor da suíte tira no começo e confere depois de cada caso
+/// (`testes::estado_da_suite_devolvido`). Um caso que registra alguém, ou
+/// revoga, ou muda um papel, e não devolve o registro da imagem, deixa a
+/// mudança para os casos seguintes da mesma parte — a chave de teste como
+/// administradora, por exemplo (o achado 2 do adversário do lote ICACHE-2).
+///
+/// É o FNV-1a de 64 bits de cada campo, na ordem do registro, com o
+/// tamanho antes de cada campo de tamanho variável: a ordem conta, porque a
+/// busca por chave e por nome acha a primeira. A chave do Duke fica de fora:
+/// ela não é do registro de quem entra, e nem um resumo dela sai daqui. A
+/// impressão serve só para comparar, e não vai para log nenhum.
+#[cfg(feature = "modo-teste")]
+pub fn impressao_do_registro_de_teste() -> u64 {
+    /// O FNV-1a de 64 bits, que também recebe texto formatado.
+    struct Impressao(u64);
+    impl Impressao {
+        fn bytes(&mut self, bytes: &[u8]) {
+            for &b in bytes {
+                self.0 ^= u64::from(b);
+                self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        /// Um campo de tamanho variável, com o tamanho antes: dois campos
+        /// seguidos não se confundem com outros dois.
+        fn campo(&mut self, bytes: &[u8]) {
+            self.bytes(&(bytes.len() as u64).to_le_bytes());
+            self.bytes(bytes);
+        }
+        fn opcional(&mut self, campo: Option<&[u8]>) {
+            match campo {
+                None => self.bytes(&[0]),
+                Some(c) => {
+                    self.bytes(&[1]);
+                    self.campo(c);
+                }
+            }
+        }
+    }
+    impl core::fmt::Write for Impressao {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            self.bytes(s.as_bytes());
+            Ok(())
+        }
+    }
+
+    crate::arch::sem_interrupcoes(|| {
+        let id = IDENTIDADE.lock();
+        let mut h = Impressao(0xcbf2_9ce4_8422_2325);
+        h.bytes(&(id.agentes.len() as u64).to_le_bytes());
+        for a in &id.agentes {
+            h.bytes(&a.chave);
+            h.campo(a.nome.as_bytes());
+            h.bytes(&[u8::from(a.origem == Origem::Imagem)]);
+            h.opcional(a.papel.as_deref().map(str::as_bytes));
+        }
+        h.bytes(&(id.administradores.len() as u64).to_le_bytes());
+        for a in &id.administradores {
+            h.bytes(&a.chave);
+            h.campo(a.nome.as_bytes());
+            h.opcional(a.papel.as_deref().map(str::as_bytes));
+            h.bytes(&[u8::from(a.revogado)]);
+            h.opcional(a.assinatura.as_ref().map(|c| &c[..]));
+        }
+        h.bytes(&(id.editores.len() as u64).to_le_bytes());
+        for e in &id.editores {
+            h.bytes(&e.chave);
+            h.campo(e.nome.as_bytes());
+        }
+        // As fontes de hora: o registro inteiro, pela forma de depuração
+        // dele, que tem todos os campos — o quórum e os tetos também.
+        match &id.fontes_de_hora {
+            None => h.bytes(&[0]),
+            Some(r) => {
+                h.bytes(&[1]);
+                let _ = core::fmt::Write::write_fmt(&mut h, format_args!("{r:?}"));
+            }
+        }
+        h.bytes(&(id.lapides.len() as u64).to_le_bytes());
+        for l in &id.lapides {
+            h.bytes(l);
+        }
+        h.0
+    })
+}
+
+/// Só para a suíte: o registro em números — os agentes, os administradores
+/// e quantos deles estão revogados, os editores, as fontes de hora e as
+/// lápides —, que o executor diz no log no começo da suíte e quando a
+/// impressão ([`impressao_do_registro_de_teste`]) muda: o que mudou, para
+/// quem lê.
+#[cfg(feature = "modo-teste")]
+pub fn resumo_do_registro_de_teste() -> [usize; 6] {
+    crate::arch::sem_interrupcoes(|| {
+        let id = IDENTIDADE.lock();
+        [
+            id.agentes.len(),
+            id.administradores.len(),
+            id.administradores.iter().filter(|a| a.revogado).count(),
+            id.editores.len(),
+            id.fontes_de_hora.as_ref().map_or(0, |r| r.fontes().len()),
+            id.lapides.len(),
+        ]
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Os desafios das operações administrativas
 // ---------------------------------------------------------------------------

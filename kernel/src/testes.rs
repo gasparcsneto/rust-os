@@ -44809,6 +44809,14 @@ static CASOS: &[Caso] = &[
         nome: "suite: o executor ve e solta o shift que o caso deixou apertado",
         f: suite_o_executor_ve_e_solta_o_shift_apertado,
     },
+    // O lote ICACHE-3, no fim pelo mesmo motivo — as partes são
+    // intercaladas, e um caso no meio mudaria a parte de todos os de depois
+    // —: o controle da conferência do registro de identidade (o achado 2 do
+    // adversário do lote ICACHE-2).
+    Caso {
+        nome: "suite: o executor ve e devolve o registro de identidade que o caso mudou",
+        f: suite_o_executor_ve_e_devolve_o_registro_de_identidade,
+    },
 ];
 
 /// A cauda da suíte: os casos que rodam em **toda** parte, depois da fatia
@@ -63291,6 +63299,10 @@ pub fn executar_todos() -> ! {
     // A máquina como a suíte a usa: alguém entrado no console físico — ver
     // `interpretador::pessoa_padrao_para_teste`.
     crate::interpretador::pessoa_padrao_para_teste();
+    // O registro de identidade com que a suíte começa, que cada caso
+    // devolve — ver `estado_da_suite_devolvido`.
+    IMPRESSAO_DO_REGISTRO.store(crate::identidade::impressao_do_registro_de_teste(), SeqCst);
+    anotar_o_registro_de_identidade("no comeco da suite");
 
     let mut falhas = 0usize;
     // Os casos que falharam, repetidos no fim: o log da suíte passa de oito
@@ -63434,13 +63446,28 @@ fn suite_o_executor_ve_e_devolve_o_coletor_e_o_journal() -> Resultado {
 /// novo no meio da tabela tinha deslocado os índices —, sem um caso no meio
 /// que esvaziasse o teclado, não achou a tecla de uma minúscula ("um
 /// caractere que o teclado nao produz sem shift").
+///
+/// E o registro de identidade, pela impressão que o executor tira no começo
+/// ([`IMPRESSAO_DO_REGISTRO`]): o caso que o deixa mudado reprova aqui, e o
+/// executor devolve o da imagem — as lápides esquecidas, e os arquivos lidos
+/// de novo. O adversário do lote ICACHE-2 achou um assim: `energia: quem nao
+/// pode ouve a recusa` registrava a chave de teste como administradora e não
+/// a tirava, e os casos seguintes da mesma parte rodavam com ela; nenhum
+/// deles a contava, e por isso nada reprovava; um caso novo no meio da
+/// tabela poderia pôr depois dele um que contasse.
 fn estado_da_suite_devolvido() -> Resultado {
     let solto = !crate::persistencia::auditoria_pausada_de_teste();
     let segurado = crate::persistencia::auditoria_segurada_de_teste();
     let shift = crate::teclado::shift_apertado_de_teste();
+    let registro =
+        crate::identidade::impressao_do_registro_de_teste() != IMPRESSAO_DO_REGISTRO.load(SeqCst);
     crate::persistencia::pausar_a_auditoria_de_teste(true);
     crate::persistencia::segurar_a_auditoria_de_teste(false);
     crate::teclado::soltar_o_shift_de_teste();
+    if registro {
+        anotar_o_registro_de_identidade("depois do caso");
+        registro_da_imagem();
+    }
     if solto {
         return Err("o caso deixou o coletor da auditoria solto");
     }
@@ -63450,7 +63477,74 @@ fn estado_da_suite_devolvido() -> Resultado {
     if shift {
         return Err("o caso deixou o shift do teclado apertado");
     }
+    if registro {
+        return Err("o caso deixou o registro de identidade mudado");
+    }
     Ok(())
+}
+
+/// Diz no log o registro de identidade em números — `quando`: no começo da
+/// suíte, ou depois do caso que o deixou mudado —: o que mudou, para quem lê
+/// a falha.
+fn anotar_o_registro_de_identidade(quando: &str) {
+    let [
+        agentes,
+        administradores,
+        revogados,
+        editores,
+        fontes,
+        lapides,
+    ] = crate::identidade::resumo_do_registro_de_teste();
+    crate::log_info!(
+        "teste",
+        "o registro de identidade {}: {} agente(s), {} administrador(es) ({} revogado(s)), {} editor(es), {} fonte(s) de hora, {} lapide(s)",
+        quando,
+        agentes,
+        administradores,
+        revogados,
+        editores,
+        fontes,
+        lapides
+    );
+}
+
+/// A impressão do registro de identidade com que a suíte começa
+/// (`identidade::impressao_do_registro_de_teste`), tirada pelo executor
+/// antes do primeiro caso: a que cada caso devolve — ver
+/// [`estado_da_suite_devolvido`].
+static IMPRESSAO_DO_REGISTRO: AtomicU64 = AtomicU64::new(0);
+
+/// O executor confere o registro de identidade que cada caso devolve
+/// ([`estado_da_suite_devolvido`]): a chave de teste registrada como
+/// administradora reprova, e o executor devolve o registro da imagem — ela
+/// deixa de ser administradora. O controle positivo da conferência que o
+/// adversário do lote ICACHE-2 pediu; sem ela, um caso que deixasse alguém
+/// no registro só apareceria quando a divisão em partes o pusesse antes de
+/// um que contasse os administradores, ou que dependesse de a chave de teste
+/// não ser um deles.
+fn suite_o_executor_ve_e_devolve_o_registro_de_identidade() -> Resultado {
+    let chave = sigilo::publica_de(&ADMIN_DE_TESTE);
+    let antes = crate::identidade::impressao_do_registro_de_teste();
+    let era = crate::identidade::administrador(&chave).is_some();
+    crate::identidade::registrar_administrador_de_teste(chave, "administrador");
+    let mudou = crate::identidade::impressao_do_registro_de_teste() != antes;
+    let visto = estado_da_suite_devolvido();
+    let devolvido = crate::identidade::impressao_do_registro_de_teste() == antes
+        && crate::identidade::administrador(&chave).is_none();
+    let o_da_suite = estado_da_suite_devolvido();
+    if era {
+        return Err("a chave de teste ja era administradora antes do caso");
+    }
+    if !mudou {
+        return Err("registrar um administrador nao mudou a impressao do registro");
+    }
+    if visto != Err("o caso deixou o registro de identidade mudado") {
+        return Err("o executor nao viu o registro de identidade mudado");
+    }
+    if !devolvido {
+        return Err("o executor nao devolveu o registro de identidade: ele ficou mudado");
+    }
+    o_da_suite.map_err(|_| "o executor reprovou o estado da suite")
 }
 
 /// O executor confere o shift do teclado que cada caso devolve
