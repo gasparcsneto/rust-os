@@ -64226,11 +64226,15 @@ fn anotar_as_pessoas(quando: &str) {
 
 /// O executor confere a política em vigor que cada caso devolve
 /// ([`estado_da_suite_devolvido`]): cada mudança, uma de cada vez — um papel
-/// a mais, as permissões de um papel, a taxa de um papel, o papel da serial
-/// e os apertos —, reprova, e o executor põe de volta a do começo. O
+/// a mais, as permissões de um papel, a taxa de um papel, o papel da
+/// serial, os apertos, o local, o papel de um serviço, o remoto e um
+/// quórum —, reprova, e o executor põe de volta a do começo. O
 /// controle positivo da conferência que o adversário do lote ICACHE-3 pediu
-/// (o achado 2). As quatro mudanças que não mudam o número de papéis são a
-/// guarda de uma comparação reduzida às contas, que passaria pela primeira.
+/// (o achado 2). As oito mudanças que não mudam o número de papéis são a
+/// guarda de uma comparação reduzida às contas, que passaria pela primeira;
+/// e as quatro últimas, a de uma comparação reduzida aos campos que as
+/// outras mudam — os papéis, a serial e os apertos —, que passaria por
+/// elas (o achado 5 do adversário da rodada 5).
 ///
 /// O controle chama a conferência ele mesmo: prova a função, e não que o
 /// laço do executor a chama depois de cada caso — isso é
@@ -64296,6 +64300,30 @@ fn suite_o_executor_ve_e_devolve_a_politica_em_vigor() -> Resultado {
         (
             "os apertos",
             com_a_linha(&|l| l.starts_with("apertos "), &mais_um)?,
+        ),
+        (
+            "o local",
+            com_a_linha(&|l| l.starts_with("local "), &|_| {
+                alloc::string::String::from("local operador")
+            })?,
+        ),
+        (
+            "o papel de um servico",
+            com_a_linha(&|l| l.starts_with("servico hora "), &|_| {
+                alloc::string::String::from("servico hora operador")
+            })?,
+        ),
+        (
+            "o remoto",
+            com_a_linha(&|l| l.starts_with("remoto "), &|_| {
+                alloc::string::String::new()
+            })?,
+        ),
+        (
+            "um quorum",
+            com_a_linha(&|l| l.starts_with("quorum system.update "), &|_| {
+                alloc::string::String::from("quorum system.update 3 3")
+            })?,
         ),
     ];
     let esperado: Resultado = Err("o caso deixou a politica em vigor mudada");
@@ -64522,16 +64550,82 @@ fn suite_o_executor_confere_depois_de_cada_caso() -> Resultado {
 }
 
 /// A impressão do registro vê cada campo dele, e o executor o devolve: o
-/// papel de um agente, uma lápide, a ordem dos administradores, as fontes de
-/// hora e os editores, cada um mudado e devolvido antes do seguinte. O
-/// controle de antes só registra um administrador — a conta deles muda —, e
-/// uma impressão reduzida às contas passaria nele (o achado 4 do adversário
-/// do lote ICACHE-3).
+/// papel, a chave, o nome e a origem de um agente; uma lápide; a ordem dos
+/// administradores, e o nome, o papel, a revogação e a assinatura de um
+/// deles; as fontes de hora e os editores — cada um mudado e devolvido antes
+/// do seguinte. O controle de antes só registra um administrador — a conta
+/// deles muda —, e uma impressão reduzida às contas passaria nele (o achado
+/// 4 do adversário do lote ICACHE-3). As cinco mudanças do lote ICACHE-4 —
+/// o papel de um agente, a lápide, a ordem, as fontes e os editores —
+/// deixavam passar uma impressão reduzida aos campos que elas mudam; as
+/// outras sete são a guarda dela (o achado 5 do adversário da rodada 5).
+///
+/// Cada mudança mexe só no campo dela: a de um agente troca o registro de
+/// agentes por um igual com só aquele campo mudado
+/// (`identidade::restaurar_agentes`); a do nome, do papel e da assinatura
+/// de um administrador, o grupo por um igual
+/// (`identidade::substituir_administradores_de_teste`), e o grupo trocado
+/// por ele mesmo não muda a impressão — o controle o confere antes; e a
+/// revogação põe a lápide do primeiro e a esquece logo depois: a marca dele
+/// fica, e a lista das lápides volta a ser a do começo, vazia — o controle
+/// também o confere. A lápide anula as mensagens vivas da credencial, como
+/// em `persistencia: a lapide vence a imagem`; a suíte não tem nenhuma de um
+/// administrador da imagem.
+///
+/// O controle chama a conferência ele mesmo: prova a função, e não que o
+/// laço do executor a chama depois de cada caso — isso é
+/// [`suite_o_executor_confere_depois_de_cada_caso`].
 fn suite_a_impressao_do_registro_ve_cada_campo() -> Resultado {
+    use crate::identidade::{Agente, MembroDeTeste, Origem};
     let comeco = IMPRESSAO_DO_REGISTRO.load(SeqCst);
     if crate::identidade::impressao_do_registro_de_teste() != comeco {
         return Err("o registro nao era o do comeco da suite");
     }
+    // A revogação de um administrador é isolada só com a lista das lápides
+    // vazia no começo: a quinta conta do resumo.
+    if crate::identidade::resumo_do_registro_de_teste()[5] != 0 {
+        return Err("o registro do comeco da suite tem lapide");
+    }
+    let agentes = crate::identidade::agentes();
+    if agentes.is_empty() {
+        return Err("a imagem nao tem agente");
+    }
+    let grupo = crate::identidade::grupo_de_administradores();
+    let primeiro = grupo.first().ok_or("a imagem nao tem administrador")?;
+    // O grupo com o primeiro administrador trocado pelo nome, o papel e a
+    // assinatura dados, e os outros como estão.
+    let com_o_primeiro = |nome: &str, papel: &str, assinatura: Option<[u8; 32]>| {
+        let membros: alloc::vec::Vec<MembroDeTeste> = grupo
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                if i == 0 {
+                    (a.chave, nome, papel, assinatura)
+                } else {
+                    (
+                        a.chave,
+                        a.nome.as_str(),
+                        a.papel.as_deref().unwrap_or(""),
+                        a.assinatura,
+                    )
+                }
+            })
+            .collect();
+        crate::identidade::substituir_administradores_de_teste(&membros);
+    };
+    let papel_do_primeiro = primeiro.papel.as_deref().unwrap_or("");
+    com_o_primeiro(&primeiro.nome, papel_do_primeiro, primeiro.assinatura);
+    let o_grupo_por_ele_mesmo = crate::identidade::impressao_do_registro_de_teste() == comeco;
+    registro_da_imagem();
+    if !o_grupo_por_ele_mesmo {
+        return Err("o grupo de administradores trocado por ele mesmo mudou a impressao");
+    }
+    // O registro de agentes com o primeiro mudado por `mudar`.
+    let com_o_agente = |mudar: &dyn Fn(&mut Agente)| {
+        let mut lista = agentes.clone();
+        mudar(&mut lista[0]);
+        crate::identidade::restaurar_agentes(&lista);
+    };
     let esperado: Resultado = Err("o caso deixou o registro de identidade mudado");
     let mut falhas: alloc::vec::Vec<&'static str> = alloc::vec::Vec::new();
     let mut conferir = |qual: &'static str, mudar: &dyn Fn()| {
@@ -64551,12 +64645,23 @@ fn suite_a_impressao_do_registro_ve_cada_campo() -> Resultado {
             falhas.push(qual);
         }
     };
-    let agente = crate::identidade::agentes()
-        .first()
-        .map(|a| a.nome.clone())
-        .ok_or("a imagem nao tem agente")?;
+    let agente = agentes[0].nome.clone();
     conferir("o papel de um agente", &|| {
         let _ = crate::identidade::atribuir(&agente, "papel-de-controle");
+    });
+    conferir("a chave de um agente", &|| {
+        com_o_agente(&|a| a.chave = [0x5a; 32]);
+    });
+    conferir("o nome de um agente", &|| {
+        com_o_agente(&|a| a.nome = alloc::string::String::from("agente-de-controle"));
+    });
+    conferir("a origem de um agente", &|| {
+        com_o_agente(&|a| {
+            a.origem = match a.origem {
+                Origem::Imagem => Origem::Administracao,
+                Origem::Administracao => Origem::Imagem,
+            }
+        });
     });
     conferir("uma lapide", &|| {
         crate::identidade::aplicar_lapide(&[0x5a; 32])
@@ -64576,6 +64681,27 @@ fn suite_a_impressao_do_registro_ve_cada_campo() -> Resultado {
             })
             .collect();
         crate::identidade::substituir_administradores_de_teste(&membros);
+    });
+    conferir("o nome de um administrador", &|| {
+        com_o_primeiro(
+            "administrador-de-controle",
+            papel_do_primeiro,
+            primeiro.assinatura,
+        );
+    });
+    conferir("o papel de um administrador", &|| {
+        com_o_primeiro(&primeiro.nome, "papel-de-controle", primeiro.assinatura);
+    });
+    conferir("a assinatura de um administrador", &|| {
+        let outra = match primeiro.assinatura {
+            Some(_) => None,
+            None => Some([0x5a; 32]),
+        };
+        com_o_primeiro(&primeiro.nome, papel_do_primeiro, outra);
+    });
+    conferir("a revogacao de um administrador", &|| {
+        crate::identidade::aplicar_lapide(&primeiro.chave);
+        crate::identidade::esquecer_lapides_de_teste();
     });
     conferir("as fontes de hora", &|| {
         let _ = crate::identidade::trocar_fontes_de_hora_de_teste(None);
