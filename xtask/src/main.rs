@@ -21048,7 +21048,8 @@ fn sob_arvore(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> R
     }
 
     // A linha do log que conta é a deste confirm: a sonda do Terminal deixou
-    // uma igual no anel pouco antes — ver [`linhas_desde`].
+    // no anel, pouco antes, uma linha com o mesmo texto — ver
+    // [`linhas_desde`].
     let desde = desde_do_log(&mut |m, p| pedir(7707, m, p), "arvore")?;
     let r = pedir(7704, "ui.act", r#"{"id":3,"action":"confirm"}"#)?;
     if !r.contains(r#""executed":"system.uptime""#) {
@@ -21063,7 +21064,8 @@ fn sob_arvore(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> R
         ));
     }
     let log = pedir(7706, "log.tail", r#"{"count":16}"#)?;
-    if !diz_desde(&log, desde, "executado: system.uptime (agente 0)", "arvore")? {
+    let executado = Esperada::Executado("executado: system.uptime (agente 0)");
+    if !diz_desde(&log, desde, executado, "arvore")? {
         return Err(format!(
             "arvore: o log nao registrou o agente como origem\n  {log}"
         ));
@@ -21322,7 +21324,9 @@ fn sob_mouse(
     println!("  [mouse] ok  o ponteiro chegou ao botao em ({cx}, {cy}), com o cursor na tela");
 
     // O clique. A linha que conta é a dele: a sonda da barra, logo antes,
-    // deixou uma igual no anel, pelo F1 — ver [`linhas_desde`].
+    // deixou uma igual no anel, pelo F1 — ver [`linhas_desde`]. E é a linha
+    // inteira, no subsistema `ui`: a recusa do mesmo press começa igual, e
+    // reprova — ver [`Esperada`].
     let desde = desde_do_log(&mut |m, p| pedir(id, m, p), "mouse")?;
     id += 1;
     for down in [true, false] {
@@ -21334,12 +21338,17 @@ fn sob_mouse(
         )?;
         std::thread::sleep(Duration::from_millis(100));
     }
-    let pessoa = format!("pessoa: press no elemento {BOTAO}");
+    let pessoa = Esperada::Acao {
+        origem: "pessoa",
+        acao: "press",
+        elemento: BOTAO,
+    };
+    let leitura = LeituraDoLog::desde(desde, "mouse");
     let limite = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < limite {
         ultima = pedir(id, "log.tail", r#"{"count":16}"#)?;
         id += 1;
-        if diz_desde(&ultima, desde, &pessoa, "mouse")? {
+        if leitura.diz(&ultima, pessoa)? {
             println!("  [mouse] ok  o clique pressionou o botao, pela pessoa");
             return Ok(());
         }
@@ -22186,12 +22195,18 @@ fn sob_agentes(arch: Arquitetura) -> Result<(), String> {
     if !r.contains(r#""ok":true"#) {
         return Err(format!("agentes: o confirm da porta 2 foi recusado\n  {r}"));
     }
-    agente.esperar(
-        "log.tail",
-        r#"{"count":24}"#,
-        &|l| diz_desde(l, desde, "executado: system.info (agente 2)", "agentes").unwrap_or(false),
-        "o comando do agente da porta 2 nao executou, ou o log nao diz que foi ele",
-    )?;
+    // Uma espera por um predicado: o motivo de uma leitura que não se
+    // completa vai na mensagem do prazo — ver [`LeituraDoLog::achou`].
+    let leitura = LeituraDoLog::desde(desde, "agentes");
+    let executado = Esperada::Executado("executado: system.info (agente 2)");
+    agente
+        .esperar(
+            "log.tail",
+            r#"{"count":24}"#,
+            &|l| leitura.achou(l, executado),
+            "o comando do agente da porta 2 nao executou, ou o log nao diz que foi ele",
+        )
+        .map_err(|e| leitura.no_prazo(e))?;
     println!("  [agentes] ok  o agente da porta 2 executou no Terminal, e o log diz `agente 2`");
 
     // As mensagens, pelo cliente de verdade: a porta 1 manda à 3; o
@@ -24180,20 +24195,17 @@ fn sob_formulario(
     if !r.contains(r#""ok":true"#) {
         return Err(format!("formulario: o press no OK foi recusado\n  {r}"));
     }
+    // Uma espera por um predicado: o motivo de uma leitura que não se
+    // completa vai na mensagem do prazo — ver [`LeituraDoLog::achou`].
+    let leitura = LeituraDoLog::desde(desde, "formulario");
+    let acionado = Esperada::DoPrograma("formulario: acionado 3 [Ana] [Souza]");
     esperar(
         &mut pedir,
         log,
-        &|l| {
-            diz_desde(
-                l,
-                desde,
-                "formulario: acionado 3 [Ana] [Souza]",
-                "formulario",
-            )
-            .unwrap_or(false)
-        },
+        &|l| leitura.achou(l, acionado),
         "o OK do agente nao chegou ao programa com os valores",
-    )?;
+    )
+    .map_err(|e| leitura.no_prazo(e))?;
     println!("  [formulario] ok  preenchido e confirmado pelo agente, pela arvore");
 
     // Os campos que o agente editou são dele até soltar: a árvore mostra o
@@ -24223,20 +24235,15 @@ fn sob_formulario(
             .map_err(|e| format!("formulario: falha ao mandar `{tecla}`: {e}"))?;
         std::thread::sleep(Duration::from_millis(20));
     }
+    let leitura = LeituraDoLog::desde(desde, "formulario");
+    let acionado = Esperada::DoPrograma("formulario: acionado 1 [Anax] [Souza]");
     esperar(
         &mut pedir,
         log,
-        &|l| {
-            diz_desde(
-                l,
-                desde,
-                "formulario: acionado 1 [Anax] [Souza]",
-                "formulario",
-            )
-            .unwrap_or(false)
-        },
+        &|l| leitura.achou(l, acionado),
         "o que a pessoa digitou nao chegou ao campo, ou o Enter nao o confirmou",
-    )?;
+    )
+    .map_err(|e| leitura.no_prazo(e))?;
     println!("  [formulario] ok  a pessoa digitou no mesmo campo e confirmou com o Enter");
 
     // E fecha pela caixa, com o mouse.
@@ -24323,10 +24330,11 @@ fn sob_interface_nativa(
                 "nativo: o user.run nao lancou {programa}\n  {lancado}"
             ));
         }
+        let leitura = LeituraDoLog::desde(desde, "nativo");
         let limite = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             let log = pedir("log.tail", r#"{"count":32}"#)?;
-            if saida_desde(&linhas_desde(&log, desde, "nativo")?, desde, codigo).is_some() {
+            if saida_desde(&leitura.novas(&log)?, desde, codigo).is_some() {
                 break;
             }
             if std::time::Instant::now() >= limite {
@@ -24446,34 +24454,221 @@ fn saidas_desde(registros: &[RegistroDoLog], desde: u64) -> impl Iterator<Item =
 /// # Por que toda espera
 ///
 /// Uma espera pelo log lê só o que entrou no anel depois do pedido —
-/// `desde` é o [`desde_do_log`] lido antes dele —, senão uma linha igual,
-/// mais antiga, passa por ela. Foi o P1 do lote FUMAÇA-USB (ver
+/// `desde` é o [`desde_do_log`] lido antes dele —, senão uma linha de mesmo
+/// texto, mais antiga, passa por ela. Foi o P1 do lote FUMAÇA-USB (ver
 /// [`saida_desde`]), e não estava só no `guardar`: o clique da sonda do
 /// mouse esperava `pessoa: press no elemento 5` nas 16 últimas linhas, e a
 /// sonda da barra, logo antes, deixa essa mesma linha pelo F1; a árvore
 /// conferia `executado: system.uptime (agente 0)`, e a sonda do Terminal
-/// deixa uma igual poucas linhas antes. Nas duas, a linha velha bastava
-/// para passar: o clique e o confirm não eram conferidos.
+/// deixa três registros antes uma linha com esse texto — `em terminal:0`,
+/// e não `em console`. Nas duas, a linha velha bastava para passar: o
+/// clique não era conferido, e do confirm, só a resposta e o que a árvore
+/// mostrou — a origem dele no log, não.
 ///
-/// Uma resposta que não se lê é erro, e não uma lista vazia: lida como
-/// vazia, a espera esperaria o prazo inteiro e reprovaria pelo motivo
-/// errado. Menos nas três que esperam por um predicado — a do agente da
-/// porta 2 no Terminal e as duas do formulário —, que não têm por onde
-/// devolver o erro: nelas a resposta ilegível conta como não achada, e a
-/// espera reprova no prazo, com a resposta na mensagem.
+/// # Uma leitura que não alcança `desde` é erro
+///
+/// O `log.tail` devolve as últimas `count` linhas, e o anel guarda 128. Se
+/// entraram mais que isso de `desde` em diante, as primeiras não estão na
+/// resposta: a leitura começa depois de `desde`, e a espera não pode dizer
+/// que a linha que procura não estava lá. A de antes devolvia a lista
+/// curta, sem erro, e a espera vencia o prazo pelo motivo errado — "não
+/// saiu", "não disse" — (o adversário do lote FUMAÇA-2). Agora é erro, com
+/// quantas linhas a leitura não alcançou. Uma espera que lê muitas vezes
+/// anda com `desde` a cada leitura — ver [`LeituraDoLog`].
+///
+/// Uma resposta que não se lê também é erro, e não uma lista vazia: lida
+/// como vazia, a espera esperaria o prazo inteiro e reprovaria pelo motivo
+/// errado. Nas três esperas por um predicado — a do agente da porta 2 no
+/// Terminal e as duas do formulário —, que não têm por onde devolver o
+/// erro, ele conta como não achada e vai na mensagem do prazo — ver
+/// [`LeituraDoLog::achou`].
 fn linhas_desde(resposta: &str, desde: u64, quem: &str) -> Result<Vec<RegistroDoLog>, String> {
-    let (registros, _) = registros_do_log(resposta)
+    let (registros, emitidos) = registros_do_log(resposta)
         .ok_or_else(|| format!("{quem}: o log.tail nao se le\n  {resposta}"))?;
+    // A primeira linha que a leitura traz — sem nenhuma, a próxima a sair.
+    let primeira = registros.first().map_or(emitidos, |r| r.seq);
+    if primeira > desde {
+        return Err(format!(
+            "{quem}: a leitura do log nao alcancou {} linha(s) que a espera ainda nao tinha lido, de [{desde}] a [{}]: entraram no anel mais linhas que o count da leitura\n  {resposta}",
+            primeira - desde,
+            primeira - 1
+        ));
+    }
     Ok(registros.into_iter().filter(|r| r.seq >= desde).collect())
 }
 
-/// Se a resposta de um `log.tail` traz, de `desde` em diante, uma linha
-/// com `texto`: a conferência de uma espera pelo log que procura um texto,
-/// e não uma saída — ver [`linhas_desde`].
-fn diz_desde(resposta: &str, desde: u64, texto: &str, quem: &str) -> Result<bool, String> {
-    Ok(linhas_desde(resposta, desde, quem)?
-        .iter()
-        .any(|r| r.mensagem.contains(texto)))
+/// Se a resposta de um `log.tail` traz, de `desde` em diante, a linha
+/// `esperada`, inteira — e erro, se traz a recusa dela: a conferência de
+/// uma espera pelo log que lê uma vez só. Ver [`Esperada::nas`] e
+/// [`linhas_desde`].
+fn diz_desde(
+    resposta: &str,
+    desde: u64,
+    esperada: Esperada<'_>,
+    quem: &str,
+) -> Result<bool, String> {
+    esperada.nas(&linhas_desde(resposta, desde, quem)?, quem)
+}
+
+/// A linha que uma espera da fumaça procura no log: inteira, com o
+/// subsistema, e não um pedaço do texto.
+///
+/// # Por que inteira
+///
+/// Porque um pedaço casa outra linha. As esperas do clique do mouse e do F1
+/// da barra procuravam `pessoa: press no elemento 5` com `contains`, em
+/// qualquer subsistema, e o kernel registra a recusa do mesmo press com o
+/// mesmo começo — `pessoa: press no elemento 5 recusado: <motivo>` —, como
+/// registraria o press no elemento 57. Com o kernel recusando o press da
+/// pessoa no botão da barra, a fumaça inteira passava, e as duas sondas
+/// diziam que a pessoa tinha pressionado (o achado 1 do adversário do lote
+/// FUMAÇA-2). E as duas são as únicas provas desse press: ele não tem
+/// resposta, só a linha.
+///
+/// O texto de cada variante é o que o kernel ou o programa escreve; a
+/// recusa de uma ação no mesmo elemento, na janela da espera, a reprova —
+/// ver [`Esperada::nas`].
+#[derive(Clone, Copy, Debug)]
+enum Esperada<'t> {
+    /// Uma ação na interface, como `ui::agir_com_versao` a registra no
+    /// subsistema `ui`, depois do desfecho: `<origem>: <acao> no elemento
+    /// <id>`, igual. A recusa sai com ` recusado: <motivo>` depois.
+    Acao {
+        origem: &'t str,
+        acao: &'t str,
+        elemento: u32,
+    },
+    /// Um comando que o interpretador executou, no subsistema `console`: o
+    /// texto — `executado: <comando> (<origem>)` — seguido de ` em
+    /// <console>`.
+    Executado(&'t str),
+    /// Uma linha que um programa escreveu, no subsistema `usuario`, igual.
+    DoPrograma(&'t str),
+}
+
+impl Esperada<'_> {
+    /// Se `r` é a linha esperada.
+    fn casa(&self, r: &RegistroDoLog) -> bool {
+        match *self {
+            Esperada::Acao {
+                origem,
+                acao,
+                elemento,
+            } => {
+                r.subsistema == "ui"
+                    && r.mensagem == format!("{origem}: {acao} no elemento {elemento}")
+            }
+            Esperada::Executado(texto) => {
+                r.subsistema == "console"
+                    && r.mensagem
+                        .strip_prefix(texto)
+                        .is_some_and(|resto| resto.starts_with(" em "))
+            }
+            Esperada::DoPrograma(texto) => r.subsistema == "usuario" && r.mensagem == texto,
+        }
+    }
+
+    /// Se `r` diz que o kernel recusou uma ação no elemento de uma
+    /// [`Esperada::Acao`] — de qualquer origem, e qualquer ação: `<origem>:
+    /// <acao> no elemento <id> recusado: <motivo>`, no subsistema `ui`.
+    fn e_a_recusa(&self, r: &RegistroDoLog) -> bool {
+        let Esperada::Acao { elemento, .. } = *self else {
+            return false;
+        };
+        r.subsistema == "ui"
+            && r.mensagem
+                .split_once(" recusado: ")
+                .is_some_and(|(feito, _)| feito.ends_with(&format!(" no elemento {elemento}")))
+    }
+
+    /// Se `linhas` trazem a linha esperada. A recusa de uma ação no mesmo
+    /// elemento é erro, e vale mesmo com a esperada junto: na janela da
+    /// espera, só a ação que ela espera age no elemento.
+    fn nas(&self, linhas: &[RegistroDoLog], quem: &str) -> Result<bool, String> {
+        if let Some(r) = linhas.iter().find(|r| self.e_a_recusa(r)) {
+            return Err(format!(
+                "{quem}: o kernel recusou a acao: [{}] {}",
+                r.seq, r.mensagem
+            ));
+        }
+        Ok(linhas.iter().any(|r| self.casa(r)))
+    }
+}
+
+/// As leituras do log de uma espera da fumaça que lê muitas vezes: cada uma
+/// devolve as linhas que entraram no anel depois das que a espera já leu —
+/// na primeira, as de depois do pedido —, e cada linha uma vez.
+///
+/// # Por que anda
+///
+/// Porque uma espera longa lê, somadas as leituras, mais linhas que o
+/// `count` de uma: o `compressao` diz perto de cinquenta enquanto a fumaça
+/// o espera, de 32 em 32. Lida sempre de `desde`, a espera daria por
+/// perdidas as que ela já leu — ver [`linhas_desde`]. Andando, a leitura
+/// que não alcança a primeira linha que a espera ainda não leu perdeu
+/// linhas de verdade: entraram mais que o `count` entre duas leituras.
+///
+/// # O motivo, nas esperas por um predicado
+///
+/// As três esperas por um predicado — a do agente da porta 2 no Terminal e
+/// as duas do formulário — só dizem sim ou não. Com [`Self::achou`], o erro
+/// de uma leitura — a resposta que não se lê, as linhas que ela não
+/// alcançou, a recusa — conta como não achada, fica guardado, e vai na
+/// mensagem do prazo, por [`Self::no_prazo`].
+struct LeituraDoLog<'q> {
+    /// O número da primeira linha que a espera ainda não leu.
+    proxima: std::cell::Cell<u64>,
+    quem: &'q str,
+    /// O erro da última leitura que não se completou, numa espera por um
+    /// predicado.
+    motivo: std::cell::RefCell<Option<String>>,
+}
+
+impl<'q> LeituraDoLog<'q> {
+    /// As leituras de uma espera a partir de `desde`: o [`desde_do_log`]
+    /// lido antes do pedido.
+    fn desde(desde: u64, quem: &'q str) -> Self {
+        LeituraDoLog {
+            proxima: std::cell::Cell::new(desde),
+            quem,
+            motivo: Default::default(),
+        }
+    }
+
+    /// As linhas de `resposta` que a espera ainda não leu, e as marca como
+    /// lidas. Erro se a resposta não se lê, ou se não alcança a primeira
+    /// delas — ver [`linhas_desde`].
+    fn novas(&self, resposta: &str) -> Result<Vec<RegistroDoLog>, String> {
+        let novas = linhas_desde(resposta, self.proxima.get(), self.quem)?;
+        if let Some(ultima) = novas.last() {
+            self.proxima.set(ultima.seq + 1);
+        }
+        Ok(novas)
+    }
+
+    /// Se as linhas que a espera ainda não leu trazem a `esperada` — ver
+    /// [`Esperada::nas`].
+    fn diz(&self, resposta: &str, esperada: Esperada<'_>) -> Result<bool, String> {
+        esperada.nas(&self.novas(resposta)?, self.quem)
+    }
+
+    /// [`Self::diz`] numa espera por um predicado: o erro conta como não
+    /// achada, e fica guardado para a mensagem do prazo.
+    fn achou(&self, resposta: &str, esperada: Esperada<'_>) -> bool {
+        self.diz(resposta, esperada).unwrap_or_else(|motivo| {
+            self.motivo.replace(Some(motivo));
+            false
+        })
+    }
+
+    /// A mensagem do prazo de uma espera por um predicado, com o motivo da
+    /// última leitura que não se completou, se houve uma.
+    fn no_prazo(&self, erro: String) -> String {
+        match self.motivo.take() {
+            Some(motivo) => format!("{erro}\n  {motivo}"),
+            None => erro,
+        }
+    }
 }
 
 /// Junta a `ditas`, sem repetir, o que um programa disse em `registros`:
@@ -25216,11 +25411,12 @@ fn sob_a_rede(
             "rede: o user.run nao lancou o discador\n  {lancado}"
         ));
     }
+    let leitura = LeituraDoLog::desde(desde, "rede");
     let comeco = std::time::Instant::now();
     let limite = comeco + Duration::from_secs(30);
     loop {
         let log = serial.pedir("log.tail", r#"{"count":32}"#)?;
-        if saida_desde(&linhas_desde(&log, desde, "rede")?, desde, 79).is_some() {
+        if saida_desde(&leitura.novas(&log)?, desde, 79).is_some() {
             break;
         }
         if std::time::Instant::now() > limite {
@@ -25257,12 +25453,13 @@ fn sob_a_rede(
     if !lancado.contains(r#""launched":true"#) {
         return Err(format!("tls: o user.run nao lancou o cifrado\n  {lancado}"));
     }
+    let leitura = LeituraDoLog::desde(desde, "tls");
     let comeco = std::time::Instant::now();
     let limite = comeco + Duration::from_secs(60);
     let mut ditas: Vec<String> = Vec::new();
     loop {
         let log = serial.pedir("log.tail", r#"{"count":32}"#)?;
-        let novas = linhas_desde(&log, desde, "tls")?;
+        let novas = leitura.novas(&log)?;
         juntar_ditas(&mut ditas, &novas, "cifrado: ");
         if saida_desde(&novas, desde, 86).is_some() {
             break;
@@ -25347,12 +25544,13 @@ fn sob_a_rede(
     if !lancado.contains(r#""launched":true"#) {
         return Err(format!("http: o user.run nao lancou a pagina\n  {lancado}"));
     }
+    let leitura = LeituraDoLog::desde(desde, "http");
     let comeco = std::time::Instant::now();
     let limite = comeco + Duration::from_secs(180);
     let mut ditas: Vec<String> = Vec::new();
     loop {
         let log = serial.pedir("log.tail", r#"{"count":32}"#)?;
-        let novas = linhas_desde(&log, desde, "http")?;
+        let novas = leitura.novas(&log)?;
         juntar_ditas(&mut ditas, &novas, "pagina: ");
         if saida_desde(&novas, desde, 88).is_some() {
             break;
@@ -25623,13 +25821,14 @@ fn sob_o_plano_de_dados(
                 "dados: o operador nao lancou o {programa}\n  {lancado}"
             ));
         }
+        let leitura = LeituraDoLog::desde(desde, "dados");
         let lancado_em = std::time::Instant::now();
         let limite = lancado_em + Duration::from_secs(teto);
         let marca = format!("{programa}: ");
         let mut ditas: Vec<String> = Vec::new();
         loop {
             let log = pedir("log.tail", r#"{"count":32}"#)?;
-            let novas = linhas_desde(&log, desde, "dados")?;
+            let novas = leitura.novas(&log)?;
             juntar_ditas(&mut ditas, &novas, &marca);
             if saida_desde(&novas, desde, saida).is_some() {
                 break;
@@ -25768,11 +25967,12 @@ fn sob_a_compressao(
     let processo = numero_no_caminho(&lancado, &["thread_id"])
         .filter(|_| lancado.contains(r#""launched":true"#))
         .ok_or_else(|| format!("compressao: o operador nao lancou o programa\n  {lancado}"))?;
+    let leitura = LeituraDoLog::desde(desde, "compressao");
     let limite = comeco + Duration::from_secs(300);
     let mut ditas: Vec<String> = Vec::new();
     loop {
         let log = pedir("log.tail", r#"{"count":32}"#)?;
-        let novas = linhas_desde(&log, desde, "compressao")?;
+        let novas = leitura.novas(&log)?;
         juntar_ditas(&mut ditas, &novas, "compressao: ");
         if saida_desde(&novas, desde, 98).is_some() {
             break;
@@ -25987,11 +26187,12 @@ fn sob_os_cookies(
     let processo = numero_no_caminho(&lancado, &["thread_id"])
         .filter(|_| lancado.contains(r#""launched":true"#))
         .ok_or_else(|| format!("cookies: o operador nao lancou o programa\n  {lancado}"))?;
+    let leitura = LeituraDoLog::desde(desde, "cookies");
     let limite = comeco + Duration::from_secs(300);
     let mut ditas: Vec<String> = Vec::new();
     loop {
         let log = pedir("log.tail", r#"{"count":32}"#)?;
-        let novas = linhas_desde(&log, desde, "cookies")?;
+        let novas = leitura.novas(&log)?;
         juntar_ditas(&mut ditas, &novas, "cookies: ");
         if saida_desde(&novas, desde, 99).is_some() {
             break;
@@ -26301,11 +26502,12 @@ fn sob_o_ic(
     let processo = numero_no_caminho(&lancado, &["thread_id"])
         .filter(|_| lancado.contains(r#""launched":true"#))
         .ok_or_else(|| format!("ic: o operador nao lancou o programa\n  {lancado}"))?;
+    let leitura = LeituraDoLog::desde(desde, "ic");
     let limite = comeco + Duration::from_secs(300);
     let mut ditas: Vec<String> = Vec::new();
     loop {
         let log = pedir("log.tail", r#"{"count":32}"#)?;
-        let novas = linhas_desde(&log, desde, "ic")?;
+        let novas = leitura.novas(&log)?;
         juntar_ditas(&mut ditas, &novas, "verificado: ");
         if saida_desde(&novas, desde, 97).is_some() {
             break;
@@ -26598,11 +26800,12 @@ fn sob_o_http2(
     let processo = numero_no_caminho(&lancado, &["thread_id"])
         .filter(|_| lancado.contains(r#""launched":true"#))
         .ok_or_else(|| format!("http2: o operador nao lancou o programa\n  {lancado}"))?;
+    let leitura = LeituraDoLog::desde(desde, "http2");
     let limite = comeco + Duration::from_secs(300);
     let mut ditas: Vec<String> = Vec::new();
     loop {
         let log = pedir("log.tail", r#"{"count":32}"#)?;
-        let novas = linhas_desde(&log, desde, "http2")?;
+        let novas = leitura.novas(&log)?;
         juntar_ditas(&mut ditas, &novas, "correntes: ");
         if saida_desde(&novas, desde, 99).is_some() {
             break;
@@ -26882,10 +27085,14 @@ fn sob_o_armazem(
             "armazem: o user.run nao lancou guardar\n  {lancado}"
         ));
     }
+    // As linhas de depois do pedido, de todas as leituras: a mensagem do
+    // prazo as mostra.
+    let leitura = LeituraDoLog::desde(desde, "armazem");
+    let mut registros: Vec<RegistroDoLog> = Vec::new();
     let limite = std::time::Instant::now() + Duration::from_secs(10);
     let saiu = loop {
         let log = pedir("log.tail", r#"{"count":64}"#)?;
-        let registros = linhas_desde(&log, desde, "armazem")?;
+        registros.extend(leitura.novas(&log)?);
         if let Some(seq) = saida_desde(&registros, desde, 77) {
             break seq;
         }
@@ -27024,10 +27231,11 @@ fn sob_o_codigo(
                             "codigo: o selado pela bancada nao rodou\n  {lancado}"
                         ));
                     }
+                    let leitura = LeituraDoLog::desde(desde, "codigo");
                     let limite = std::time::Instant::now() + Duration::from_secs(15);
                     loop {
                         let log = pedir("log.tail", r#"{"count":32}"#)?;
-                        if saida_desde(&linhas_desde(&log, desde, "codigo")?, desde, 92).is_some() {
+                        if saida_desde(&leitura.novas(&log)?, desde, 92).is_some() {
                             break;
                         }
                         if std::time::Instant::now() >= limite {
@@ -27143,7 +27351,8 @@ fn sob_barra(
     println!("  [barra] ok  o relogio anda sozinho: `{antes}` -> `{depois}`");
 
     // As linhas que contam são as deste press e deste F1 — ver
-    // [`linhas_desde`].
+    // [`linhas_desde`] —, inteiras: a recusa do mesmo press começa igual, e
+    // reprova — ver [`Esperada`].
     let desde = desde_do_log(&mut |m, p| pedir(7811, m, p), "barra")?;
     let r = pedir(
         7802,
@@ -27153,9 +27362,13 @@ fn sob_barra(
     if !r.contains(r#""ok":true"#) {
         return Err(format!("barra: o press do agente foi recusado\n  {r}"));
     }
-    let agente = format!("agente 0: press no elemento {BOTAO}");
+    let agente = Esperada::Acao {
+        origem: "agente 0",
+        acao: "press",
+        elemento: BOTAO,
+    };
     let log = pedir(7803, "log.tail", r#"{"count":16}"#)?;
-    if !diz_desde(&log, desde, &agente, "barra")? {
+    if !diz_desde(&log, desde, agente, "barra")? {
         return Err(format!(
             "barra: o log nao registrou o press do agente\n  {log}"
         ));
@@ -27169,14 +27382,19 @@ fn sob_barra(
         .and_then(|()| mon.flush())
         .map_err(|e| format!("barra: falha ao mandar F1: {e}"))?;
 
-    let pessoa = format!("pessoa: press no elemento {BOTAO}");
+    let pessoa = Esperada::Acao {
+        origem: "pessoa",
+        acao: "press",
+        elemento: BOTAO,
+    };
+    let leitura = LeituraDoLog::desde(desde, "barra");
     let limite = std::time::Instant::now() + Duration::from_secs(5);
     let mut ultima = String::new();
     let mut id = 7804;
     while std::time::Instant::now() < limite {
         ultima = pedir(id, "log.tail", r#"{"count":16}"#)?;
         id += 1;
-        if diz_desde(&ultima, desde, &pessoa, "barra")? {
+        if leitura.diz(&ultima, pessoa)? {
             println!("  [barra] ok  F1 pela pessoa, pelo teclado da maquina");
             return Ok(());
         }
@@ -27449,6 +27667,12 @@ fn sob_interpretador(
 
     // Em laço, pelo mesmo motivo da sonda anterior: entre a tecla e o log há
     // o pulso do relógio, o executor e o despacho, cada um com o seu tempo.
+    // Com a origem: foi uma pessoa, pelo teclado. É a metade da auditoria
+    // que a sonda da árvore semântica não alcança.
+    let pessoa = Esperada::Executado("executado: agent.ping (pessoa)");
+    let leitura = LeituraDoLog::desde(desde, "interpretador");
+    // O mesmo comando executado em nome de outro, se aparecer.
+    let mut de_outro: Option<String> = None;
     let limite = std::time::Instant::now() + Duration::from_secs(5);
     let mut ultima = String::new();
     while std::time::Instant::now() < limite {
@@ -27466,25 +27690,27 @@ fn sob_interpretador(
                 "interpretador: veio a resposta de outro pedido\n  {ultima}"
             ));
         }
-        // Com a origem: foi uma pessoa, pelo teclado. É a metade da
-        // auditoria que a sonda da árvore semântica não alcança.
-        if diz_desde(
-            &ultima,
-            desde,
-            "executado: agent.ping (pessoa)",
-            "interpretador",
-        )? {
+        let novas = leitura.novas(&ultima)?;
+        if pessoa.nas(&novas, "interpretador")? {
             println!("  [interpretador] ok  `agent.ping` digitado e executado, pela pessoa");
             return Ok(());
         }
+        de_outro = de_outro.or_else(|| {
+            novas
+                .iter()
+                .find(|r| {
+                    r.subsistema == "console" && r.mensagem.starts_with("executado: agent.ping (")
+                })
+                .map(|r| format!("[{}] {}", r.seq, r.mensagem))
+        });
         std::thread::sleep(Duration::from_millis(100));
     }
 
     // Executado, mas atribuído a quem não o digitou, é outro defeito — e a
     // mensagem precisa dizer qual, ou manda quem depura procurar no teclado.
-    if diz_desde(&ultima, desde, "executado: agent.ping", "interpretador").unwrap_or(false) {
+    if let Some(linha) = de_outro {
         return Err(format!(
-            "interpretador: o comando digitado foi executado, mas o log nao o atribui a pessoa\n  {ultima}"
+            "interpretador: o comando digitado foi executado, mas o log nao o atribui a pessoa\n  {linha}"
         ));
     }
     Err(format!(
@@ -27624,15 +27850,12 @@ fn sob_terminal_pelo_agente(
             }
         }
     }
+    let executado = Esperada::Executado("executado: system.uptime (agente 0)");
+    let leitura = LeituraDoLog::desde(desde, "terminal");
     let limite = std::time::Instant::now() + Duration::from_secs(8);
     loop {
         let log = pedir("log.tail", r#"{"count":24}"#)?;
-        if diz_desde(
-            &log,
-            desde,
-            "executado: system.uptime (agente 0)",
-            "terminal",
-        )? {
+        if leitura.diz(&log, executado)? {
             break;
         }
         if std::time::Instant::now() >= limite {
@@ -30116,17 +30339,22 @@ mod testes {
                 itens.join(",")
             )
         };
-        let press = "pessoa: press no elemento 5";
+        let press = Esperada::Acao {
+            origem: "pessoa",
+            acao: "press",
+            elemento: 5,
+        };
+        let linha = "pessoa: press no elemento 5";
         // O F1 da barra ficou no anel; o clique do mouse ainda não chegou.
         let antes_do_clique = log(
             &[
                 (113, "ui", "agente 0: press no elemento 5"),
-                (114, "ui", press),
+                (114, "ui", linha),
             ],
             115,
         );
         assert_eq!(diz_desde(&antes_do_clique, 115, press, "mouse"), Ok(false));
-        let com_o_clique = log(&[(114, "ui", press), (115, "ui", press)], 116);
+        let com_o_clique = log(&[(114, "ui", linha), (115, "ui", linha)], 116);
         assert_eq!(diz_desde(&com_o_clique, 115, press, "mouse"), Ok(true));
         // Uma resposta que não se lê é erro, e não um "ainda nada".
         let recusada = r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32029,"message":"RATE_LIMIT"}}"#;
@@ -30160,7 +30388,13 @@ mod testes {
                 .find(|c| (40..=48).contains(c))
         };
         assert_eq!(falha(&novas), None);
-        let com_a_falha = log(&[(155, "usuario", "processo encerrou com codigo 45")], 156);
+        let com_a_falha = log(
+            &[
+                (150, "usuario", "pagina: tudo conferiu"),
+                (151, "usuario", "processo encerrou com codigo 45"),
+            ],
+            152,
+        );
         assert_eq!(
             falha(&linhas_desde(&com_a_falha, 150, "http").expect("se le")),
             Some(45)
@@ -30185,6 +30419,161 @@ mod testes {
         assert_eq!(
             ditas,
             ["pagina: tudo conferiu", "pagina: 404 e uma resposta"]
+        );
+    }
+
+    /// A espera casa a linha inteira, e não um pedaço dela (o achado 1 do
+    /// adversário do lote FUMAÇA-2): o press no elemento 57 não é o press no
+    /// 5, nem a mesma linha noutro subsistema; e a recusa do press — o mesmo
+    /// começo, com ` recusado: ` depois — é erro, e não um press feito,
+    /// mesmo com a linha esperada junto. O comando executado é o texto
+    /// seguido do console, e a linha de um programa é igual.
+    #[test]
+    fn a_espera_casa_a_linha_inteira_e_a_recusa_reprova() {
+        use super::*;
+        let r = |seq: u64, subsistema: &str, mensagem: &str| RegistroDoLog {
+            seq,
+            uptime_ms: seq * 10,
+            subsistema: subsistema.into(),
+            mensagem: mensagem.into(),
+        };
+        let press = Esperada::Acao {
+            origem: "pessoa",
+            acao: "press",
+            elemento: 5,
+        };
+        let parecidas = [
+            r(115, "ui", "pessoa: press no elemento 57"),
+            r(116, "usuario", "pessoa: press no elemento 5"),
+            r(117, "ui", "agente 0: press no elemento 5"),
+        ];
+        assert_eq!(press.nas(&parecidas, "mouse"), Ok(false));
+        let feito = r(118, "ui", "pessoa: press no elemento 5");
+        assert_eq!(press.nas(std::slice::from_ref(&feito), "mouse"), Ok(true));
+        // A recusa reprova, com a linha dela na mensagem; a do mesmo
+        // elemento por outra origem também, e a de outro elemento, não.
+        let recusa = r(
+            115,
+            "ui",
+            "pessoa: press no elemento 5 recusado: o kernel esta em post-mortem",
+        );
+        assert_eq!(
+            press.nas(std::slice::from_ref(&recusa), "mouse"),
+            Err(
+                "mouse: o kernel recusou a acao: [115] pessoa: press no elemento 5 recusado: o kernel esta em post-mortem"
+                    .into()
+            )
+        );
+        assert!(press.nas(&[recusa, feito], "mouse").is_err());
+        let do_agente = r(117, "ui", "agente 0: press no elemento 5 recusado: x");
+        assert!(press.nas(&[do_agente], "barra").is_err());
+        let de_outro = r(117, "ui", "pessoa: press no elemento 57 recusado: x");
+        assert_eq!(press.nas(&[de_outro], "mouse"), Ok(false));
+        // O comando executado: o texto e o console depois dele; o que só
+        // começa igual, o que não diz o console e o de outro subsistema,
+        // não.
+        let executado = Esperada::Executado("executado: system.uptime (agente 0)");
+        let no_console = r(
+            111,
+            "console",
+            "executado: system.uptime (agente 0) em console",
+        );
+        assert_eq!(executado.nas(&[no_console], "arvore"), Ok(true));
+        let quase = [
+            r(111, "console", "executado: system.uptime (agente 0)"),
+            r(
+                112,
+                "console",
+                "executado: system.uptime (agente 00) em console",
+            ),
+            r(113, "ui", "executado: system.uptime (agente 0) em console"),
+        ];
+        assert_eq!(executado.nas(&quase, "arvore"), Ok(false));
+        // A linha de um programa, igual, e do subsistema dele.
+        let acionado = Esperada::DoPrograma("formulario: acionado 3 [Ana] [Souza]");
+        let dita = r(124, "usuario", "formulario: acionado 3 [Ana] [Souza]");
+        assert_eq!(acionado.nas(&[dita], "formulario"), Ok(true));
+        let quase = [
+            r(124, "usuario", "formulario: acionado 3 [Ana] [Souza]x"),
+            r(125, "ui", "formulario: acionado 3 [Ana] [Souza]"),
+        ];
+        assert_eq!(acionado.nas(&quase, "formulario"), Ok(false));
+        // Pela resposta do `log.tail`: a recusa de depois do pedido é erro;
+        // a de antes dele, não.
+        let resposta = r#"{"jsonrpc":"2.0","id":7,"result":{"records":[{"seq":115,"uptime_ms":24090,"level":"info","subsystem":"ui","message":"pessoa: press no elemento 5 recusado: o motivo"}],"total_emitted":116}}"#;
+        assert!(diz_desde(resposta, 115, press, "mouse").is_err());
+        assert_eq!(diz_desde(resposta, 116, press, "mouse"), Ok(false));
+    }
+
+    /// Uma leitura do log que não alcança a primeira linha que a espera
+    /// ainda não leu é erro, com quantas faltaram: entraram mais linhas que o
+    /// `count`, e a procurada podia estar entre elas (o achado 6 do
+    /// adversário do lote FUMAÇA-2). A espera que lê muitas vezes anda: o
+    /// que ela já leu não conta de novo, nem falta na leitura seguinte. E
+    /// numa espera por um predicado o motivo vai na mensagem do prazo.
+    #[test]
+    fn a_leitura_que_nao_alcanca_o_que_falta_ler_e_erro() {
+        use super::*;
+        let log = |seqs: std::ops::Range<u64>, emitidos: u64| {
+            let itens: Vec<String> = seqs
+                .map(|seq| {
+                    format!(
+                        r#"{{"seq":{seq},"uptime_ms":{seq},"level":"info","subsystem":"usb","message":"linha {seq}"}}"#
+                    )
+                })
+                .collect();
+            format!(
+                r#"{{"jsonrpc":"2.0","id":7,"result":{{"records":[{}],"total_emitted":{emitidos}}}}}"#,
+                itens.join(",")
+            )
+        };
+        // O pedido em 100, e a leitura de 32 trouxe de 140 a 171: as 40 de
+        // 100 a 139 ficaram de fora.
+        let erro = linhas_desde(&log(140..172, 172), 100, "dados")
+            .expect_err("a leitura que nao alcanca e erro");
+        assert!(
+            erro.starts_with(
+                "dados: a leitura do log nao alcancou 40 linha(s) que a espera ainda nao tinha lido, de [100] a [139]"
+            ),
+            "{erro}"
+        );
+        // Alcançado, só as de `desde` em diante; sem nada novo, nada. Sem
+        // registro nenhum, e com linhas emitidas depois de `desde`, também
+        // não alcançou.
+        let novas = linhas_desde(&log(90..122, 122), 100, "dados").expect("alcanca");
+        assert_eq!(novas.len(), 22);
+        assert_eq!(linhas_desde(&log(68..100, 100), 100, "dados"), Ok(vec![]));
+        assert!(linhas_desde(&log(0..0, 105), 100, "dados").is_err());
+        // A espera anda: setenta linhas, lidas de 32 em 32 a tempo, cada
+        // uma uma vez; e a leitura atrasada, que pulou cinco, é erro.
+        let leitura = LeituraDoLog::desde(100, "compressao");
+        let mut lidas = Vec::new();
+        for (de, ate) in [(96, 128), (110, 142), (138, 170)] {
+            let novas = leitura.novas(&log(de..ate, ate)).expect("alcanca");
+            lidas.extend(novas.into_iter().map(|r| r.seq));
+        }
+        assert_eq!(lidas, (100..170).collect::<Vec<_>>());
+        let erro = leitura
+            .novas(&log(175..207, 207))
+            .expect_err("pulou de 170 a 174");
+        assert!(erro.contains("nao alcancou 5 linha(s)"), "{erro}");
+        // Por um predicado: a leitura que não se completa conta como não
+        // achada, e o motivo vai na mensagem do prazo.
+        let leitura = LeituraDoLog::desde(100, "agentes");
+        let executado = Esperada::Executado("executado: system.info (agente 2)");
+        assert!(!leitura.achou(&log(140..172, 172), executado));
+        let prazo = leitura.no_prazo("agentes: o comando nao executou\n  a resposta".into());
+        assert!(
+            prazo.starts_with(
+                "agentes: o comando nao executou\n  a resposta\n  agentes: a leitura do log nao alcancou 40 linha(s)"
+            ),
+            "{prazo}"
+        );
+        // Sem motivo guardado, a mensagem fica como está.
+        let sem_motivo = LeituraDoLog::desde(0, "agentes");
+        assert_eq!(
+            sem_motivo.no_prazo("agentes: prazo".into()),
+            "agentes: prazo"
         );
     }
 }
