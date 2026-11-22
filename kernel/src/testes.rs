@@ -45358,6 +45358,12 @@ static CASOS: &[Caso] = &[
         nome: "suite: o executor confere o estado depois de cada caso",
         f: suite_o_executor_confere_depois_de_cada_caso,
     },
+    // E o controle de que o laço usa o que a conferência diz (o risco 6 do
+    // especialista do lote ICACHE-4; o achado 4 do adversário da rodada 5).
+    Caso {
+        nome: "suite: o laco reprova o caso que a conferencia reprova",
+        f: suite_o_laco_reprova_o_caso_que_a_conferencia_reprova,
+    },
 ];
 
 /// A cauda da suíte: os casos que rodam em **toda** parte, depois da fatia
@@ -63879,14 +63885,10 @@ pub fn executar_todos() -> ! {
         // teste que emite log jogaria essas linhas no meio de uma linha de
         // relatório pela metade. Assim cada linha do relatório fica íntegra e
         // os logs do teste aparecem logo acima dela, que é onde ajudam.
-        CASOS_COMECADOS.fetch_add(1, SeqCst);
-        let resultado = (caso.f)();
         // E o caso devolve o estado em que a suíte o deixou: o que não o
-        // devolve reprova, e o seguinte começa com ele de volta. A conta das
-        // conferências é a prova de que este laço confere — ver
-        // `suite_o_executor_confere_depois_de_cada_caso`.
-        let devolvido = conferir_depois_do_caso();
-        let resultado = resultado.and(devolvido);
+        // devolve reprova, e o seguinte começa com ele de volta — ver
+        // `rodar_um_caso`.
+        let resultado = rodar_um_caso(caso.f);
         #[cfg(target_arch = "aarch64")]
         anotar_o_fundo_das_excecoes(caso.nome);
         match resultado {
@@ -64452,6 +64454,50 @@ static CONFERENCIAS_DO_EXECUTOR: AtomicU64 = AtomicU64::new(0);
 fn conferir_depois_do_caso() -> Resultado {
     CONFERENCIAS_DO_EXECUTOR.fetch_add(1, SeqCst);
     estado_da_suite_devolvido()
+}
+
+/// O que o laço do executor faz com cada caso: conta que ele começou,
+/// roda, confere o estado depois ([`conferir_depois_do_caso`]) e junta a
+/// conferência ao resultado — o caso que passa e deixa o estado mudado
+/// reprova. As contas provam que o laço chama a conferência
+/// ([`suite_o_executor_confere_depois_de_cada_caso`]); a junção, que ele
+/// usa o que ela diz ([`suite_o_laco_reprova_o_caso_que_a_conferencia_reprova`]).
+fn rodar_um_caso(f: fn() -> Resultado) -> Resultado {
+    CASOS_COMECADOS.fetch_add(1, SeqCst);
+    let resultado = f();
+    let devolvido = conferir_depois_do_caso();
+    resultado.and(devolvido)
+}
+
+/// O laço reprova o caso que a conferência reprova: um caso que passa e
+/// deixa o shift apertado, rodado pelo caminho do laço
+/// ([`rodar_um_caso`]), sai com o motivo da conferência. O controle da
+/// conta prova a chamada, e não o uso do resultado: um laço que chamasse a
+/// conferência e jogasse fora o que ela diz passava nele (o risco 6 do
+/// especialista do lote ICACHE-4; o achado 4 do adversário da rodada 5). A
+/// rodada daqui conta um caso e uma conferência, e as duas contas continuam
+/// casando.
+fn suite_o_laco_reprova_o_caso_que_a_conferencia_reprova() -> Resultado {
+    fn passa_e_deixa_o_shift() -> Resultado {
+        crate::teclado::esvaziar();
+        crate::teclado::evento(42, true);
+        Ok(())
+    }
+    let rodado = rodar_um_caso(passa_e_deixa_o_shift);
+    let solto = !crate::teclado::shift_apertado_de_teste();
+    crate::teclado::esvaziar();
+    if rodado != Err("o caso deixou o shift do teclado apertado") {
+        crate::log_error!(
+            "teste",
+            "o caso que deixou o shift saiu do laco com {:?}",
+            rodado
+        );
+        return Err("o laco nao reprovou o caso que a conferencia reprovou");
+    }
+    if !solto {
+        return Err("o laco nao devolveu o shift do caso que o deixou apertado");
+    }
+    Ok(())
 }
 
 /// O laço do executor conferiu o estado depois de cada caso desta parte:
