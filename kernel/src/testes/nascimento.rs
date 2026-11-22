@@ -4145,6 +4145,14 @@ fn o_desfecho_que_permite_no_comando() {
 /// nos dois caminhos -- tambem com a DG4. O mesmo embrulho grava, pelo
 /// `gravar_no_comando`, um `ERROR`, que so dentro de um comando se grava, e
 /// tem de sair como a execucao do `user.run` do caso.
+///
+/// E, desde o lote A10 (o IN1 do adversario do lote A9), do `user.run` do
+/// caso, e nao de um qualquer: o recurso do controle e o que o proprio
+/// gancho passa, e o metodo vem da decisao do comando do fio -- o controle
+/// provava que o gancho rodou dentro de **um** `user.run` decidido. Agora a
+/// decisao que o controle cita (`; decisao N`) e a que a execucao do caso
+/// cita, e o registro dela e o `ALLOW` do `user.run` do caminho do caso,
+/// tomado depois que o caso comecou.
 pub(super) fn contencao_o_desfecho_que_permite_nao_grava_no_comando() -> Resultado {
     use politica::Codigo;
     use seguranca::evento::Tipo;
@@ -4197,12 +4205,15 @@ pub(super) fn contencao_o_desfecho_que_permite_nao_grava_no_comando() -> Resulta
                  o caso nao conferiu o desfecho dentro dele",
             );
         }
-        match super::registro_numero(controle_do_gancho) {
+        let decisao_do_controle = match super::registro_numero(controle_do_gancho) {
             Some(e)
                 if e.metodo == "user.run"
                     && e.recurso == CAMINHO_DO_DESFECHO_NO_COMANDO
                     && e.codigo == Codigo::Error
-                    && e.detalhe.contains(CONTROLE_NO_COMANDO) => {}
+                    && e.detalhe.contains(CONTROLE_NO_COMANDO) =>
+            {
+                super::decisao_executada(&e.detalhe)
+            }
             Some(e) => {
                 crate::log_error!("teste", "{:?}", e);
                 return Err(
@@ -4211,7 +4222,7 @@ pub(super) fn contencao_o_desfecho_que_permite_nao_grava_no_comando() -> Resulta
                 );
             }
             None => return Err("o registro do controle do gancho saiu do anel"),
-        }
+        };
         if gravar != 0 || no_comando != 0 {
             return Err(
                 "dentro de um comando, o desfecho de um lancamento gravou um codigo que permite",
@@ -4234,9 +4245,44 @@ pub(super) fn contencao_o_desfecho_que_permite_nao_grava_no_comando() -> Resulta
                 && ev.codigo == Codigo::Error
                 && !ev.detalhe.contains(CONTROLE_NO_COMANDO)
         });
-        let Some(&(controle, _)) = execucoes.last() else {
+        let Some((controle, execucao)) = execucoes.last() else {
             return Err("o user.run do caso ficou sem o desfecho: o caso nao conferiu nada");
         };
+        let controle = *controle;
+        // Desde o lote A10, o controle do gancho e o do `user.run` do caso: a
+        // decisao que ele cita e a que a execucao do caso cita, e o registro
+        // dela e o `ALLOW` do `user.run` do caminho do caso, tomado depois que
+        // o caso comecou -- e nao a de outro `user.run` que tomasse o gancho.
+        let decisao_do_caso = super::decisao_executada(&execucao.detalhe);
+        crate::log_info!(
+            "teste",
+            "contencao: o controle do gancho cita a decisao {:?}, e a execucao do user.run do \
+             caso, a {:?}",
+            decisao_do_controle,
+            decisao_do_caso
+        );
+        let Some(decisao) = decisao_do_caso.filter(|_| decisao_do_controle == decisao_do_caso)
+        else {
+            return Err(
+                "o controle do gancho nao cita a decisao do user.run do caso: o gancho rodou \
+                 noutro comando",
+            );
+        };
+        match super::registro_numero(decisao) {
+            Some(d)
+                if decisao > cabeca
+                    && d.metodo == "user.run"
+                    && d.recurso == CAMINHO_DO_DESFECHO_NO_COMANDO
+                    && d.codigo == Codigo::Allow => {}
+            Some(d) => {
+                crate::log_error!("teste", "{:?}", d);
+                return Err(
+                    "a decisao que o controle cita nao e o ALLOW do user.run do caso, tomado \
+                     depois que ele comecou",
+                );
+            }
+            None => return Err("o registro da decisao do user.run do caso saiu do anel"),
+        }
         let _ = crate::seguranca::passo();
         let _ = crate::seguranca::passo();
         let visto = crate::seguranca::com_motor_de_teste(|m| {
