@@ -176,6 +176,18 @@ unsafe impl FrameAllocator<Size4KiB> for AlocadorDeFrames {
         // SAFETY: o frame acabou de sair do alocador, só nós o temos, e o mapa
         // da memória física o alcança por `acesso_fisico`.
         unsafe { core::ptr::write_bytes(tabela, 0, TAMANHO_PAGINA as usize) };
+        // Os zeros antes da entrada também para o compilador. O pacote
+        // escreve a entrada por uma `&mut PageTableEntry`, e os zeros saem
+        // por um ponteiro cru, para outra memória: sem uma barreira entre os
+        // dois, nada impede o compilador, depois de juntar o
+        // `create_next_table` a esta função, de pôr a entrada antes dos
+        // zeros. A barreira só do compilador basta — a ordem do processador é
+        // a do programa (acima) —, e não custa nada. O código de hoje já sai
+        // na ordem: o adversário do lote ICACHE-2 desmontou o kernel de
+        // produção, e a chamada do `memset` vem antes da escrita da entrada
+        // (o achado 5 dele); a barreira a garante contra o compilador de
+        // amanhã.
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
         // Só na suíte: a tabela, como chega a quem a liga.
         #[cfg(feature = "modo-teste")]
         // SAFETY: o mesmo frame, de 4 KiB, ainda só nosso.
