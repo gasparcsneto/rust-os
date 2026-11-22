@@ -64,8 +64,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 
 use super::{
-    Resultado, a_cadeia_do_journal_confere, nucleos_secundarios, reposto_da_imagem,
-    todos_do_journal,
+    Resultado, a_cadeia_do_journal_confere, com_o_registro_devolvido, nucleos_secundarios,
+    reposto_da_imagem, todos_do_journal,
 };
 use crate::autorizacao::alocacoes_sob_a_auditoria_de_teste as alocacoes;
 use crate::persistencia::{self, AuditoriaNoJournal, coleta_de_teste};
@@ -596,6 +596,12 @@ fn ate_zerar(vivos: &AtomicU64, ms: u64) -> Resultado {
 /// ele os auditou; e a cadeia refeita do journal é a da memória — e é ela
 /// que o boot seguinte refaz.
 pub(super) fn produtores_e_coletores_ao_mesmo_tempo() -> Resultado {
+    com_o_registro_devolvido(produtores_e_coletores_ao_mesmo_tempo_por_dentro)
+}
+
+/// O corpo de [`produtores_e_coletores_ao_mesmo_tempo`], que termina com o
+/// registro de identidade como o journal o diz.
+fn produtores_e_coletores_ao_mesmo_tempo_por_dentro() -> Resultado {
     anel_cheio_e_gravado()?;
     let desde = persistencia::auditoria_gravada();
     let de_auditoria = persistencia::registros_de_auditoria();
@@ -940,6 +946,12 @@ const ANTES_DA_TOMADA: u64 = 5;
 /// dela é a da memória, e o boot seguinte a adota — um registro fora de
 /// sequência a deixaria recusada.
 pub(super) fn o_anel_que_perde_registros_antes_da_tomada() -> Resultado {
+    com_o_registro_devolvido(o_anel_que_perde_registros_antes_da_tomada_por_dentro)
+}
+
+/// O corpo de [`o_anel_que_perde_registros_antes_da_tomada`], que termina com o
+/// registro de identidade como o journal o diz.
+fn o_anel_que_perde_registros_antes_da_tomada_por_dentro() -> Resultado {
     as_contas_veem_a_trava()?;
     anel_cheio_e_gravado()?;
     coleta_de_teste::zerar();
@@ -1021,6 +1033,12 @@ const PERDIDOS_ANTES_DA_COMPACTACAO: u64 = 10;
 /// gravada e contada na auditoria perdida, e o resto. A cadeia refeita do
 /// journal é a da memória, e o boot seguinte a adota.
 pub(super) fn a_compactacao_sem_nenhum_gravado_no_anel() -> Resultado {
+    com_o_registro_devolvido(a_compactacao_sem_nenhum_gravado_no_anel_por_dentro)
+}
+
+/// O corpo de [`a_compactacao_sem_nenhum_gravado_no_anel`], que termina com o
+/// registro de identidade como o journal o diz.
+fn a_compactacao_sem_nenhum_gravado_no_anel_por_dentro() -> Resultado {
     as_contas_veem_a_trava()?;
     anel_cheio_e_gravado()?;
     let gravada = persistencia::auditoria_gravada();
@@ -1187,6 +1205,12 @@ fn compactar_sob_carga(k: u64) -> Resultado {
 /// ordem dele —; e a cadeia refeita do journal é a da memória, e é ela que
 /// o boot seguinte refaz.
 pub(super) fn compactacoes_com_produtores_e_coletores() -> Resultado {
+    com_o_registro_devolvido(compactacoes_com_produtores_e_coletores_por_dentro)
+}
+
+/// O corpo de [`compactacoes_com_produtores_e_coletores`], que termina com o
+/// registro de identidade como o journal o diz.
+fn compactacoes_com_produtores_e_coletores_por_dentro() -> Resultado {
     anel_cheio_e_gravado()?;
     let perdida = crate::metricas::AUDITORIA_PERDIDA.load(SeqCst);
     PARAR.store(false, SeqCst);

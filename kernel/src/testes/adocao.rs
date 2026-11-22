@@ -41,7 +41,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 
 use super::{
     Resultado, a_cadeia_do_journal_confere, chamar, com_a_persistencia_fechada,
-    nucleos_secundarios, todos_do_journal,
+    com_o_registro_devolvido, nucleos_secundarios, todos_do_journal,
 };
 use crate::agent::json::Json;
 use crate::autorizacao::alocacoes_sob_a_auditoria_de_teste as alocacoes;
@@ -274,6 +274,12 @@ fn confere_com_a_esperada(esperada: &Cadeia, caso: &str) -> Resultado {
 /// registro 1, e se verifica; e o que o journal tem dela, desde o 1, é o
 /// mesmo, registro a registro.
 pub(super) fn o_journal_com_poucos_registros() -> Resultado {
+    com_o_registro_devolvido(o_journal_com_poucos_registros_por_dentro)
+}
+
+/// O corpo de [`o_journal_com_poucos_registros`], que termina com o registro de
+/// identidade como o journal o diz.
+fn o_journal_com_poucos_registros_por_dentro() -> Resultado {
     let do_journal = persistencia::auditoria_do_journal_de_teste()?;
     let vazio = crate::autorizacao::com_auditoria(|c| {
         let primeira = c.ultimos(usize::MAX).next().map(|r| r.seq);
@@ -309,6 +315,12 @@ pub(super) fn o_journal_com_poucos_registros() -> Resultado {
 /// compactação; com uma lacuna no journal; e no boot seguinte, depois de
 /// gravar.
 pub(super) fn a_cadeia_adotada_e_a_do_journal_continuada() -> Resultado {
+    com_o_registro_devolvido(a_cadeia_adotada_e_a_do_journal_continuada_por_dentro)
+}
+
+/// O corpo de [`a_cadeia_adotada_e_a_do_journal_continuada`], que termina com o
+/// registro de identidade como o journal o diz.
+fn a_cadeia_adotada_e_a_do_journal_continuada_por_dentro() -> Resultado {
     anel_cheio_e_gravado()?;
     reabrir_e_conferir("o boot de um registro e o anel do journal cheio", true)?;
     anel_cheio_e_gravado()?;
@@ -406,6 +418,12 @@ fn as_contas_veem_as_duas_travas() -> Resultado {
 /// registro reposto empurra um para fora, e a lacuna que o esvazia inteiro.
 /// Pela conta do próprio alocador, só da suíte.
 pub(super) fn sem_memoria_com_as_travas_na_mao() -> Resultado {
+    com_o_registro_devolvido(sem_memoria_com_as_travas_na_mao_por_dentro)
+}
+
+/// O corpo de [`sem_memoria_com_as_travas_na_mao`], que termina com o registro
+/// de identidade como o journal o diz.
+fn sem_memoria_com_as_travas_na_mao_por_dentro() -> Resultado {
     as_contas_veem_as_duas_travas()?;
     // A adoção: o boot com o anel cheio, o journal com o anel cheio.
     anel_cheio_e_gravado()?;
@@ -469,6 +487,12 @@ pub(super) fn sem_memoria_com_as_travas_na_mao() -> Resultado {
 /// tinha; a referência fraca não alcança mais o dela, que a adoção soltou —
 /// nada ficou preso. E a cadeia adotada é a da conta de antes.
 pub(super) fn o_registro_que_alguem_segura() -> Resultado {
+    com_o_registro_devolvido(o_registro_que_alguem_segura_por_dentro)
+}
+
+/// O corpo de [`o_registro_que_alguem_segura`], que termina com o registro de
+/// identidade como o journal o diz.
+fn o_registro_que_alguem_segura_por_dentro() -> Resultado {
     anel_cheio_e_gravado()?;
     for i in 0..8 {
         auditar("teste.adocao.segurado", &alloc::format!("{i}"));
@@ -608,6 +632,12 @@ fn perguntar_logo_depois() {
 /// nenhum journal tem; gravada depois, a adotada aparecia com a gravada de
 /// antes.
 pub(super) fn a_gravada_troca_com_a_cadeia() -> Resultado {
+    com_o_registro_devolvido(a_gravada_troca_com_a_cadeia_por_dentro)
+}
+
+/// O corpo de [`a_gravada_troca_com_a_cadeia`], que termina com o registro de
+/// identidade como o journal o diz.
+fn a_gravada_troca_com_a_cadeia_por_dentro() -> Resultado {
     anel_cheio_e_gravado()?;
     let journal = persistencia::auditoria_gravada();
     persistencia::antes_da_adocao_de_teste(Some(perguntar_no_meio));
@@ -822,6 +852,12 @@ fn ate_zerar(vivos: &AtomicU64, ms: u64) -> Resultado {
 /// que ele os auditou — os da cadeia do boot antes dos da rajada que a
 /// adoção encontrou.
 pub(super) fn produtores_e_um_leitor_durante_a_reabertura() -> Resultado {
+    com_o_registro_devolvido(produtores_e_um_leitor_durante_a_reabertura_por_dentro)
+}
+
+/// O corpo de [`produtores_e_um_leitor_durante_a_reabertura`], que termina com
+/// o registro de identidade como o journal o diz.
+fn produtores_e_um_leitor_durante_a_reabertura_por_dentro() -> Resultado {
     let nucleos: Vec<usize> = nucleos_secundarios().collect();
     if nucleos.is_empty() {
         crate::log_info!("teste", "um nucleo so: os produtores rodam no da suite");

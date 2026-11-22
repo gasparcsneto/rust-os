@@ -22248,7 +22248,9 @@ fn com_grupo(papeis: [&str; 3], f: impl FnOnce() -> Resultado) -> Resultado {
         f()
     });
     crate::mensagens::esvaziar_de_teste();
-    crate::identidade::esquecer_registrados();
+    // As lápides também: as revogações por quórum do caso não alcançam o
+    // seguinte.
+    registro_da_imagem();
     crate::autorizacao::carregar();
     let _ = crate::identidade::descartar_desafios();
     resultado
@@ -23178,6 +23180,12 @@ fn identidade_a_da_imagem_e_a_que_a_maquina_mostra() -> Resultado {
 /// EK de outro TPM é recusada antes de qualquer sessão; e o selado mexido
 /// não carrega.
 fn identidade_o_selo_no_tpm() -> Resultado {
+    com_o_registro_devolvido(identidade_o_selo_no_tpm_por_dentro)
+}
+
+/// O corpo de [`identidade_o_selo_no_tpm`], que termina com o registro de
+/// identidade como o journal o diz.
+fn identidade_o_selo_no_tpm_por_dentro() -> Resultado {
     let ek_do_journal = crate::persistencia::ponto_da_ek().ok_or("sem a EK do journal")?;
     let mut chave = [0u8; 32];
     crate::aleatorio::preencher(&mut chave).map_err(|_| "sem entropia")?;
@@ -23232,6 +23240,12 @@ fn identidade_o_selo_no_tpm() -> Resultado {
 /// outra abre e a repara; duas inteiras diferentes, a pública trocada, a
 /// EK de outro TPM, o selado mexido e as duas estragadas recusam.
 fn identidade_a_area_do_selo_e_a_decisao() -> Resultado {
+    com_o_registro_devolvido(identidade_a_area_do_selo_e_a_decisao_por_dentro)
+}
+
+/// O corpo de [`identidade_a_area_do_selo_e_a_decisao`], que termina com o
+/// registro de identidade como o journal o diz.
+fn identidade_a_area_do_selo_e_a_decisao_por_dentro() -> Resultado {
     use crate::identidade::OrigemDaChave;
     use ancora::identidade::{Area, Leitura, Recusa};
     let recusa = |esperada: &str, qual: &'static str| -> Resultado {
@@ -23348,6 +23362,12 @@ fn identidade_sem_ela_o_journal_recusa_a_persistencia() -> Resultado {
 /// e nada fica ocupado no TPM: a abertura seguinte abre. E o nascimento
 /// cujo `TPM2_Unseal` de volta se perde não grava a área do selo.
 fn identidade_o_unseal_que_mente_nao_vira_chave() -> Resultado {
+    com_o_registro_devolvido(identidade_o_unseal_que_mente_nao_vira_chave_por_dentro)
+}
+
+/// O corpo de [`identidade_o_unseal_que_mente_nao_vira_chave`], que termina com
+/// o registro de identidade como o journal o diz.
+fn identidade_o_unseal_que_mente_nao_vira_chave_por_dentro() -> Resultado {
     use crate::tpm::falhas::{Falha, armar, desarmar};
     const UNSEAL: u32 = 0x15E;
     com_a_persistencia_fechada(|| -> Resultado {
@@ -23411,6 +23431,12 @@ fn identidade_o_unseal_que_mente_nao_vira_chave() -> Resultado {
 /// chave em uso não muda em momento nenhum, nenhuma adoção passa, e o selo
 /// abre igual com os fios rodando.
 fn identidade_concorrencia_com_a_chave_em_uso() -> Resultado {
+    com_o_registro_devolvido(identidade_concorrencia_com_a_chave_em_uso_por_dentro)
+}
+
+/// O corpo de [`identidade_concorrencia_com_a_chave_em_uso`], que termina com o
+/// registro de identidade como o journal o diz.
+fn identidade_concorrencia_com_a_chave_em_uso_por_dentro() -> Resultado {
     use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     static PARAR: AtomicU32 = AtomicU32::new(0);
     static PRONTOS: AtomicU32 = AtomicU32::new(0);
@@ -24332,12 +24358,33 @@ fn retrato_do_armazem() -> RetratoDoArmazem {
 /// ao da compactação; com a suíte em partes ele cai em outra (CI 508: a
 /// parte 2 de 3, nas duas arquiteturas).
 fn de_volta_a_imagem() {
-    crate::identidade::esquecer_registrados();
-    crate::identidade::esquecer_lapides_de_teste();
+    registro_da_imagem();
     crate::pessoas::esquecer_registradas();
     crate::armazem::trocar_de_teste(::armazem::Armazem::novo());
     crate::chaves::limpar_a_memoria_de_teste();
     crate::autorizacao::carregar();
+}
+
+/// Devolve o registro de identidade da imagem: as lápides esquecidas, e os
+/// arquivos lidos de novo — nessa ordem, porque a leitura aplica as lápides
+/// por cima: uma que o journal reposto tivesse trazido para uma credencial
+/// da imagem a deixaria revogada no caso seguinte.
+fn registro_da_imagem() {
+    crate::identidade::esquecer_lapides_de_teste();
+    crate::identidade::esquecer_registrados();
+}
+
+/// Roda `f` e devolve depois o registro de identidade da imagem
+/// ([`registro_da_imagem`]) — também quando `f` falha. É o fim do caso que
+/// termina num boot de teste — a persistência reaberta
+/// ([`com_a_persistencia_fechada`]), ou o journal reposto
+/// ([`reposto_da_imagem`]) —, que deixa o registro como o journal o diz: os
+/// agentes que os casos de antes registraram, e as lápides; e o do caso que
+/// registra alguém sem um invólucro que o devolva.
+fn com_o_registro_devolvido(f: impl FnOnce() -> Resultado) -> Resultado {
+    let resultado = f();
+    registro_da_imagem();
+    resultado
 }
 
 /// A volta à imagem e a reposição por cima dela, como o boot as faz: de
@@ -24420,7 +24467,17 @@ fn estado_em_memoria() -> EstadoDoJournal {
 ///   confirmado que não abre é recusado pelo julgamento contra o TPM;
 /// - depois da reconstrução o sistema continua: uma mudança nova grava, e
 ///   a reposição seguinte a inclui.
+///
+/// A reposição deixa o registro de identidade como o journal o diz — os
+/// agentes que os casos da parte registraram, e as lápides deles —, e o
+/// caso devolve o da imagem ao terminar, como o executor confere.
 fn reconstrucao_imagem_limpa_e_journal_inteiro() -> Resultado {
+    com_o_registro_devolvido(reconstrucao_imagem_limpa_e_journal_inteiro_por_dentro)
+}
+
+/// O corpo de [`reconstrucao_imagem_limpa_e_journal_inteiro`], que termina com
+/// o registro de identidade como o journal o diz.
+fn reconstrucao_imagem_limpa_e_journal_inteiro_por_dentro() -> Resultado {
     let primeira = estado_do_journal()?;
     let segunda = estado_do_journal()?;
     if primeira != segunda {
@@ -24702,6 +24759,12 @@ fn compactacao_com_o_anel_dado_a_volta() -> Resultado {
 /// pelo mesmo caminho de sempre, escolhe a região inteira de última âncora
 /// maior: a base, que tem o fecho no disco e a âncora que o TPM tem.
 fn compactacao_com_o_contador_trocado() -> Resultado {
+    com_o_registro_devolvido(compactacao_com_o_contador_trocado_por_dentro)
+}
+
+/// O corpo de [`compactacao_com_o_contador_trocado`], que termina com o
+/// registro de identidade como o journal o diz.
+fn compactacao_com_o_contador_trocado_por_dentro() -> Resultado {
     crate::persistencia::compactar_de_teste()?;
     estado_do_journal()?;
     let regiao = crate::persistencia::regiao().0;
@@ -36106,6 +36169,12 @@ fn armazem_a_gravacao_que_falha_nao_vale() -> Resultado {
 /// journal de estado, o do armazém, os dois —, também. Uma versão já dada
 /// não volta.
 fn armazem_o_journal_repoe_o_armazem() -> Resultado {
+    com_o_registro_devolvido(armazem_o_journal_repoe_o_armazem_por_dentro)
+}
+
+/// O corpo de [`armazem_o_journal_repoe_o_armazem`], que termina com o registro
+/// de identidade como o journal o diz.
+fn armazem_o_journal_repoe_o_armazem_por_dentro() -> Resultado {
     let sistema = sistema_no_armazem(7_200_003);
     let base = "/armazem/sistema/repor";
     diretorios_acima(&alloc::format!("{base}/x"))?;
@@ -49161,7 +49230,8 @@ fn com_chaves(f: impl FnOnce() -> Resultado) -> Resultado {
     crate::chaves::trocar_dominios_de_teste(dominios);
     crate::chaves::esquecer_de_teste();
     crate::contencao::esquecer_de_teste();
-    crate::identidade::esquecer_registrados();
+    // As lápides também: as que o journal reposto num caso das chaves trouxe.
+    registro_da_imagem();
     crate::pessoas::esquecer_registradas();
     r
 }
@@ -60290,6 +60360,8 @@ fn processos_o_administrador_encerra_pela_prova() -> Resultado {
     })();
     encerrar_os_encerraveis();
     crate::pessoas::esquecer_registradas();
+    // A chave de teste sai do registro com o caso.
+    crate::identidade::esquecer_registrados();
     resultado
 }
 
@@ -60927,6 +60999,10 @@ fn energia_quem_nao_pode_ouve_a_recusa() -> Resultado {
     })();
     let _ = esperar_cedendo(|| crate::energia::pedida().is_none(), 600);
     crate::pessoas::esquecer_registradas();
+    // A chave de teste registrada como administradora acima sai com o caso:
+    // o `com_agentes_de_teste` do meio devolve o registro ao terminar, e o
+    // registro dela vem depois dele.
+    crate::identidade::esquecer_registrados();
     resultado
 }
 
@@ -68206,6 +68282,12 @@ fn icp_a_chamada_assinada_e_verificada() -> Resultado {
 /// a chave da identidade durável de quem lançou o processo, pelo gate —, e
 /// o Principal não é identidade do Duke: nenhum registro do kernel o tem.
 fn icp_cada_chave_e_um_principal() -> Resultado {
+    com_o_registro_devolvido(icp_cada_chave_e_um_principal_por_dentro)
+}
+
+/// O corpo de [`icp_cada_chave_e_um_principal`], que registra alguém sem um
+/// invólucro que o devolva.
+fn icp_cada_chave_e_um_principal_por_dentro() -> Resultado {
     use crate::autorizacao::{Autoridade, Chamador};
     use crate::pessoas::Console;
     com_a_bancada_icp(|| {
@@ -68621,6 +68703,12 @@ fn icp_pendente_e_esperando(icp: &Icp, desde: u64, passo: &str) -> Resultado {
 /// acompanhamento de outra chamada: as chaves dela anuladas, e nada mais
 /// assinado depois.
 fn icp_a_chave_anulada_no_meio_do_acompanhamento() -> Resultado {
+    com_o_registro_devolvido(icp_a_chave_anulada_no_meio_do_acompanhamento_por_dentro)
+}
+
+/// O corpo de [`icp_a_chave_anulada_no_meio_do_acompanhamento`], que registra
+/// alguém sem um invólucro que o devolva.
+fn icp_a_chave_anulada_no_meio_do_acompanhamento_por_dentro() -> Resultado {
     com_a_bancada_icp(|| {
         com_a_politica(
             politica_da_bancada_icp(&[DNS_DA_BANCADA_PARA_O_ADMINISTRADOR])?,
@@ -69961,6 +70049,12 @@ fn icp_duas_consultas_assinadas_ao_mesmo_tempo() -> Resultado {
 /// leitura que acorda é recusada, nada se assina depois, e as chaves dela
 /// ficam anuladas.
 fn icp_a_chave_anulada_no_meio_da_consulta() -> Resultado {
+    com_o_registro_devolvido(icp_a_chave_anulada_no_meio_da_consulta_por_dentro)
+}
+
+/// O corpo de [`icp_a_chave_anulada_no_meio_da_consulta`], que registra alguém
+/// sem um invólucro que o devolva.
+fn icp_a_chave_anulada_no_meio_da_consulta_por_dentro() -> Resultado {
     com_a_bancada_icp(|| {
         com_a_politica(
             politica_da_bancada_icp(&[DNS_DA_BANCADA_PARA_O_ADMINISTRADOR])?,
@@ -71261,6 +71355,12 @@ fn icp_a_mesma_transferencia_por_dois_processos() -> Resultado {
 /// anônimo no lugar, o desfecho é `failed_signature`, a declaração vai
 /// ancorada na conexão, e nenhum saldo muda.
 fn icp_a_chave_anulada_no_meio_da_transferencia() -> Resultado {
+    com_o_registro_devolvido(icp_a_chave_anulada_no_meio_da_transferencia_por_dentro)
+}
+
+/// O corpo de [`icp_a_chave_anulada_no_meio_da_transferencia`], que registra
+/// alguém sem um invólucro que o devolva.
+fn icp_a_chave_anulada_no_meio_da_transferencia_por_dentro() -> Resultado {
     com_a_bancada_icp(|| {
         com_a_politica(
             politica_da_bancada_icp(&[DNS_DA_BANCADA_PARA_O_ADMINISTRADOR])?,
@@ -72857,6 +72957,12 @@ fn icp_a_mesma_criacao_por_dois_processos() -> Resultado {
 /// vai ancorada na conexão, e o canister continua rodando o A — a versão,
 /// pela consulta do anônimo, e o contador, do anônimo.
 fn icp_a_chave_anulada_no_meio_do_upgrade() -> Resultado {
+    com_o_registro_devolvido(icp_a_chave_anulada_no_meio_do_upgrade_por_dentro)
+}
+
+/// O corpo de [`icp_a_chave_anulada_no_meio_do_upgrade`], que registra alguém
+/// sem um invólucro que o devolva.
+fn icp_a_chave_anulada_no_meio_do_upgrade_por_dentro() -> Resultado {
     com_a_bancada_icp(|| {
         com_a_politica(
             politica_da_bancada_icp(&[DNS_DA_BANCADA_PARA_O_ADMINISTRADOR])?,
@@ -75076,6 +75182,12 @@ fn icp_o_gestor_para_quando_outro_grava_a_resposta() -> Resultado {
 /// canister continua no A, pela segunda chave; e a primeira não serve mais
 /// a pedido nenhum.
 fn icp_a_chave_anulada_no_meio_do_gestor() -> Resultado {
+    com_o_registro_devolvido(icp_a_chave_anulada_no_meio_do_gestor_por_dentro)
+}
+
+/// O corpo de [`icp_a_chave_anulada_no_meio_do_gestor`], que registra alguém
+/// sem um invólucro que o devolva.
+fn icp_a_chave_anulada_no_meio_do_gestor_por_dentro() -> Resultado {
     com_a_bancada_icp(|| {
         com_a_politica(
             politica_da_bancada_icp(&[DNS_DA_BANCADA_PARA_O_ADMINISTRADOR])?,
@@ -79324,8 +79436,7 @@ fn com_a_malha(f: impl FnOnce() -> Resultado) -> Resultado {
     crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
     let coerente = crate::malha::coerente();
     crate::malha::esvaziar_de_teste();
-    crate::identidade::esquecer_registrados();
-    crate::identidade::esquecer_lapides_de_teste();
+    registro_da_imagem();
     crate::pessoas::esquecer_registradas();
     crate::autorizacao::carregar();
     resultado?;
