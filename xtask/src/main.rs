@@ -24647,8 +24647,8 @@ fn diz_desde(
 /// resposta, só a linha.
 ///
 /// O texto de cada variante é o que o kernel ou o programa escreve; a
-/// recusa de uma ação no mesmo elemento, na janela da espera, a reprova —
-/// ver [`Esperada::nas`].
+/// recusa de uma ação no mesmo elemento, ou do mesmo comando pela mesma
+/// origem, na janela da espera, a reprova — ver [`Esperada::nas`].
 #[derive(Clone, Copy, Debug)]
 enum Esperada<'t> {
     /// Uma ação na interface, como `ui::agir_com_versao` a registra no
@@ -24661,7 +24661,13 @@ enum Esperada<'t> {
     },
     /// Um comando que o interpretador executou, no subsistema `console`: o
     /// texto — `executado: <comando> (<origem>)` — seguido de ` em
-    /// <console>`.
+    /// <console>`. O kernel a escreve depois que o gate permitiu, com a
+    /// licença na mão; a recusa e o parâmetro inválido saem no lugar dela,
+    /// com `negado: ` e `parametro invalido: ` no lugar de `executado: `, o
+    /// mesmo resto, e o código ou o campo depois — ver
+    /// `interpretador::despachar`, no kernel. Antes do lote EXECUTADO a
+    /// linha saía antes da decisão, e um comando negado também a deixava (o
+    /// informativo 9 do adversário do lote FUMAÇA-2).
     Executado(&'t str),
     /// Uma linha que um programa escreveu, no subsistema `usuario`, igual.
     DoPrograma(&'t str),
@@ -24689,26 +24695,53 @@ impl Esperada<'_> {
         }
     }
 
-    /// Se `r` diz que o kernel recusou uma ação no elemento de uma
-    /// [`Esperada::Acao`] — de qualquer origem, e qualquer ação: `<origem>:
-    /// <acao> no elemento <id> recusado: <motivo>`, no subsistema `ui`.
+    /// Se `r` diz que o kernel recusou o que a espera espera:
+    ///
+    /// - numa [`Esperada::Acao`], uma ação no elemento dela — de qualquer
+    ///   origem, e qualquer ação: `<origem>: <acao> no elemento <id>
+    ///   recusado: <motivo>`, no subsistema `ui`;
+    /// - num [`Esperada::Executado`], o mesmo comando pela mesma origem, em
+    ///   qualquer console: `negado: <comando> (<origem>) em <console>:
+    ///   <codigo>` ou `parametro invalido: <comando> (<origem>) em
+    ///   <console>: <campo>`, no subsistema `console`.
     fn e_a_recusa(&self, r: &RegistroDoLog) -> bool {
-        let Esperada::Acao { elemento, .. } = *self else {
-            return false;
-        };
-        r.subsistema == "ui"
-            && r.mensagem
-                .split_once(" recusado: ")
-                .is_some_and(|(feito, _)| feito.ends_with(&format!(" no elemento {elemento}")))
+        match *self {
+            Esperada::Acao { elemento, .. } => {
+                r.subsistema == "ui"
+                    && r.mensagem
+                        .split_once(" recusado: ")
+                        .is_some_and(|(feito, _)| {
+                            feito.ends_with(&format!(" no elemento {elemento}"))
+                        })
+            }
+            Esperada::Executado(texto) => {
+                let Some(pedido) = texto.strip_prefix("executado: ") else {
+                    return false;
+                };
+                r.subsistema == "console"
+                    && ["negado: ", "parametro invalido: "].iter().any(|desfecho| {
+                        r.mensagem
+                            .strip_prefix(desfecho)
+                            .and_then(|resto| resto.strip_prefix(pedido))
+                            .is_some_and(|resto| resto.starts_with(" em "))
+                    })
+            }
+            Esperada::DoPrograma(_) => false,
+        }
     }
 
     /// Se `linhas` trazem a linha esperada. A recusa de uma ação no mesmo
-    /// elemento é erro, e vale mesmo com a esperada junto: na janela da
-    /// espera, só a ação que ela espera age no elemento.
+    /// elemento, ou do mesmo comando pela mesma origem, é erro, e vale
+    /// mesmo com a esperada junto: na janela da espera, só a ação que ela
+    /// espera age no elemento, e só o pedido que ela espera pede o comando.
     fn nas(&self, linhas: &[RegistroDoLog], quem: &str) -> Result<bool, String> {
         if let Some(r) = linhas.iter().find(|r| self.e_a_recusa(r)) {
+            let o_que = match self {
+                Esperada::Executado(_) => "o comando",
+                Esperada::Acao { .. } | Esperada::DoPrograma(_) => "a acao",
+            };
             return Err(format!(
-                "{quem}: o kernel recusou a acao: [{}] {}",
+                "{quem}: o kernel recusou {o_que}: [{}] {}",
                 r.seq, r.mensagem
             ));
         }
@@ -27791,10 +27824,12 @@ fn sob_interpretador(
     // Em laço, pelo mesmo motivo da sonda anterior: entre a tecla e o log há
     // o pulso do relógio, o executor e o despacho, cada um com o seu tempo.
     // Com a origem: foi uma pessoa, pelo teclado. É a metade da auditoria
-    // que a sonda da árvore semântica não alcança. A linha sai antes da
-    // decisão — ver `interpretador`, onde ela é escrita —, e um `agent.ping`
-    // negado também a deixaria: quem confere a resposta é a sonda seguinte,
-    // a do Terminal (o informativo 9 do adversário do lote FUMAÇA-2).
+    // que a sonda da árvore semântica não alcança. A linha sai depois que o
+    // gate permitiu — ver `interpretador::despachar`, onde ela é escrita —,
+    // e um `agent.ping` negado deixa no lugar dela o `negado:`, que reprova a
+    // espera na hora — sem ninguém entrado no console, também (o lote
+    // EXECUTADO, pelo informativo 9 do adversário do lote FUMAÇA-2). A
+    // resposta, quem confere é a sonda seguinte, a do Terminal.
     let pessoa = Esperada::Executado("executado: agent.ping (pessoa)");
     let leitura = LeituraDoLog::desde(desde, "interpretador");
     // O mesmo comando executado em nome de outro, se aparecer.
