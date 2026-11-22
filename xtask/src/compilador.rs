@@ -1658,10 +1658,23 @@ fn quebras_que_a_leitura_nao_ve(texto: &str) -> Vec<(usize, String)> {
 
 /// A chave e o valor de uma linha `chave: valor` de YAML, com o `- ` de um
 /// item de lista e as aspas da chave tirados, e o valor sem o comentário do
-/// fim da linha ([`sem_comentario`]).
+/// fim da linha ([`sem_comentario`]). O `:` da chave é o primeiro seguido
+/// de um espaço, de uma tabulação ou do fim da linha, como no YAML.
+///
+/// # O `:` da chave, desde o lote A14
+///
+/// Valia o primeiro `:` da linha, e `uses:./.github/actions/compilador` —
+/// para o YAML, um escalar simples: a continuação do valor de outra chave,
+/// sem espaço depois do `:` — era a chave `uses` da ação para a ordem, para
+/// a contagem e para o passo que liga as invariantes no job de lints
+/// ([`as_invariantes_na_acao`]) (o M3 do adversário do lote A13).
 fn chave_e_valor(texto: &str) -> Option<(&str, &str)> {
     let texto = texto.strip_prefix("- ").unwrap_or(texto);
-    let (chave, valor) = texto.split_once(':')?;
+    let separa = |resto: &str| resto.chars().next().is_none_or(|d| d == ' ' || d == '\t');
+    let dois_pontos = texto
+        .char_indices()
+        .find_map(|(i, c)| (c == ':' && separa(&texto[i + 1..])).then_some(i))?;
+    let (chave, valor) = (&texto[..dois_pontos], &texto[dois_pontos + 1..]);
     let chave = chave.trim().trim_matches(|c| c == '"' || c == '\'');
     // Uma chave de workflow: letras, dígitos, `-` e `_` — e não um pedaço
     // de código de dentro de um `run:`, como `avisos.append(f"aviso`.
@@ -1878,20 +1891,32 @@ struct Chave<'a> {
 /// O item de lista de `linhas` — as de código de um YAML — que tem a linha
 /// `i`, um passo: o começo, no `-` mais próximo acima, de recuo menor que o
 /// da linha — ou nela mesma —, que não é do conteúdo de um bloco
-/// ([`abre_um_bloco`]); o fim, na primeira linha de recuo igual ou
-/// menor que o do `-`; e a coluna das chaves dele, a do que vem depois do
-/// `-`, na mesma linha, ou a da primeira linha de baixo. Nenhum, se a linha
-/// não está num item.
+/// ([`abre_um_bloco`]) e cujo item vai até a linha; o fim, na primeira linha
+/// de recuo igual ou menor que o do `-`; e a coluna das chaves dele, a do
+/// que vem depois do `-`, na mesma linha, ou a da primeira linha de baixo.
+/// Nenhum, se a linha não está num item.
+///
+/// # O item tem a linha, desde o lote A14
+///
+/// Valia o `-` mais próximo acima, de recuo menor, mesmo quando o item dele
+/// já tinha acabado: o `uses:` da ação no texto do `env:` de um job, depois
+/// de uma matriz, era lido como uma chave do item da matriz — e, com
+/// `with: invariantes: true` nele, ligava as invariantes no job de lints,
+/// que rodava sem elas (o M3 do adversário do lote A13).
 fn item_da_linha(linhas: &[Linha<'_>], i: usize) -> Option<(usize, usize, Option<usize>)> {
     // O `-` do conteúdo de um bloco é texto, e não um item.
     let item = |l: &Linha<'_>| !l.escalar && (l.texto == "-" || l.texto.starts_with("- "));
-    let comeco = (0..=i)
-        .rev()
-        .find(|&j| item(&linhas[j]) && (j == i || linhas[j].recuo < linhas[i].recuo))?;
+    // O fim do item que começa em `j`.
+    let fim_de = |j: usize| {
+        (j + 1..linhas.len())
+            .find(|&k| !linhas[k].texto.is_empty() && linhas[k].recuo <= linhas[j].recuo)
+            .unwrap_or(linhas.len())
+    };
+    let comeco = (0..=i).rev().find(|&j| {
+        item(&linhas[j]) && (j == i || (linhas[j].recuo < linhas[i].recuo && fim_de(j) > i))
+    })?;
     let traco = &linhas[comeco];
-    let fim = (comeco + 1..linhas.len())
-        .find(|&k| !linhas[k].texto.is_empty() && linhas[k].recuo <= traco.recuo)
-        .unwrap_or(linhas.len());
+    let fim = fim_de(comeco);
     let depois = traco.texto[1..].trim_start();
     // Um `-` só com um comentário é um `-` sozinho.
     let coluna = if sem_comentario(depois).is_empty() {
@@ -2594,6 +2619,42 @@ fn itens_da_tupla(script: &str, nome: &str) -> Vec<String> {
         .collect()
 }
 
+/// Os passos de um job — `job`, as linhas de código dele, da do nome em
+/// diante —, cada um pela linha do `-`: os itens da lista do `steps:`, a
+/// chave na coluna das chaves do job, fora do conteúdo dos blocos. Nenhum,
+/// sem o `steps:` em bloco. Desde o lote A14: o item de uma matriz, ou o de
+/// outra chave do job, não é um passo ([`as_invariantes_na_acao`]).
+fn passos_do_job(job: &[Linha<'_>]) -> Vec<usize> {
+    // A coluna das chaves do job: a da primeira linha de código depois da do
+    // nome dele.
+    let Some(coluna) = job
+        .iter()
+        .skip(1)
+        .find(|l| !l.texto.is_empty())
+        .map(|l| l.recuo)
+    else {
+        return Vec::new();
+    };
+    let Some(steps) = job.iter().position(|l| {
+        !l.escalar && l.recuo == coluna && chave_e_valor(l.texto) == Some(("steps", ""))
+    }) else {
+        return Vec::new();
+    };
+    let dentro: Vec<usize> = (steps + 1..job.len())
+        .filter(|&k| !job[k].escalar && !job[k].texto.is_empty())
+        .take_while(|&k| job[k].recuo > coluna)
+        .collect();
+    let Some(dos_itens) = dentro.first().map(|&k| job[k].recuo) else {
+        return Vec::new();
+    };
+    dentro
+        .into_iter()
+        .filter(|&k| {
+            job[k].recuo == dos_itens && (job[k].texto == "-" || job[k].texto.starts_with("- "))
+        })
+        .collect()
+}
+
 /// O job de lints da CI oficial — `ci`, o [`CI`] — liga as invariantes na
 /// ação do compilador: o primeiro passo do job [`JOB_DE_LINTS`] que a usa
 /// tem `invariantes: true` no `with:` — uma chave do mapa do `with:` do
@@ -2608,6 +2669,20 @@ fn itens_da_tupla(script: &str, nome: &str) -> Vec<String> {
 /// as invariantes não rodavam, sem nada acusar (o E6 do revisor do lote
 /// A10). As chaves do passo e as do `with:` se leem pelo recuo
 /// ([`chaves_do_item`], [`chaves_de_dentro`]), em qualquer ordem.
+///
+/// # O passo é um item do `steps:` do job, desde o lote A14
+///
+/// O primeiro "passo que usa a ação" era a primeira linha do job com o
+/// `uses:` dela, e podia ser o texto de um bloco — o `uses:` da ação no
+/// `env:` do job —, a continuação de um escalar simples (`uses:./…`, sem o
+/// espaço) ou o item de uma matriz com as chaves do passo; as chaves dele, as
+/// do item de uma matriz acima, com `with: invariantes: true`: o passo de
+/// verdade ficava sem a entrada, e o job de lints, sem as invariantes, com o
+/// `cargo xtask invariantes` passando (o M3 do adversário do lote A13; o
+/// item da matriz com as chaves do passo, o lote A14 o achou na revisão). O
+/// passo é o primeiro item da lista do `steps:` do job ([`passos_do_job`])
+/// que tem a chave `uses:` da ação ([`chave_e_valor`]), e as chaves, as
+/// dele.
 ///
 /// # Por quê, desde o lote A10
 ///
@@ -2631,10 +2706,18 @@ fn as_invariantes_na_acao(ci: &str) -> Vec<String> {
                 .find(|&k| !linhas[k].texto.is_empty() && linhas[k].recuo <= 2)
                 .unwrap_or(linhas.len());
             let job = &linhas[comeco..fim];
-            job.iter()
-                .position(|l| usa_a_acao_do_compilador(l))
-                .is_some_and(|uso| {
-                    chaves_do_item(job, uso)
+            // Um passo do job, e não o texto de um bloco nem o item de uma
+            // matriz (desde o lote A14).
+            passos_do_job(job)
+                .into_iter()
+                .map(|passo| chaves_do_item(job, passo))
+                .find(|chaves| {
+                    chaves.iter().any(|c| {
+                        c.chave == "uses" && nome_da_acao(c.valor) == "./.github/actions/compilador"
+                    })
+                })
+                .is_some_and(|chaves| {
+                    chaves
                         .iter()
                         .filter(|c| c.chave == "with")
                         .flat_map(|c| chaves_de_dentro(job, c))
@@ -2649,9 +2732,10 @@ fn as_invariantes_na_acao(ci: &str) -> Vec<String> {
     } else {
         vec![format!(
             "{CI}: o job `{JOB_DE_LINTS}` não liga as invariantes na ação do compilador \
-             (`invariantes: true` no `with:` do primeiro passo do job que a usa — num `env:`, ou \
-             noutro passo, não vale): elas rodam ali, antes do cache e de todo outro `cargo` do \
-             job — os testes do hospedeiro e o clippy rodam código do repositório"
+             (`invariantes: true` no `with:` do primeiro passo do `steps:` do job que a usa — num \
+             `env:`, noutro passo ou numa matriz, não vale): elas rodam ali, antes do cache e de \
+             todo outro `cargo` do job — os testes do hospedeiro e o clippy rodam código do \
+             repositório"
         )]
     }
 }
@@ -5508,6 +5592,102 @@ jobs:
             assert_ne!(texto, OFICIAL);
             assert_eq!(um(CI, &texto), Vec::<String>::new(), "{novo}");
         }
+    }
+
+    /// Só um passo do job liga as invariantes (no lote A14, o M3 do
+    /// adversário do lote A13): no job de lints, o passo da ação de verdade
+    /// sem a entrada, uma matriz com um item de `with: invariantes: true` e o
+    /// `uses:` da ação no `env:` do job — num bloco, ou na continuação de um
+    /// escalar simples, sem o espaço — passavam: o texto era o primeiro passo
+    /// que usa a ação, e as chaves dele, as do item da matriz, que já tinha
+    /// acabado; e o item de uma matriz com as chaves do passo — o `uses:` da
+    /// ação e o `with:` —, que o lote achou na revisão, era o passo. Reprovam.
+    /// E as peças: `uses:./x` não é uma chave, o item de uma linha é o que vai
+    /// até ela, e os passos de um job são os itens do `steps:` dele.
+    #[test]
+    fn adversario_a13_so_um_passo_do_job_liga_as_invariantes() {
+        let ci = include_str!("../../.github/workflows/ci.yml");
+        let ligada = "        with:\n          invariantes: true\n";
+        let cabeca =
+            "    name: Formatação e lints\n    runs-on: ubuntu-latest\n    timeout-minutes: 30\n";
+        assert_eq!(ci.matches(ligada).count(), 1);
+        assert_eq!(ci.matches(cabeca).count(), 1);
+        let matriz = "    strategy:\n      matrix:\n        include:\n          - name: x\n            \
+                      with:\n              invariantes: true\n";
+        for (rotulo, env, no_workflow) in [
+            (
+                "num bloco",
+                "    env:\n      nota: |\n            uses: ./.github/actions/compilador\n            \
+                 id: compilador\n",
+                true,
+            ),
+            (
+                "num escalar simples",
+                "    env:\n      nota: x\n            uses:./.github/actions/compilador\n            \
+                 id:compilador\n",
+                false,
+            ),
+        ] {
+            let texto =
+                ci.replacen(ligada, "", 1)
+                    .replacen(cabeca, &format!("{cabeca}{matriz}{env}"), 1);
+            assert_ne!(texto, ci, "{rotulo}");
+            assert_eq!(as_invariantes_na_acao(&texto).len(), 1, "{rotulo}");
+            // O `uses:` do bloco fora de um passo: a leitura do passo o acusa.
+            let fora: Vec<String> = um(CI, &texto)
+                .into_iter()
+                .filter(|f| f.contains("no passo da conferência do compilador"))
+                .collect();
+            assert_eq!(fora.len(), usize::from(no_workflow), "{rotulo}: {fora:#?}");
+        }
+        // O texto antes do passo de verdade, que liga as invariantes, não é o
+        // passo: o de verdade continua o primeiro.
+        let antes = ci.replacen(
+            cabeca,
+            &format!(
+                "{cabeca}    env:\n      nota: |\n            uses: ./.github/actions/compilador\n"
+            ),
+            1,
+        );
+        assert_ne!(antes, ci);
+        assert_eq!(as_invariantes_na_acao(&antes), Vec::<String>::new());
+        // O item de uma matriz com as chaves do passo, antes dos passos: o
+        // YAML o lê como dados da matriz, e o passo de verdade, sem o `with:`.
+        // As outras regras o leem como um passo com as chaves de um passo, e
+        // a contagem fica igual: só a das invariantes o acusa.
+        let item = "    strategy:\n      matrix:\n        include:\n          - name: O compilador\n            \
+                    id: compilador\n            uses: ./.github/actions/compilador\n            with:\n              \
+                    invariantes: true\n";
+        let na_matriz = ci
+            .replacen(ligada, "", 1)
+            .replacen(cabeca, &format!("{cabeca}{item}"), 1);
+        assert_ne!(na_matriz, ci);
+        assert_eq!(as_invariantes_na_acao(&na_matriz).len(), 1);
+        assert_eq!(um(CI, &na_matriz), Vec::<String>::new());
+        // E com a entrada no passo de verdade, ligada.
+        let com_a_entrada = ci.replacen(cabeca, &format!("{cabeca}{item}"), 1);
+        assert_eq!(as_invariantes_na_acao(&com_a_entrada), Vec::<String>::new());
+        // As peças: o `:` de uma chave, e o item que tem a linha.
+        assert_eq!(chave_e_valor("uses:./.github/actions/compilador"), None);
+        assert_eq!(chave_e_valor("- uses: ./x"), Some(("uses", "./x")));
+        assert_eq!(chave_e_valor("chave:"), Some(("chave", "")));
+        assert_eq!(chave_e_valor("chave:\tvalor"), Some(("chave", "valor")));
+        assert_eq!(
+            chave_e_valor("url: http://x:8080"),
+            Some(("url", "http://x:8080"))
+        );
+        let linhas = linhas_de_codigo("x:\n  - a: 1\n    b: 2\ny: |\n    uses: z\n");
+        assert_eq!(
+            item_da_linha(&linhas, 2).map(|(c, f, _)| (c, f)),
+            Some((1, 3))
+        );
+        assert!(linhas[4].escalar);
+        assert_eq!(item_da_linha(&linhas, 4), None);
+        let job = linhas_de_codigo(
+            "  x:\n    strategy:\n      matrix:\n        include:\n          - uses: a\n    steps:\n      \
+             - uses: b\n\n      - run: c\n        with:\n          - uses: d\n",
+        );
+        assert_eq!(passos_do_job(&job), vec![6, 8]);
     }
 
     /// O passo da ação como o texto de um bloco (no lote A13, o M2 do
