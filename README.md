@@ -12403,7 +12403,8 @@ O que ela não vê, por enquanto: a chave de um objeto JSON que uma pessoa
 entrada digita no console vai como veio ao `detalhe` do registro
 `INVALID_ARGUMENT` da auditoria, e com ele ao journal — o log leva `(campo
 nao declarado)` no lugar dela, desde o lote EXECUTADO —, e o que a auditoria
-grava ali é uma decisão [C] com o dono do projeto (a AUD-CAMPO). Nenhum caso
+grava ali é uma decisão [C] com o dono do projeto (a
+[AUD-CAMPO](docs/DECISOES.md#aud-campo)). Nenhum caso
 de hoje digita assim a palavra de uma senha que confere; o do lote
 EXECUTADO digita `graviola-madura`, que junta duas palavras de senhas da
 suíte, e fica no fim da tabela, depois de todos os que as conferem.
@@ -16171,7 +16172,8 @@ desconhecido de quem entrou não deixa linha. A frase na tela é a de sempre.
 A auditoria, essa, leva a chave como veio: o `detalhe` do registro
 `INVALID_ARGUMENT` a guarda, e o registro vai ao journal — o log não a leva, e
 a auditoria e o journal levam. O que a auditoria grava ali é uma decisão [C]
-com o dono do projeto (a AUD-CAMPO; o achado 2 do adversário da rodada 5).
+com o dono do projeto (a [AUD-CAMPO](docs/DECISOES.md#aud-campo); o achado 2 do
+adversário da rodada 5).
 E a recusa sem login deixa uma linha por linha digitada: um processo com um
 pseudo-terminal — o `terminal.attach` é só do papel `sistema` — que digite
 linhas sem ninguém entrado empurra o anel do log, de 128 registros, com um

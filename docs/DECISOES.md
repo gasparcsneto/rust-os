@@ -73,6 +73,7 @@ continuidade.
 | [P-HISTORIA](#p-historia) | A história da autoridade que cresce sem fim | persistência (o formato da base) | — | baixa: depois de dezenas de milhares de operações, a persistência para, fechada | [PERSISTENCIA](PERSISTENCIA.md#como-ficou-76) |
 | [AUD-JUNTO](#aud-junto) | A decisão de uma mudança no mesmo registro do journal que ela, ou antes | persistência e auditoria (a garantia escrita) | — | baixa: uma queda entre os dois registros deixa no disco a decisão sem a mudança; e a decisão que sai do anel na janela, com a lacuna gravada antes por outro, deixa a mudança no disco só com a lacuna antes dela | [PERSISTENCIA](PERSISTENCIA.md#a-auditoria-no-journal), [README](../README.md#testes) |
 | [AUD-FALHA](#aud-falha) | A morte de um processo por uma falha, na auditoria | auditoria (um registro novo) | um sinal para o NSF | baixa: o NSF não vê um processo que sonda o kernel por falhas — o log e a contabilidade das falhas, sim | [README](../README.md#decisões-pendentes) |
+| [AUD-CAMPO](#aud-campo) | A chave de JSON que a Pessoa entrada digita no console, no detalhe da auditoria | auditoria (o que o registro grava de quem entrou) | — | baixa: com alguém entrado, a chave que o comando não declara fica em claro na auditoria e no journal; o log não a leva | [README](../README.md#a-árvore-semântica) |
 | [R13-CONSENT](#r13-consent) | O consentimento — a Pessoa perguntada, e o registro que ela lê | Policy e autorização; quem lê a auditoria | o título da fase 13 | baixa: um agente edita o campo que a Pessoa largou, sem perguntar; ela não lê o registro | [Roteiro](../README.md#roteiro), fase 13 |
 | [ALC-TEMP](#alc-temp) (DX-1) | A expansão temporária de alcance, por titular | Policy; autoridade dada por tempo | parte do consentimento | indireta: o acesso de uma hora vira linha da política até alguém tirá-la | [USABILIDADE](USABILIDADE.md#decisões-novas--para-quem-decide) |
 | [R13-DESFAZER](#r13-desfazer) | O desfazer | persistência e auditoria | fecha a fase 13 | nenhuma nova | [Roteiro](../README.md#roteiro), fase 13 |
@@ -127,11 +128,12 @@ executa](#as-que-o-coordenador-executa)).
    R12-IC-VALOR pedem. Abre o caminho do Secure Boot que a fase 14 deixou
    de fora, mas a recomendação o deixa para depois, como opção do
    operador.
-6. **AUD-ANEL, P-HISTORIA, AUD-JUNTO e AUD-FALHA** — o lote rápido:
-   exposição baixa, poucas alternativas cada, e recomendações pequenas —
-   as duas primeiras, esperar medindo; a AUD-JUNTO, o padrão que o armazém
-   já usa; a AUD-FALHA, deixar como está até o NSF pedir o sinal —; com os
-   riscos, o impacto e o plano já escritos, decididas de uma vez.
+6. **AUD-ANEL, P-HISTORIA, AUD-JUNTO, AUD-FALHA e AUD-CAMPO** — o lote
+   rápido: exposição baixa, poucas alternativas cada, e recomendações
+   pequenas — as duas primeiras, esperar medindo; a AUD-JUNTO, o padrão
+   que o armazém já usa; a AUD-FALHA, deixar como está até o NSF pedir o
+   sinal; a AUD-CAMPO, a auditoria do console dizer o que o log diz —;
+   com os riscos, o impacto e o plano já escritos, decididas de uma vez.
 7. **R13-CONSENT**, com a **ALC-TEMP (DX-1)** — o título da fase 13;
    depende da DT-1. A DX-1 espera um consumidor: o consentimento é ele.
 8. **R13-DESFAZER** — fecha a fase 13; depende do R13-CONSENT.
@@ -1102,8 +1104,8 @@ inspecionável: nada de reinício automático quando a medição recusa.
 
 Na ordem recomendada. Cada uma: o problema, as alternativas, a
 recomendação provisória e o que destrava; as do lote rápido — a AUD-ANEL,
-a P-HISTORIA, a AUD-JUNTO e a AUD-FALHA — também os riscos, o impacto e o
-plano de validação, para se decidirem sem outra rodada.
+a P-HISTORIA, a AUD-JUNTO, a AUD-FALHA e a AUD-CAMPO — também os riscos, o
+impacto e o plano de validação, para se decidirem sem outra rodada.
 
 ### AUD-ANEL
 
@@ -1378,6 +1380,83 @@ B do #448.
   que a morte por falha fica um evento comum, que esta decisão pergunta se
   a auditoria grava.
 - **Destrava.** Nada do roteiro; um sinal novo para o NSF.
+
+### AUD-CAMPO
+
+**A chave de JSON que a Pessoa digita no console, no detalhe da auditoria**
+— do achado A2 do adversário do kernel da rodada 5 de revisão, sobre o
+lote EXECUTADO.
+
+- **O problema.** Com alguém entrado, a linha do console com um objeto
+  JSON cuja chave o comando não declara — `log.tail {"<texto>":1}` — é
+  recusada pela validação dos parâmetros, e a recusa vai à auditoria por
+  `autorizacao::auditar_invalido`, chamada no `despachar` de
+  `kernel/src/interpretador.rs`, com o campo como veio no `detalhe` do
+  registro `INVALID_ARGUMENT`. O registro vai ao journal, que não se
+  reescreve; quem tem `audit.read` o lê, e o `security.explain` o explica.
+  Desde o lote EXECUTADO, a linha `parametro invalido:` do log diz
+  `(campo nao declarado)` no lugar dessa chave (`campo_para_o_log`), porque
+  ela "é texto de quem digitou … e pode ser uma senha no lugar errado": a
+  auditoria guarda o que o log não leva. A sonda do adversário — as cinco
+  senhas da suíte digitadas como chave, com a pessoa de teste, nas duas
+  arquiteturas — achou 0 no log, 37 na auditoria e as 16 senhas e palavras
+  procuradas no journal; o próprio caso do lote EXECUTADO deixa a chave
+  dele (`graviola-madura`) lá. Sem ninguém entrado, nada disso vai à
+  auditoria. O comportamento é anterior ao lote EXECUTADO, que só o deixou
+  à vista.
+- **A área de 5.3.** A semântica da auditoria: o que o registro de uma
+  recusa grava do que a Pessoa entrada digitou. O passo 1 da continuidade
+  e o I7 do lote B do #448 aplicaram como [B] a regra de que a senha não
+  vai à auditoria — mas só sem ninguém entrado; com alguém entrado, o I7
+  manteve o comando com o resumo dos parâmetros. Estender a regra ao
+  `detalhe` de quem entrou muda o que a auditoria diz de uma pessoa, e por
+  isso este dossiê a trata como [C]. Se o dono a vir como a mesma regra,
+  ela passa às [B].
+- **As alternativas.**
+  - (a) No console, o `detalhe` diz o que o log diz: o nome que o comando
+    declara — texto do registro de comandos —, ou `(campo nao declarado)`.
+    Os canais do agente e o nativo ficam como estão: lá a chave vem de uma
+    máquina, e ajuda a depurar.
+  - (a′) O mesmo nos três caminhos (`kernel/src/interpretador.rs`,
+    `kernel/src/agent/mod.rs`, `kernel/src/nativo.rs`).
+  - (b) Um resumo da chave digitada, como o `resumo_dos_parametros`
+    (BLAKE2s sem chave): guarda a distinção entre chaves, mas é mais uma
+    forma no registro, e um resumo sem chave se adivinha por dicionário.
+    Com uma chave secreta, pede custódia nova — outro [C].
+  - (c) Não mudar, e dizer no texto que a auditoria guarda a chave
+    digitada.
+- **Os riscos.** (a): a auditoria deixa de dizer qual chave desconhecida a
+  pessoa mandou — a tela ainda diz, a quem digitou. (a′): também tira a
+  ajuda de depuração dos canais de máquina, onde não há senha digitada.
+  (b): mais uma forma no registro, e o dicionário. (c): o texto de quem
+  digita continua no journal.
+- **O impacto.** (a): uma linha do `despachar` — a chamada de
+  `auditar_invalido` passa `campo_para_o_log(comando, campo)` —; o caso do
+  lote EXECUTADO passa a conferir também a auditoria e o journal; os casos
+  que conferem o `detalhe` de um `INVALID_ARGUMENT` do console com a chave
+  como veio, se houver; o texto. Não mudam o formato do registro, a
+  cadeia, o journal, o Gate, a Policy nem a decisão; os registros já
+  gravados ficam como estão.
+- **As fechadas.** A 1.7 — a auditoria e a proveniência existentes: a (a)
+  muda o conteúdo de um campo de um tipo de registro do console, e não o
+  formato nem a cadeia. O I7 ("com alguém entrado, o comando vai com o
+  resumo dos parâmetros, como sempre") não se reabre: o resumo dos
+  parâmetros de um comando aceito fica como está.
+- **O plano de validação.** O caso do lote EXECUTADO confere a chave
+  digitada fora da auditoria e do journal, e `(campo nao declarado)` no
+  `detalhe` do registro; a mutação "o detalhe com a chave como veio" o
+  reprova; a sonda das cinco senhas roda de novo, com e sem login; a suíte
+  inteira nas duas arquiteturas, o job de lints e a CI completa.
+- **A recomendação provisória.** (a): a correção menor que fecha a
+  diferença entre o log e a auditoria, no único caminho em que a chave vem
+  de uma pessoa.
+- **Destrava.** Nada do roteiro. Desde o lote ICACHE-5, a conferência dos
+  segredos da suíte procura a palavra inteira de cada senha na auditoria
+  inteira e no journal. O caso do lote EXECUTADO deixa lá a chave dele,
+  `graviola-madura`, que junta palavras de duas senhas da suíte, e fica no
+  fim da tabela, depois dos casos que conferem essas senhas; até a
+  decisão, um caso novo que as confira, na mesma parte e depois dele,
+  reprova por este caminho.
 
 ### R13-CONSENT
 
@@ -2550,7 +2629,7 @@ pendência #298.
 
   Fica: a chave de um objeto JSON que uma pessoa entrada digita no console
   vai como veio ao `detalhe` da auditoria e ao journal — o log não a leva
-  —, e o que a auditoria grava ali é a AUD-CAMPO, uma decisão [C] com o
+  —, e o que a auditoria grava ali é a [AUD-CAMPO](#aud-campo), uma decisão [C] com o
   dono do projeto; as corridas da remoção que o emulador não mostra — a
   que não espera a confirmação dos outros núcleos, ou que grava o endereço
   do descarte depois de avisar — e o percurso especulativo, que só um
