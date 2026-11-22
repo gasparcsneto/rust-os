@@ -20481,6 +20481,9 @@ fn sob_arvore(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> R
         ));
     }
 
+    // A linha do log que conta é a deste confirm: a sonda do Terminal deixou
+    // uma igual no anel pouco antes — ver [`linhas_desde`].
+    let desde = desde_do_log(&mut |m, p| pedir(7707, m, p), "arvore")?;
     let r = pedir(7704, "ui.act", r#"{"id":3,"action":"confirm"}"#)?;
     if !r.contains(r#""executed":"system.uptime""#) {
         return Err(format!("arvore: confirm nao executou a linha\n  {r}"));
@@ -20494,7 +20497,7 @@ fn sob_arvore(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> R
         ));
     }
     let log = pedir(7706, "log.tail", r#"{"count":16}"#)?;
-    if !log.contains("executado: system.uptime (agente 0)") {
+    if !diz_desde(&log, desde, "executado: system.uptime (agente 0)", "arvore")? {
         return Err(format!(
             "arvore: o log nao registrou o agente como origem\n  {log}"
         ));
@@ -20752,7 +20755,10 @@ fn sob_mouse(
     }
     println!("  [mouse] ok  o ponteiro chegou ao botao em ({cx}, {cy}), com o cursor na tela");
 
-    // O clique.
+    // O clique. A linha que conta é a dele: a sonda da barra, logo antes,
+    // deixou uma igual no anel, pelo F1 — ver [`linhas_desde`].
+    let desde = desde_do_log(&mut |m, p| pedir(id, m, p), "mouse")?;
+    id += 1;
     for down in [true, false] {
         qmp_eventos(
             &mut qmp_escrita,
@@ -20767,7 +20773,7 @@ fn sob_mouse(
     while std::time::Instant::now() < limite {
         ultima = pedir(id, "log.tail", r#"{"count":16}"#)?;
         id += 1;
-        if ultima.contains(&pessoa) {
+        if diz_desde(&ultima, desde, &pessoa, "mouse")? {
             println!("  [mouse] ok  o clique pressionou o botao, pela pessoa");
             return Ok(());
         }
@@ -21609,6 +21615,7 @@ fn sob_agentes(arch: Arquitetura) -> Result<(), String> {
         },
         "o set_value da porta 2 nao chegou a linha de comando do Terminal",
     )?;
+    let desde = desde_do_log(&mut |m, p| agente.pedir(m, p), "agentes")?;
     let r = agente.pedir("ui.act", &format!(r#"{{"id":{linha},"action":"confirm"}}"#))?;
     if !r.contains(r#""ok":true"#) {
         return Err(format!("agentes: o confirm da porta 2 foi recusado\n  {r}"));
@@ -21616,7 +21623,7 @@ fn sob_agentes(arch: Arquitetura) -> Result<(), String> {
     agente.esperar(
         "log.tail",
         r#"{"count":24}"#,
-        &|l| l.contains("executado: system.info (agente 2)"),
+        &|l| diz_desde(l, desde, "executado: system.info (agente 2)", "agentes").unwrap_or(false),
         "o comando do agente da porta 2 nao executou, ou o log nao diz que foi ele",
     )?;
     println!("  [agentes] ok  o agente da porta 2 executou no Terminal, e o log diz `agente 2`");
@@ -23602,6 +23609,7 @@ fn sob_formulario(
         },
         "os valores do agente nao chegaram aos campos",
     )?;
+    let desde = desde_do_log(&mut pedir, "formulario")?;
     let r = pedir("ui.act", &format!(r#"{{"id":{ok},"action":"press"}}"#))?;
     if !r.contains(r#""ok":true"#) {
         return Err(format!("formulario: o press no OK foi recusado\n  {r}"));
@@ -23609,7 +23617,15 @@ fn sob_formulario(
     esperar(
         &mut pedir,
         log,
-        &|l| l.contains("formulario: acionado 3 [Ana] [Souza]"),
+        &|l| {
+            diz_desde(
+                l,
+                desde,
+                "formulario: acionado 3 [Ana] [Souza]",
+                "formulario",
+            )
+            .unwrap_or(false)
+        },
         "o OK do agente nao chegou ao programa com os valores",
     )?;
     println!("  [formulario] ok  preenchido e confirmado pelo agente, pela arvore");
@@ -23632,6 +23648,7 @@ fn sob_formulario(
 
     // A pessoa: uma letra no campo com o foco — o primeiro —, e o Enter,
     // pelo teclado da máquina.
+    let desde = desde_do_log(&mut pedir, "formulario")?;
     let mut mon = UnixStream::connect(monitor)
         .map_err(|e| format!("formulario: o monitor nao aceitou conexao: {e}"))?;
     for tecla in ["x", "ret"] {
@@ -23643,7 +23660,15 @@ fn sob_formulario(
     esperar(
         &mut pedir,
         log,
-        &|l| l.contains("formulario: acionado 1 [Anax] [Souza]"),
+        &|l| {
+            diz_desde(
+                l,
+                desde,
+                "formulario: acionado 1 [Anax] [Souza]",
+                "formulario",
+            )
+            .unwrap_or(false)
+        },
         "o que a pessoa digitou nao chegou ao campo, ou o Enter nao o confirmou",
     )?;
     println!("  [formulario] ok  a pessoa digitou no mesmo campo e confirmou com o Enter");
@@ -23721,6 +23746,8 @@ fn sob_interface_nativa(
     };
     let antes = pedidos(&pedir("user.stats", "{}")?);
     for (programa, codigo) in [("contido", 75), ("anonimo", 76)] {
+        // A saída que conta é a deste lançamento — ver [`linhas_desde`].
+        let desde = desde_do_log(&mut pedir, "nativo")?;
         let lancado = pedir(
             "user.run",
             &format!(r#"{{"path":"/programas/{}/{programa}"}}"#, arch.nome()),
@@ -23730,11 +23757,10 @@ fn sob_interface_nativa(
                 "nativo: o user.run nao lancou {programa}\n  {lancado}"
             ));
         }
-        let procurada = format!("processo encerrou com codigo {codigo}");
         let limite = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             let log = pedir("log.tail", r#"{"count":32}"#)?;
-            if log.contains(&procurada) {
+            if saida_desde(&linhas_desde(&log, desde, "nativo")?, desde, codigo).is_some() {
                 break;
             }
             if std::time::Instant::now() >= limite {
@@ -23808,14 +23834,94 @@ fn registros_do_log(resposta: &str) -> Option<(Vec<RegistroDoLog>, u64)> {
 /// linhas de log caíam na janela que ela mede — a CI 527.
 ///
 /// `desde` é quantos registros o kernel já tinha emitido antes do pedido —
-/// o `total_emitted` de um `log.tail` —, e as linhas de antes dele não
-/// contam.
+/// o `total_emitted` de um `log.tail`, lido por [`desde_do_log`] —, e as
+/// linhas de antes dele não contam. A regra vale para toda espera da fumaça
+/// pelo log — ver [`linhas_desde`].
+///
+/// # O que ela não amarra
+///
+/// O texto, e não o processo: a linha não diz quem saiu. Conta como a saída
+/// do programa lançado a de qualquer outro processo que saia com o mesmo
+/// código depois do pedido — um filho dele, que saísse antes do pai com o
+/// código do pai; um programa lançado ao mesmo tempo por outro canal —, e
+/// a linha que um programa escreva com esse texto: o que ele escreve vai ao
+/// anel no mesmo subsistema, `usuario`. Na fumaça nada disso acontece: os
+/// programas são os da imagem, lançados um de cada vez pela própria fumaça;
+/// nenhum escreve essa linha; e o único filho, o do `contido`, sai com 77, e
+/// o pai com 75. Amarrar ao processo pediria a saída de cada fio no log, e
+/// a linha da saída não o traz: o `user.run` devolve o fio, e o log não diz
+/// de que fio foi a saída.
 fn saida_desde(registros: &[RegistroDoLog], desde: u64, codigo: i64) -> Option<u64> {
-    let procurada = format!("processo encerrou com codigo {codigo}");
+    saidas_desde(registros, desde)
+        .find(|&(_, c)| c == codigo)
+        .map(|(seq, _)| seq)
+}
+
+/// As saídas de processo que `registros` dizem de `desde` em diante — as
+/// linhas `processo encerrou com codigo N` do subsistema `usuario` —, com o
+/// número de cada linha, na ordem do anel. É também a varredura das falhas
+/// de uma espera: um código da faixa de falha do programa, só depois do
+/// pedido. A de antes lia as 32 últimas linhas, e casaria na direção
+/// contrária a saída de um programa anterior com um código da faixa — uma
+/// reprovação falsa (o adversário do lote FUMAÇA-USB).
+fn saidas_desde(registros: &[RegistroDoLog], desde: u64) -> impl Iterator<Item = (u64, i64)> + '_ {
     registros
         .iter()
-        .find(|r| r.seq >= desde && r.mensagem == procurada)
-        .map(|r| r.seq)
+        .filter(move |r| r.seq >= desde && r.subsistema == "usuario")
+        .filter_map(|r| {
+            let codigo = r.mensagem.strip_prefix("processo encerrou com codigo ")?;
+            Some((r.seq, codigo.parse().ok()?))
+        })
+}
+
+/// As linhas de uma resposta de `log.tail` que entraram no anel de `desde`
+/// em diante — o que uma espera da fumaça pelo log lê.
+///
+/// # Por que toda espera
+///
+/// Uma espera pelo log lê só o que entrou no anel depois do pedido —
+/// `desde` é o [`desde_do_log`] lido antes dele —, senão uma linha igual,
+/// mais antiga, passa por ela. Foi o P1 do lote FUMAÇA-USB (ver
+/// [`saida_desde`]), e não estava só no `guardar`: o clique da sonda do
+/// mouse esperava `pessoa: press no elemento 5` nas 16 últimas linhas, e a
+/// sonda da barra, logo antes, deixa essa mesma linha pelo F1; a árvore
+/// conferia `executado: system.uptime (agente 0)`, e a sonda do Terminal
+/// deixa uma igual poucas linhas antes. Nas duas, a linha velha bastava
+/// para passar: o clique e o confirm não eram conferidos.
+///
+/// Uma resposta que não se lê é erro, e não uma lista vazia: lida como
+/// vazia, a espera esperaria o prazo inteiro e reprovaria pelo motivo
+/// errado. Menos nas três que esperam por um predicado — a do agente da
+/// porta 2 no Terminal e as duas do formulário —, que não têm por onde
+/// devolver o erro: nelas a resposta ilegível conta como não achada, e a
+/// espera reprova no prazo, com a resposta na mensagem.
+fn linhas_desde(resposta: &str, desde: u64, quem: &str) -> Result<Vec<RegistroDoLog>, String> {
+    let (registros, _) = registros_do_log(resposta)
+        .ok_or_else(|| format!("{quem}: o log.tail nao se le\n  {resposta}"))?;
+    Ok(registros.into_iter().filter(|r| r.seq >= desde).collect())
+}
+
+/// Se a resposta de um `log.tail` traz, de `desde` em diante, uma linha
+/// com `texto`: a conferência de uma espera pelo log que procura um texto,
+/// e não uma saída — ver [`linhas_desde`].
+fn diz_desde(resposta: &str, desde: u64, texto: &str, quem: &str) -> Result<bool, String> {
+    Ok(linhas_desde(resposta, desde, quem)?
+        .iter()
+        .any(|r| r.mensagem.contains(texto)))
+}
+
+/// Junta a `ditas`, sem repetir, o que um programa disse em `registros`:
+/// as linhas do subsistema `usuario` que começam com `marca` — o nome dele
+/// e dois-pontos, como os programas da imagem escrevem as suas.
+fn juntar_ditas(ditas: &mut Vec<String>, registros: &[RegistroDoLog], marca: &str) {
+    for r in registros {
+        if r.subsistema == "usuario"
+            && r.mensagem.starts_with(marca)
+            && !ditas.contains(&r.mensagem)
+        {
+            ditas.push(r.mensagem.clone());
+        }
+    }
 }
 
 /// O período do timer do kernel, em milissegundos: 100 Hz nas duas
@@ -24532,7 +24638,9 @@ fn sob_a_rede(
     );
 
     // Um processo espera também: o `discador` lê com `wait`, e a tarefa dos
-    // programas guarda o pedido suspenso enquanto o fio dorme.
+    // programas guarda o pedido suspenso enquanto o fio dorme. A saída que
+    // conta é a deste lançamento — ver [`linhas_desde`].
+    let desde = desde_do_log(&mut |m, p| serial.pedir(m, p), "rede")?;
     let lancado = serial.pedir(
         "user.run",
         &format!(r#"{{"path":"/programas/{}/discador"}}"#, arch.nome()),
@@ -24546,7 +24654,7 @@ fn sob_a_rede(
     let limite = comeco + Duration::from_secs(30);
     loop {
         let log = serial.pedir("log.tail", r#"{"count":32}"#)?;
-        if log.contains("processo encerrou com codigo 79") {
+        if saida_desde(&linhas_desde(&log, desde, "rede")?, desde, 79).is_some() {
             break;
         }
         if std::time::Instant::now() > limite {
@@ -24573,7 +24681,9 @@ fn sob_a_rede(
     // fecha as cadeias com a forma das públicas — P-384, RSA e a mista —,
     // recusa os que o servidor não prova, e cada pedido dele passa pelo
     // gate, que recusa a porta ao lado antes do primeiro byte. Daqui, a
-    // medida de cada aperto e do eco, que o programa diz no log.
+    // medida de cada aperto e do eco, que o programa diz no log — o que ele
+    // disse depois do lançamento: ver [`linhas_desde`].
+    let desde = desde_do_log(&mut |m, p| serial.pedir(m, p), "tls")?;
     let lancado = serial.pedir(
         "user.run",
         &format!(r#"{{"path":"/programas/{}/cifrado"}}"#, arch.nome()),
@@ -24586,13 +24696,9 @@ fn sob_a_rede(
     let mut ditas: Vec<String> = Vec::new();
     loop {
         let log = serial.pedir("log.tail", r#"{"count":32}"#)?;
-        for pedaco in log.split("cifrado: ").skip(1) {
-            let linha = format!("cifrado: {}", pedaco.split('"').next().unwrap_or(""));
-            if !ditas.contains(&linha) {
-                ditas.push(linha);
-            }
-        }
-        if log.contains("processo encerrou com codigo 86") {
+        let novas = linhas_desde(&log, desde, "tls")?;
+        juntar_ditas(&mut ditas, &novas, "cifrado: ");
+        if saida_desde(&novas, desde, 86).is_some() {
             break;
         }
         if std::time::Instant::now() > limite {
@@ -24663,6 +24769,10 @@ fn sob_a_rede(
         numero_no_caminho(&m, &["gate", "decisions"])
             .ok_or_else(|| format!("http: o security.metrics nao disse as decisoes\n  {m}"))
     };
+    // O que conta é o que a página disse depois do lançamento — ver
+    // [`linhas_desde`] —, e o `desde` é lido antes das decisões, para não
+    // entrar na conta delas.
+    let desde = desde_do_log(&mut |m, p| serial.pedir(m, p), "http")?;
     let decisoes_antes = decisoes(&mut serial)?;
     let lancado = serial.pedir(
         "user.run",
@@ -24676,21 +24786,15 @@ fn sob_a_rede(
     let mut ditas: Vec<String> = Vec::new();
     loop {
         let log = serial.pedir("log.tail", r#"{"count":32}"#)?;
-        for pedaco in log.split("pagina: ").skip(1) {
-            let linha = format!("pagina: {}", pedaco.split('"').next().unwrap_or(""));
-            if !ditas.contains(&linha) {
-                ditas.push(linha);
-            }
-        }
-        if log.contains("processo encerrou com codigo 88") {
+        let novas = linhas_desde(&log, desde, "http")?;
+        juntar_ditas(&mut ditas, &novas, "pagina: ");
+        if saida_desde(&novas, desde, 88).is_some() {
             break;
         }
         // Saiu com um dos códigos de falha dela (40 a 48): o que ela disse
         // diz o quê, sem esperar o teto.
-        let falhou = log
-            .split("processo encerrou com codigo ")
-            .skip(1)
-            .filter_map(|r| r.split('"').next()?.parse::<u32>().ok())
+        let falhou = saidas_desde(&novas, desde)
+            .map(|(_, c)| c)
             .find(|c| (40..=48).contains(c));
         if let Some(codigo) = falhou {
             return Err(format!(
@@ -24942,6 +25046,8 @@ fn sob_o_plano_de_dados(
     for (programa, saida, falhas, teto) in
         [("vazao", 95, 53..=55, 300), ("carga", 96, 56..=59, 120)]
     {
+        // O que conta é o que este lançamento disse — ver [`linhas_desde`].
+        let desde = desde_do_log(&mut pedir, "dados")?;
         let lancado = operador.pedir(
             "user.run",
             &format!(r#"{{"path":"/programas/{}/{programa}"}}"#, arch.nome()),
@@ -24957,21 +25063,15 @@ fn sob_o_plano_de_dados(
         let mut ditas: Vec<String> = Vec::new();
         loop {
             let log = pedir("log.tail", r#"{"count":32}"#)?;
-            for pedaco in log.split(&marca).skip(1) {
-                let linha = format!("{marca}{}", pedaco.split('"').next().unwrap_or(""));
-                if !ditas.contains(&linha) {
-                    ditas.push(linha);
-                }
-            }
-            if log.contains(&format!("processo encerrou com codigo {saida}")) {
+            let novas = linhas_desde(&log, desde, "dados")?;
+            juntar_ditas(&mut ditas, &novas, &marca);
+            if saida_desde(&novas, desde, saida).is_some() {
                 break;
             }
             // Saiu com um dos códigos de falha dele: o que ele disse diz o
             // quê — uma recusa por taxa, por exemplo —, sem esperar o teto.
-            let falhou = log
-                .split("processo encerrou com codigo ")
-                .skip(1)
-                .filter_map(|r| r.split('"').next()?.parse::<u32>().ok())
+            let falhou = saidas_desde(&novas, desde)
+                .map(|(_, c)| c)
                 .find(|c| falhas.contains(c));
             if let Some(codigo) = falhou {
                 return Err(format!(
@@ -25090,6 +25190,9 @@ fn sob_a_compressao(
     let antes = contas_do_orcamento(&pedir("security.metrics", "{}")?)?;
     let inicio = numero_no_caminho(&pedir("audit.head", "{}")?, &["seq"])
         .ok_or("compressao: o audit.head nao disse o numero")?;
+    // E o log: o que conta é o que o programa disse depois do lançamento —
+    // ver [`linhas_desde`].
+    let desde = desde_do_log(&mut pedir, "compressao")?;
     let comeco = std::time::Instant::now();
     let mut operador = AgenteNaPorta::conectar(arch, 2)?;
     let lancado = operador.pedir(
@@ -25103,21 +25206,15 @@ fn sob_a_compressao(
     let mut ditas: Vec<String> = Vec::new();
     loop {
         let log = pedir("log.tail", r#"{"count":32}"#)?;
-        for pedaco in log.split("compressao: ").skip(1) {
-            let linha = format!("compressao: {}", pedaco.split('"').next().unwrap_or(""));
-            if !ditas.contains(&linha) {
-                ditas.push(linha);
-            }
-        }
-        if log.contains("processo encerrou com codigo 98") {
+        let novas = linhas_desde(&log, desde, "compressao")?;
+        juntar_ditas(&mut ditas, &novas, "compressao: ");
+        if saida_desde(&novas, desde, 98).is_some() {
             break;
         }
         // Saiu com um dos códigos de falha dele (30 a 38): o que ele disse
         // diz o quê, sem esperar o teto.
-        let falhou = log
-            .split("processo encerrou com codigo ")
-            .skip(1)
-            .filter_map(|r| r.split('"').next()?.parse::<u32>().ok())
+        let falhou = saidas_desde(&novas, desde)
+            .map(|(_, c)| c)
             .find(|c| (30..=38).contains(c));
         if let Some(codigo) = falhou {
             return Err(format!(
@@ -25312,6 +25409,9 @@ fn sob_os_cookies(
     let antes = contas_do_orcamento(&pedir("security.metrics", "{}")?)?;
     let inicio = numero_no_caminho(&pedir("audit.head", "{}")?, &["seq"])
         .ok_or("cookies: o audit.head nao disse o numero")?;
+    // E o log: o que conta é o que o programa disse depois do lançamento —
+    // ver [`linhas_desde`].
+    let desde = desde_do_log(&mut pedir, "cookies")?;
     let comeco = std::time::Instant::now();
     let mut operador = AgenteNaPorta::conectar(arch, 2)?;
     let lancado = operador.pedir(
@@ -25325,21 +25425,15 @@ fn sob_os_cookies(
     let mut ditas: Vec<String> = Vec::new();
     loop {
         let log = pedir("log.tail", r#"{"count":32}"#)?;
-        for pedaco in log.split("cookies: ").skip(1) {
-            let linha = format!("cookies: {}", pedaco.split('"').next().unwrap_or(""));
-            if !ditas.contains(&linha) {
-                ditas.push(linha);
-            }
-        }
-        if log.contains("processo encerrou com codigo 99") {
+        let novas = linhas_desde(&log, desde, "cookies")?;
+        juntar_ditas(&mut ditas, &novas, "cookies: ");
+        if saida_desde(&novas, desde, 99).is_some() {
             break;
         }
         // Saiu com um dos códigos de falha dele (40 a 49): o que ele disse
         // diz o quê, sem esperar o teto.
-        let falhou = log
-            .split("processo encerrou com codigo ")
-            .skip(1)
-            .filter_map(|r| r.split('"').next()?.parse::<u32>().ok())
+        let falhou = saidas_desde(&novas, desde)
+            .map(|(_, c)| c)
             .find(|c| (40..=49).contains(c));
         if let Some(codigo) = falhou {
             return Err(format!(
@@ -25620,6 +25714,9 @@ fn sob_o_ic(
     let antes = contas_do_orcamento(&pedir("security.metrics", "{}")?)?;
     let inicio = numero_no_caminho(&pedir("audit.head", "{}")?, &["seq"])
         .ok_or("ic: o audit.head nao disse o numero")?;
+    // E o log: o que conta é o que o programa disse depois do lançamento —
+    // ver [`linhas_desde`].
+    let desde = desde_do_log(&mut pedir, "ic")?;
     let comeco = std::time::Instant::now();
     let mut operador = AgenteNaPorta::conectar(arch, 2)?;
     // A chave é do operador — da identidade dele —, e o programa que ele
@@ -25642,21 +25739,15 @@ fn sob_o_ic(
     let mut ditas: Vec<String> = Vec::new();
     loop {
         let log = pedir("log.tail", r#"{"count":32}"#)?;
-        for pedaco in log.split("verificado: ").skip(1) {
-            let linha = format!("verificado: {}", pedaco.split('"').next().unwrap_or(""));
-            if !ditas.contains(&linha) {
-                ditas.push(linha);
-            }
-        }
-        if log.contains("processo encerrou com codigo 97") {
+        let novas = linhas_desde(&log, desde, "ic")?;
+        juntar_ditas(&mut ditas, &novas, "verificado: ");
+        if saida_desde(&novas, desde, 97).is_some() {
             break;
         }
         // Saiu com um dos códigos de falha dele (40 a 59): o que ele disse
         // diz o quê, sem esperar o teto.
-        let falhou = log
-            .split("processo encerrou com codigo ")
-            .skip(1)
-            .filter_map(|r| r.split('"').next()?.parse::<u32>().ok())
+        let falhou = saidas_desde(&novas, desde)
+            .map(|(_, c)| c)
             .find(|c| (40..=59).contains(c));
         if let Some(codigo) = falhou {
             return Err(format!(
@@ -25929,34 +26020,9 @@ fn sob_o_http2(
     let antes = contas_do_orcamento(&pedir("security.metrics", "{}")?)?;
     let inicio = numero_no_caminho(&pedir("audit.head", "{}")?, &["seq"])
         .ok_or("http2: o audit.head nao disse o numero")?;
-    // O log desde aqui, registro a registro: o `cookies`, da perna de antes,
-    // sai com o mesmo código, e o fim dele ainda está na cauda.
-    let registros_do_log = |resposta: &str| -> Result<Vec<(u64, String, String)>, String> {
-        let registros = objetos_planos(
-            apos(resposta, r#""records":["#).ok_or("http2: log.tail sem registros")?,
-        )?;
-        Ok(registros
-            .iter()
-            .filter_map(|campos| {
-                let campo = |nome: &str| {
-                    campos
-                        .iter()
-                        .find(|(n, _)| n == nome)
-                        .and_then(|(_, v)| v.clone())
-                };
-                Some((
-                    campo("seq")?.parse().ok()?,
-                    campo("subsystem")?,
-                    campo("message")?,
-                ))
-            })
-            .collect())
-    };
-    let do_log = registros_do_log(&pedir("log.tail", r#"{"count":1}"#)?)?
-        .iter()
-        .map(|(seq, ..)| *seq)
-        .max()
-        .ok_or("http2: o log.tail nao disse o numero")?;
+    // O log desde aqui: o `cookies`, da perna de antes, sai com o mesmo
+    // código, e o fim dele ainda está na cauda — ver [`linhas_desde`].
+    let desde = desde_do_log(&mut pedir, "http2")?;
     let comeco = std::time::Instant::now();
     let mut operador = AgenteNaPorta::conectar(arch, 2)?;
     let lancado = operador.pedir(
@@ -25969,30 +26035,17 @@ fn sob_o_http2(
     let limite = comeco + Duration::from_secs(300);
     let mut ditas: Vec<String> = Vec::new();
     loop {
-        let novos: Vec<_> = registros_do_log(&pedir("log.tail", r#"{"count":32}"#)?)?
-            .into_iter()
-            .filter(|(seq, subsistema, _)| *seq > do_log && subsistema == "usuario")
-            .map(|(_, _, mensagem)| mensagem)
-            .collect();
-        for linha in novos.iter().filter(|l| l.starts_with("correntes: ")) {
-            if !ditas.contains(linha) {
-                ditas.push(linha.clone());
-            }
-        }
-        let saida = novos
-            .iter()
-            .filter_map(|l| {
-                l.strip_prefix("processo encerrou com codigo ")?
-                    .parse::<u32>()
-                    .ok()
-            })
-            .next_back();
-        if saida == Some(99) {
+        let log = pedir("log.tail", r#"{"count":32}"#)?;
+        let novas = linhas_desde(&log, desde, "http2")?;
+        juntar_ditas(&mut ditas, &novas, "correntes: ");
+        if saida_desde(&novas, desde, 99).is_some() {
             break;
         }
         // Saiu com um dos códigos de falha dele (40 a 49): o que ele disse
         // diz o quê, sem esperar o teto.
-        let falhou = saida.filter(|c| (40..=49).contains(c));
+        let falhou = saidas_desde(&novas, desde)
+            .map(|(_, c)| c)
+            .find(|c| (40..=49).contains(c));
         if let Some(codigo) = falhou {
             return Err(format!(
                 "http2: o programa saiu com {codigo}\n  {}",
@@ -26253,9 +26306,7 @@ fn sob_o_armazem(
 
     // A saída que conta é a deste `guardar`: as linhas que entraram no anel
     // depois do pedido — ver [`saida_desde`].
-    let desde = registros_do_log(&pedir("log.tail", r#"{"count":0}"#)?)
-        .map(|(_, emitidos)| emitidos)
-        .ok_or("armazem: o log.tail nao se le")?;
+    let desde = desde_do_log(&mut pedir, "armazem")?;
     let lancado = pedir(
         "user.run",
         &format!(r#"{{"path":"/programas/{}/guardar"}}"#, arch.nome()),
@@ -26268,16 +26319,13 @@ fn sob_o_armazem(
     let limite = std::time::Instant::now() + Duration::from_secs(10);
     let saiu = loop {
         let log = pedir("log.tail", r#"{"count":64}"#)?;
-        let registros = registros_do_log(&log)
-            .map(|(r, _)| r)
-            .ok_or_else(|| format!("armazem: o log.tail nao se le\n  {log}"))?;
+        let registros = linhas_desde(&log, desde, "armazem")?;
         if let Some(seq) = saida_desde(&registros, desde, 77) {
             break seq;
         }
         if std::time::Instant::now() >= limite {
             let dele: Vec<String> = registros
                 .iter()
-                .filter(|r| r.seq >= desde)
                 .map(|r| format!("[{}] {} {}", r.seq, r.subsistema, r.mensagem))
                 .collect();
             return Err(format!(
@@ -26398,6 +26446,8 @@ fn sob_o_codigo(
                     "codigo: {arquivo} nao foi gravado inteiro pelo anexo\n  {gravado}"
                 ));
             }
+            // A saída que conta é a deste lançamento — ver [`linhas_desde`].
+            let desde = desde_do_log(&mut pedir, "codigo")?;
             let pedido = std::time::Instant::now();
             let lancado = agente.pedir("user.run", &format!(r#"{{"path":"{caminho}"}}"#))?;
             tempos.push(format!("{arquivo} {} ms", pedido.elapsed().as_millis()));
@@ -26408,11 +26458,10 @@ fn sob_o_codigo(
                             "codigo: o selado pela bancada nao rodou\n  {lancado}"
                         ));
                     }
-                    let procurada = "processo encerrou com codigo 92";
                     let limite = std::time::Instant::now() + Duration::from_secs(15);
                     loop {
                         let log = pedir("log.tail", r#"{"count":32}"#)?;
-                        if log.contains(procurada) {
+                        if saida_desde(&linhas_desde(&log, desde, "codigo")?, desde, 92).is_some() {
                             break;
                         }
                         if std::time::Instant::now() >= limite {
@@ -26527,6 +26576,9 @@ fn sob_barra(
     }
     println!("  [barra] ok  o relogio anda sozinho: `{antes}` -> `{depois}`");
 
+    // As linhas que contam são as deste press e deste F1 — ver
+    // [`linhas_desde`].
+    let desde = desde_do_log(&mut |m, p| pedir(7811, m, p), "barra")?;
     let r = pedir(
         7802,
         "ui.act",
@@ -26537,13 +26589,14 @@ fn sob_barra(
     }
     let agente = format!("agente 0: press no elemento {BOTAO}");
     let log = pedir(7803, "log.tail", r#"{"count":16}"#)?;
-    if !log.contains(&agente) {
+    if !diz_desde(&log, desde, &agente, "barra")? {
         return Err(format!(
             "barra: o log nao registrou o press do agente\n  {log}"
         ));
     }
     println!("  [barra] ok  press pelo agente, pela arvore");
 
+    let desde = desde_do_log(&mut |m, p| pedir(7812, m, p), "barra")?;
     let mut mon = UnixStream::connect(monitor)
         .map_err(|e| format!("barra: o monitor nao aceitou conexao: {e}"))?;
     mon.write_all(b"sendkey f1\n")
@@ -26557,7 +26610,7 @@ fn sob_barra(
     while std::time::Instant::now() < limite {
         ultima = pedir(id, "log.tail", r#"{"count":16}"#)?;
         id += 1;
-        if ultima.contains(&pessoa) {
+        if diz_desde(&ultima, desde, &pessoa, "barra")? {
             println!("  [barra] ok  F1 pela pessoa, pelo teclado da maquina");
             return Ok(());
         }
@@ -26816,6 +26869,13 @@ fn sob_interpretador(
         Ok(())
     };
 
+    // A linha que conta é a deste comando — ver [`linhas_desde`]. O
+    // `desde` é lido antes da primeira tecla.
+    let mut n = 6600;
+    let desde = desde_do_log(
+        &mut |m, p| pedir_pela_serial(escrita, leitor, &mut n, m, p),
+        "interpretador",
+    )?;
     tecla("ret")?;
     for nome in ["a", "g", "e", "n", "t", "dot", "p", "i", "n", "g", "ret"] {
         tecla(nome)?;
@@ -26842,7 +26902,12 @@ fn sob_interpretador(
         }
         // Com a origem: foi uma pessoa, pelo teclado. É a metade da
         // auditoria que a sonda da árvore semântica não alcança.
-        if ultima.contains("executado: agent.ping (pessoa)") {
+        if diz_desde(
+            &ultima,
+            desde,
+            "executado: agent.ping (pessoa)",
+            "interpretador",
+        )? {
             println!("  [interpretador] ok  `agent.ping` digitado e executado, pela pessoa");
             return Ok(());
         }
@@ -26851,7 +26916,7 @@ fn sob_interpretador(
 
     // Executado, mas atribuído a quem não o digitou, é outro defeito — e a
     // mensagem precisa dizer qual, ou manda quem depura procurar no teclado.
-    if ultima.contains("executado: agent.ping") {
+    if diz_desde(&ultima, desde, "executado: agent.ping", "interpretador").unwrap_or(false) {
         return Err(format!(
             "interpretador: o comando digitado foi executado, mas o log nao o atribui a pessoa\n  {ultima}"
         ));
@@ -26954,6 +27019,9 @@ fn sob_terminal_pelo_agente(
         .find(GRADE)
         .and_then(|i| id_antes(&arvore[i..], LINHA))
         .ok_or_else(|| format!("terminal: a grade nao tem a linha de comando\n  {arvore}"))?;
+    // A linha que conta é a deste confirm — ver [`linhas_desde`]. O
+    // `set_value` não executa nada: o `desde` pode vir antes dele.
+    let desde = desde_do_log(&mut pedir, "terminal")?;
     for (acao, valor) in [
         ("set_value", r#","value":"system.uptime""#),
         ("confirm", ""),
@@ -26993,7 +27061,12 @@ fn sob_terminal_pelo_agente(
     let limite = std::time::Instant::now() + Duration::from_secs(8);
     loop {
         let log = pedir("log.tail", r#"{"count":24}"#)?;
-        if log.contains("executado: system.uptime (agente 0)") {
+        if diz_desde(
+            &log,
+            desde,
+            "executado: system.uptime (agente 0)",
+            "terminal",
+        )? {
             break;
         }
         if std::time::Instant::now() >= limite {
@@ -29451,6 +29524,101 @@ mod testes {
         assert!(
             erro.contains("(nenhum registro; procurada de 158 a 162)"),
             "{erro}"
+        );
+    }
+
+    /// Toda espera da fumaça pelo log lê só o que entrou no anel depois do
+    /// pedido: a linha igual de antes não conta — o `press` do F1 da sonda
+    /// da barra, antes do clique do mouse —, uma resposta que não se lê é
+    /// erro, as saídas e as falhas são só as de depois, e o que um programa
+    /// disse é só o dele.
+    #[test]
+    fn as_esperas_da_fumaca_leem_so_o_que_entrou_depois_do_pedido() {
+        use super::*;
+        let log = |registros: &[(u64, &str, &str)], emitidos: u64| {
+            let itens: Vec<String> = registros
+                .iter()
+                .map(|(seq, subsistema, mensagem)| {
+                    format!(
+                        r#"{{"seq":{seq},"uptime_ms":{},"level":"info","subsystem":"{subsistema}","message":"{mensagem}"}}"#,
+                        seq * 10
+                    )
+                })
+                .collect();
+            format!(
+                r#"{{"jsonrpc":"2.0","id":7,"result":{{"records":[{}],"total_emitted":{emitidos}}}}}"#,
+                itens.join(",")
+            )
+        };
+        let press = "pessoa: press no elemento 5";
+        // O F1 da barra ficou no anel; o clique do mouse ainda não chegou.
+        let antes_do_clique = log(
+            &[
+                (113, "ui", "agente 0: press no elemento 5"),
+                (114, "ui", press),
+            ],
+            115,
+        );
+        assert_eq!(diz_desde(&antes_do_clique, 115, press, "mouse"), Ok(false));
+        let com_o_clique = log(&[(114, "ui", press), (115, "ui", press)], 116);
+        assert_eq!(diz_desde(&com_o_clique, 115, press, "mouse"), Ok(true));
+        // Uma resposta que não se lê é erro, e não um "ainda nada".
+        let recusada = r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32029,"message":"RATE_LIMIT"}}"#;
+        let erro = linhas_desde(recusada, 0, "mouse").expect_err("a recusa nao se le");
+        assert!(erro.starts_with("mouse: o log.tail nao se le"), "{erro}");
+        assert!(diz_desde(recusada, 0, press, "mouse").is_err());
+        // As saídas de depois do pedido, com o número da linha. A de antes,
+        // a de outro subsistema e a que não traz um número não contam.
+        let cauda = log(
+            &[
+                (139, "usuario", "processo encerrou com codigo 45"),
+                (150, "usuario", "pagina: tudo conferiu"),
+                (151, "agent", "processo encerrou com codigo 41"),
+                (152, "usuario", "processo encerrou com codigo x"),
+                (153, "usuario", "processo encerrou com codigo 88"),
+            ],
+            154,
+        );
+        let novas = linhas_desde(&cauda, 150, "http").expect("a cauda se le");
+        assert_eq!(
+            novas.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            [150, 151, 152, 153]
+        );
+        assert_eq!(saidas_desde(&novas, 150).collect::<Vec<_>>(), [(153, 88)]);
+        assert_eq!(saida_desde(&novas, 150, 88), Some(153));
+        // A falha de um programa anterior — o 45, da faixa da página — não
+        // reprova esta: a varredura das falhas também é de depois do pedido.
+        let falha = |novas: &[RegistroDoLog]| {
+            saidas_desde(novas, 150)
+                .map(|(_, c)| c)
+                .find(|c| (40..=48).contains(c))
+        };
+        assert_eq!(falha(&novas), None);
+        let com_a_falha = log(&[(155, "usuario", "processo encerrou com codigo 45")], 156);
+        assert_eq!(
+            falha(&linhas_desde(&com_a_falha, 150, "http").expect("se le")),
+            Some(45)
+        );
+        // O que o programa disse: só as linhas dele, do subsistema
+        // `usuario`, uma vez cada.
+        let mut ditas = vec!["pagina: tudo conferiu".to_string()];
+        let disse = log(
+            &[
+                (150, "usuario", "pagina: tudo conferiu"),
+                (151, "usuario", "pagina: 404 e uma resposta"),
+                (152, "agent", "pagina: de outro subsistema"),
+                (153, "usuario", "a pagina: no meio da linha"),
+            ],
+            154,
+        );
+        juntar_ditas(
+            &mut ditas,
+            &linhas_desde(&disse, 150, "http").expect("se le"),
+            "pagina: ",
+        );
+        assert_eq!(
+            ditas,
+            ["pagina: tudo conferiu", "pagina: 404 e uma resposta"]
         );
     }
 }
