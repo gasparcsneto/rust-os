@@ -17854,6 +17854,19 @@ holdover da bancada de tempo, na parte 3/3: o x86 a -127 ppm (2057 s em
 esperou 35,5 minutos na fila e rodou 30,3; o maior, a bancada de tempo do
 x86, parte 3/3, com 47,2.
 
+A CI 541 (`99dd1a7`, o lote ICACHE-4 e os parágrafos das CIs 539 e 540)
+passou verde, 48 de 48, na primeira tentativa, em 77,2 minutos e 1152 de
+máquina. A suíte inteira passou com a conferência nova da política em vigor
+e do registro de pessoas, em todas as partes e em release — o ARM em
+release, 1067 de 1067: os 1062 da CI 538, mais o caso do lote EXECUTADO e
+os quatro do ICACHE-4 —, e o caso da remoção, com todos os núcleos
+mascarados na janela e um leitor em cada núcleo secundário, passou na parte
+em que cai, nas duas arquiteturas. O holdover da bancada de tempo, na parte
+3/3: o x86 a -153 ppm (2057 s em 2057) e o ARM a -7 ppm (2056 s em 2056),
+os dois dentro da guarda. O último job foi o dos fluxos entre dispositivos
+(x86_64 e aarch64), que esperou 41,0 minutos na fila e rodou 31,1; o maior,
+a atualização do ARM, com 51,2.
+
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na
 508 e 58 na 509 —, e o que sobra até o piso é a ordem da fila, que não se
