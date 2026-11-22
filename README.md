@@ -89,11 +89,15 @@ operá-la — o hardware de referência, a imagem, a rede, a recuperação —, 
 [`docs/OPERACAO.md`](docs/OPERACAO.md).
 
 O compilador é um só, o do `rust-toolchain.toml`. O `cargo xtask` recusa
-rodar com outro — e com um executor ou um apelido do cargo além do
-oficial, que decidiriam o que o `cargo xtask` roda —, a menos que a
-execução se declare não oficial (`DUKE_OUTRO_COMPILADOR=1`), e
-`cargo xtask compilador` mostra o estado. Na CI, a ação que confere o
-compilador recusa o executor, o ligador e o apelido antes de todo `cargo`.
+rodar com outro — e com um apelido do cargo além do oficial, ou com um
+executor que ainda o chame, que decidiriam o que o `cargo xtask` roda, e
+com um config do cargo fora da lista —, a menos que a execução se declare
+não oficial (`DUKE_OUTRO_COMPILADOR=1`), e `cargo xtask compilador` mostra
+o estado. Na CI, a ação que confere o compilador confere, antes de todo
+`cargo` que compila ou roda, o ambiente do job, o PATH, os
+`rust-toolchain`, os manifestos e o config do cargo, fixa o toolchain no
+canal e, no job de lints, roda as invariantes antes de todo outro
+`cargo`.
 Cada artefato que o `xtask` compila deixa o registro de proveniência em
 `target/proveniencia/`. À parte da CI, o canário
 (`.github/workflows/canario.yml`) confere o projeto com o nightly mais
@@ -425,7 +429,7 @@ kernel/src/
 │   │   ├── par/
 │   │   │   └── aviso.rs os casos do aviso com o fluxo entre dois Dukes: a suspensão e o esquecimento do dispositivo avisam o fim, e o fluxo saindo e chegando avisa pelo crédito e pelos dados do par
 │   │   └── troca.rs os casos da decisão de novo no ponto sem volta do `exec` — o F4 e os achados do adversário do lote A do #448: a troca de imagem parada no meio pela pausa da suíte, decidida e com a imagem preparada, e a chave revogada, a política nova, o processo isolado ou a confiança no editor da imagem nova — o `ola` selado no armazém — tirada de fora, que a recusam — nada trocado, `NEGADO`, a execução da decisão na auditoria e a imagem de antes rodando —, e o fim pedido sem o isolamento, que a recusa e morre na volta, sem o fim dos fluxos pela troca; com quem é ponta de fluxo e com quem não é, e a rodada da ponta repetida quando a volta pausada é adiada, até passar pela decisão de novo; sem mudança no meio, a troca de sempre; e a decisão de novo presa ao fio e ao `ALLOW` da decisão
-│   ├── nascimento.rs os casos do que muda no meio do nascimento de um processo, pelo gancho da suíte — o pai isolado, com a credencial suspensa, que sai, com o fim pedido sem o isolamento, com o journal recusado ou com a confiança no editor tirada no meio do `fork`, que não ganha filho; o processo isolado, encerrado — também sem o isolamento, o fim pedido com o teto cheio e o morto podado — no meio do `user.run` que ele pede pela interface nativa, e a pessoa que sai, a chave revogada e a política nova no meio do dela, que não lançam, e ouvem o código da recusa; e o processo encerrado enquanto nasce, que morre no primeiro ponto seguro, também quando a vaga volta sem ele nascer —; o `user.run` recusado nas perguntas do gate sobre quem pede, com o código e o motivo de cada recusa, sem a explicação do comando; o desconhecido — o pedido nativo sem o programa decidido, o lançamento fora de um comando — que recusa, e o kernel que lança por conta própria; a confiança no editor do código selado tirada no meio do nascimento — pelo `user.run` e pelo kernel fora de um comando —, que não lança; o lançamento dentro de um comando que não é o `user.run` — um `fs.verify`, pelo gancho da verificação —, recusado; e o `system.reboot` com a tabela de fios cheia, pelo fio `energia` do boot, e o despertar dele sem pedido, que não age; e os do lote A3 do #448: o lançamento de dentro do `user.run`, que só nasce com a autoridade e o caminho do comando — o do sistema, o de outro caminho, o de outra autoridade, o de outra pessoa e o exemplo embutido, pelo gancho de antes das perguntas do gate, e os dois de um caminho que não existe, recusados no começo do lançamento —, o nascimento que grava o editor pelo nome que a última palavra perguntou — pelo gancho do meio, que troca o nome da chave —, o `user.run` permitido que não lança e grava o desfecho — o caminho que não existe, e o fio que não nasce, com a tabela cheia —, e o kernel que não lança por conta própria depois do boot, com o trinco fechado; e os do lote A4: a recusa de quem pede com o desfecho do `user.run` — também a cota contada de novo no nascimento, pelo gancho de antes dele, e, fora de um comando, só a recusa do gate —, a imagem que não se carrega — o que não é ELF e o manifesto que não se lê —, que não lança e grava o desfecho, e a que não se mapeia, com o desfecho depois do `processo N lancado`, em nome de quem o gate decidiu, e nenhum desfecho guardado vivo depois; e os do lote A5: a imagem de entradas ou de notas demais, recusada pelo motivo novo — e a do teto, que lança —, e o segmento vazio no teto do espaço do usuário, recusado — e o mesmo dentro do espaço, que lança; e os do lote A6: o motivo de duas recusas da conferência da imagem — as notas acima do orçamento, recusadas antes de o achador ler o segmento, e o segmento que acaba no teto, que invade a pilha —, e a imagem cujos segmentos pedem, somados, mais páginas que o espaço do programa, recusada pela conta pura, sem carregar — e a do teto, que se confere; e o do lote A7: o desfecho de um lançamento com um código que permite, que não grava, nas duas compilações — e o NSF, que não acha o nascimento —; e o do lote A8: o mesmo desfecho dentro de um comando, pelo gancho de antes das perguntas do gate no `user.run`
+│   ├── nascimento.rs os casos do que muda no meio do nascimento de um processo, pelo gancho da suíte — o pai isolado, com a credencial suspensa, que sai, com o fim pedido sem o isolamento, com o journal recusado ou com a confiança no editor tirada no meio do `fork`, que não ganha filho; o processo isolado, encerrado — também sem o isolamento, o fim pedido com o teto cheio e o morto podado — no meio do `user.run` que ele pede pela interface nativa, e a pessoa que sai, a chave revogada e a política nova no meio do dela, que não lançam, e ouvem o código da recusa; e o processo encerrado enquanto nasce, que morre no primeiro ponto seguro, também quando a vaga volta sem ele nascer —; o `user.run` recusado nas perguntas do gate sobre quem pede, com o código e o motivo de cada recusa, sem a explicação do comando; o desconhecido — o pedido nativo sem o programa decidido, o lançamento fora de um comando — que recusa, e o kernel que lança por conta própria; a confiança no editor do código selado tirada no meio do nascimento — pelo `user.run` e pelo kernel fora de um comando —, que não lança; o lançamento dentro de um comando que não é o `user.run` — um `fs.verify`, pelo gancho da verificação —, recusado; e o `system.reboot` com a tabela de fios cheia, pelo fio `energia` do boot, e o despertar dele sem pedido, que não age; e os do lote A3 do #448: o lançamento de dentro do `user.run`, que só nasce com a autoridade e o caminho do comando — o do sistema, o de outro caminho, o de outra autoridade, o de outra pessoa e o exemplo embutido, pelo gancho de antes das perguntas do gate, e os dois de um caminho que não existe, recusados no começo do lançamento —, o nascimento que grava o editor pelo nome que a última palavra perguntou — pelo gancho do meio, que troca o nome da chave —, o `user.run` permitido que não lança e grava o desfecho — o caminho que não existe, e o fio que não nasce, com a tabela cheia —, e o kernel que não lança por conta própria depois do boot, com o trinco fechado; e os do lote A4: a recusa de quem pede com o desfecho do `user.run` — também a cota contada de novo no nascimento, pelo gancho de antes dele, e, fora de um comando, só a recusa do gate —, a imagem que não se carrega — o que não é ELF e o manifesto que não se lê —, que não lança e grava o desfecho, e a que não se mapeia, com o desfecho depois do `processo N lancado`, em nome de quem o gate decidiu, e nenhum desfecho guardado vivo depois; e os do lote A5: a imagem de entradas ou de notas demais, recusada pelo motivo novo — e a do teto, que lança —, e o segmento vazio no teto do espaço do usuário, recusado — e o mesmo dentro do espaço, que lança; e os do lote A6: o motivo de duas recusas da conferência da imagem — as notas acima do orçamento, recusadas antes de o achador ler o segmento, e o segmento que acaba no teto, que invade a pilha —, e a imagem cujos segmentos pedem, somados, mais páginas que o espaço do programa, recusada pela conta pura, sem carregar — e a do teto, que se confere; e o do lote A7: o desfecho de um lançamento com um código que permite, que não grava, nas duas compilações — e o NSF, que não acha o nascimento —; e o do lote A8: o mesmo desfecho dentro de um comando, pelo gancho de antes das perguntas do gate no `user.run`, com o controle, desde o lote A9, de que o gancho rodou dentro do comando — e, desde o lote A10, no `user.run` do caso, pela decisão que o controle cita
 │   ├── orcamento.rs os casos do orçamento da vez da tarefa `programas`: a fila em ordem, cada pedido uma vez através das vezes, o fio que morre com o pedido na fila entre duas, e os suspensos de dois processos vivos executados na vez com a fila cheia; o laço da tarefa num executor de teste, ao lado de uma vizinha — a fila sempre cheia, o pedido que chega logo depois da vez, o suspenso pronto, e a fila vazia, em que a tarefa estaciona —; o tempo da vez; e o `incansavel` de verdade — um titular no laço, dois ao mesmo tempo, a taxa apertada —, cada resposta conferida pelo `id` e a conta dos filhos contra a do kernel
 │   ├── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
 │   ├── recolhimento.rs os casos da ordem do recolhimento — o achado A1-1: a busca do próximo morto começa no cursor e dá a volta pela tabela, e o laço de um titular que faz nascer e morrer processos sem parar não segura os mortos de outro —, com o coletor segurado: um recolhimento por vez — os mortos de outro titular acima do laço, a tabela cheia que dá a volta, o encerramento no meio do laço — e a passada de produção inteira, que recolhe a partir do cursor; e, tudo solto, dois coletores e o laço de um titular, com os processos de outro, que ocupam a cota dele, encerrados no meio
@@ -861,7 +865,7 @@ xtask/src/
 ├── bancada_sdk.rs   a bancada do SDK: duas máquinas, o modelo de fora do repositório instalado pelo gate no armazém das duas e falando entre elas, o eco-malha com clientes daqui e de lá e o teto da relação, os dois sentidos, a conversa pelo teclado, as medidas do aviso e da vazão, e a revogação no meio — nos quatro pares
 ├── canal_tcp.rs     o canal do agente por TCP do lado de fora: a porta encaminhada, e a ponte da suíte — `xtask/bancada/ponte.py`
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
-├── compilador.rs    o compilador oficial: o canal com data dos dois `rust-toolchain.toml`, a conferência do começo de todo comando — o arquivo do commit, o toolchain em cada diretório de build, o cargo e o rustc do próprio `xtask` (gravado pelo `xtask/build.rs`), o config do cargo lido pelo cargo, com o executor e o apelido do `cargo xtask`; outro compilador só com `DUKE_OUTRO_COMPILADOR=1`, numa execução não oficial —, o `cargo xtask compilador` e a parte do `invariantes` que confere o canal, o config do cargo, o `xtask`, os workflows, a ação do compilador — com o passo do executor, fora do cargo — e o canário
+├── compilador.rs    o compilador oficial: o canal com data dos dois `rust-toolchain.toml`, a conferência do começo de todo comando — o arquivo do commit, o toolchain em cada diretório de build, o cargo e o rustc do próprio `xtask` (gravado pelo `xtask/build.rs`), o config do cargo lido pelo cargo, com o executor e o apelido do `cargo xtask` e, desde o lote A10, numa lista em cada diretório de build, e os dois `rust-toolchain.toml` só com as chaves do oficial; outro compilador só com `DUKE_OUTRO_COMPILADOR=1`, numa execução não oficial —, o `cargo xtask compilador` e a parte do `invariantes` que confere o canal, o config do cargo, o `xtask`, os workflows, a ação do compilador — com os passos de fora do cargo, o ambiente, o canal fixado e o executor, e o das invariantes, que o job de lints liga — e o canário
 ├── copia.rs         a bancada da cópia de segurança: a cópia e a restauração por um agente, como no `operar` — o corte, a autoridade que não volta, a reinstalação, a queda em cada fronteira, a produção e a outra máquina
 ├── digitacao.rs     a pessoa no teclado da máquina, pelo monitor do emulador, nas bancadas que digitam: a linha conferida antes do Enter — na tela, pela árvore semântica; a senha, pela conta das teclas do kernel; o Enter, contado — e o ritmo que se adapta à perda de teclas, um fator de respiro por máquina que dobra a cada perda, até 8×, e vale até o fim da rodada, também depois dos cortes de energia; cada texto, menos o apagar e o Enter, começa com o shift sozinho, apertado e solto, contra o shift preso de um soltar perdido
 ├── disco_hostil.rs  o disco hostil da bancada: um servidor NBD com cache volátil que o corte perde, inteiro ou em parte, sem devolver o disco à máquina cortada, erros de mídia por faixa e respostas retidas; o fim espera a conexão em curso
@@ -7686,9 +7690,9 @@ registro de cada uma no ponto em que nasceu.
   kernel só liga os recursos instáveis da lista do `xtask` —
   `abi_x86_interrupt` e `cfg_overflow_checks` (`RECURSOS_DO_KERNEL`) —,
   sem `${…}` nem item `macro` no código dele, e sem `crate-attr` no
-  config do cargo, no `xtask` e na CI — pelo texto, que o escape do TOML e
-  o config sem a extensão contornavam, até o lote A8, que o confere pela
-  lista dos rustflags que o cargo lê (a (e) dele) —: a macro 2.0
+  config do cargo, no `xtask` e na CI — só pelo texto, que o escape do
+  TOML e o config sem a extensão contornavam, até o lote A8, e, desde ele,
+  também pela lista dos rustflags que o cargo lê (a (e) dele) —: a macro 2.0
   (`decl_macro`) levava o `DesfechoDoLancamento` para fora do dono sem a
   palavra, e o
   `${concat(…)}` (`macro_metavar_expr_concat`) montava num irmão o
@@ -7844,8 +7848,9 @@ registro de cada uma no ponto em que nasceu.
   (e) o config do cargo como o cargo o lê de dentro de `kernel/`
   (`-Zunstable-options config get`, a consulta do `compilador.rs`): os
   rustflags de cada alvo exatamente os da lista (`RUSTFLAGS_DO_KERNEL`), sem
-  ligador, `build.rustflags`, `[unstable]`, `[env]` nem rustflags de
-  perfil, e sem o config sem a extensão; o `Cargo.toml` do kernel sem
+  ligador nas tabelas dos dois alvos — o de um `cfg(…)` e o do hospedeiro,
+  só desde o lote A9 (a (g) dele) —, `build.rustflags`, `[unstable]`,
+  `[env]` nem rustflags de perfil, e sem o config sem a extensão; o `Cargo.toml` do kernel sem
   `cargo-features`, `rustflags` nem barra invertida; e nenhum `RUSTFLAGS`
   nem `CARGO_UNSTABLE_` na CI: o escape do TOML (o K1) e o config sem a
   extensão, que o cargo prefere (o K2), passavam o `-Z` do atributo de
@@ -7874,10 +7879,11 @@ registro de cada uma no ponto em que nasceu.
   203 a 220 ms com um, e 1,6 s em depuração com quatro e de 2,9 a 3,0 s com
   um; no aarch64, depois de "A entrada nova não pede `tlbi`", de 0,51 a
   0,78 s em release com quatro núcleos e de 1,2 a 1,4 s em depuração. Com
-  um núcleo, a medida é a do lote A7, de antes dele: de 0,21 a 0,23 s em
-  release e de 0,90 a 0,91 s em depuração. Com um núcleo, um `tlbi` custa
-  meio microssegundo, e o trabalho arm-tlbi registrou a carga igual (na
-  mensagem do `a8d2e25`). Ela toma a trava da
+  um núcleo, a medida é a de antes dele, em release: 0,21 s no "O que fica"
+  do lote A7, e de 0,21 a 0,22 em "A entrada nova não pede `tlbi`"; da
+  depuração com um núcleo, a árvore não tem medida. Com um núcleo, um
+  `tlbi` custa meio microssegundo, e o trabalho arm-tlbi registrou a carga
+  igual em release (na mensagem do `a8d2e25`). Ela toma a trava da
   paginação página a página, e não a segura inteira como a desmontagem: os
   outros núcleos andam o relógio. Com um núcleo só, a janela inteira se
   perde menos um tique — pela conta da desmontagem, que a medida conferiu,
@@ -7916,8 +7922,9 @@ registro de cada uma no ponto em que nasceu.
   alvo do hospedeiro: um `[target.'cfg(unix)'] runner` no config da raiz,
   com um script que respondia `invariantes` com sucesso e rodava o `xtask`
   de verdade para o resto, fazia o passo das invariantes da CI passar sem
-  guarda nenhuma, e o `cargo test -p xtask` também (o A8, o alto); o
-  apelido é o mesmo ponto (o I3). Uma guarda de dentro do `xtask` não vê o
+  guarda nenhuma; e o mesmo executor recebe os binários do `cargo test -p
+  xtask`, que um script que os reconhecesse faria passar também (o A8, o
+  alto); o apelido é o mesmo ponto (o I3). Uma guarda de dentro do `xtask` não vê o
   executor que nunca o chama, e a ação do compilador ganhou o passo do
   executor, em Python, antes de todo `cargo` da CI: pela consulta do
   próprio cargo (`config get`), que lê todo arquivo de config e não roda
@@ -7943,9 +7950,10 @@ registro de cada uma no ponto em que nasceu.
   `crate::log_warn!` de verdade de `lancar_por` —, e o corpo deles é o da
   lista do `xtask`, token a token (`registros_do_log_fora`): um braço novo
   do `log_warn` escrevia o mesmo `impl` com o caminho da lista (o A2). O
-  texto exato, e não as regras nem um resumo: o corpo é curto, não mudou
-  desde que foi escrito, e a diferença de uma lista de texto se lê na
-  revisão, a de um resumo não. O `::` do começo só olha os pacotes, mas os
+  texto exato, e não as regras nem um resumo: o corpo é curto e quase não
+  muda — antes deste lote, mudou uma vez, no `9a74882`, três dias depois de
+  escrito —, e a diferença de uma lista de texto se lê na revisão, a de um
+  resumo não. O `::` do começo só olha os pacotes, mas os
   da raiz do crate: com o `rustc` do canal, um `extern crate x as core;` no
   `main.rs` põe outro pacote no lugar do `core`, e o `::core::format_args!`
   passa a ser o que ele exporta, sem aviso. O `as core` se recusa como o
@@ -7967,7 +7975,9 @@ registro de cada uma no ponto em que nasceu.
   crate, como `#[cfg(feature = "modo-teste")] mod testes;`, e nenhum
   `mod $nome` montado por uma macro — um `mod testes { mod atalho; }` com o
   `cfg` ao contrário levava à produção um arquivo do caminho da suíte, que
-  as guardas dos nomes deixam de fora (o A5);
+  as guardas dos nomes deixam de fora (o A5). As formas de (b) a (f) são da
+  leitura do adversário: o lote rodou cada uma contra o `cargo xtask
+  invariantes`, que a recusa, e não compilou o kernel com elas;
   (g) o config do cargo do kernel — e o da raiz, que ele lê —: a tabela
   `target` só com as dos dois alvos do kernel — o ligador do hospedeiro e o
   de um `cfg(…)`, que o cargo do canal lê, rodavam na compilação do kernel
@@ -7976,9 +7986,9 @@ registro de cada uma no ponto em que nasceu.
   —, `[patch]`, `[host]` nem `[profile]`: os perfis oficiais são os dos
   `Cargo.toml` (o A6 e os itens 2 e 3 do revisor);
   (h) a marca de direção, U+200E e U+200F, é espaço para o `rustc`, e
-  passou a ser para as guardas, que a liam como letra e não viam a forma de
-  um lado e do outro dela (o B1). Os outros controles bidirecionais o
-  `rustc` recusa no código;
+  passou a ser para as guardas, que a liam como um caractere do código, e
+  não como espaço, e não viam a forma de um lado e do outro dela (o B1).
+  Os outros controles bidirecionais o `rustc` recusa no código;
   (i) a CI só põe as variáveis do cargo da lista do `xtask` — a cor, a
   compilação incremental, o diretório de saída —: o ligador, o executor, os
   perfis e o `CARGO_BUILD_*` de um job que não é o dos lints passavam (o
@@ -7993,8 +8003,9 @@ registro de cada uma no ponto em que nasceu.
   dentro de um comando, um `ERROR`, que tem de sair como a execução do
   `user.run` do caso — um lançamento de fora de um comando que tomasse o
   gancho daria zero nos dois caminhos, também com a DG4 (o I2);
-  (l) o texto, pelos itens 4 a 14 do revisor; o 15, as mensagens de dois
-  commits do lote A8, vai na mensagem do commit deste.
+  (l) o texto, pelos itens 4 a 14 do revisor; o 15, e a parte do 11 que é
+  mensagem — as de três commits do lote A8 —, vai na mensagem do commit
+  deste.
   O que fica: o que o inventário diz em cada linha; o código do
   repositório que roda no job dos lints antes do passo das invariantes — os
   testes do hospedeiro, os `build.rs` —, que pode mudar a árvore que ele
@@ -8021,6 +8032,167 @@ registro de cada uma no ponto em que nasceu.
   `as_macros_das_funcoes_da_carga_so_as_da_lista`, com o `as core`; e as
   mutações (ver *As do lote A9*, em [As mutações do ponto sem volta e de
   quem pede](#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
+  No lote A10, [B], os achados do adversário do lote A9 — os dois altos, os
+  dois médios, as cinco baixas e as seis informativas —, os do revisor
+  dele e um deste lote (a (k)), sem autoridade, regra, registro ou
+  semântica de auditoria novos. A
+  guarda "fora do cargo" do lote A9 — o passo do executor da ação do
+  compilador — confiava no `cargo` que resolvia, e lia o ambiente do job
+  por três nomes: o toolchain de um diretório e o ambiente do job escolhiam
+  o programa que a própria ação rodava. A raiz da confiança é a definição
+  da CI — os workflows e as ações —, e quem a protege é a revisão (o IN2);
+  abaixo dela, a ação garante que o primeiro `cargo` que roda o código do
+  repositório nas invariantes é o do toolchain oficial, no ambiente
+  conferido, sem nada do repositório antes (ver [As guardas de
+  texto](#as-guardas-de-texto-o-que-elas-cobrem)):
+  (a) o toolchain (o F2, alto): um `kernel/rust-toolchain.toml` com `path`
+  absoluto fazia a ação rodar um "cargo" do repositório, que respondia à
+  consulta e plantava um executor no config do `CARGO_HOME` — a ação
+  passava, e o `cargo xtask invariantes` dava rc=0 com uma violação na
+  árvore; o do modelo do SDK com `path` e o PATH do job, o mesmo. A ação
+  ganhou o passo do ambiente, em Python — o do sistema, `/usr/bin/python3`,
+  e não o do PATH, que ele confere —, antes de qualquer programa do
+  toolchain: nenhum `rust-toolchain` nem `rust-toolchain.toml` na árvore
+  fora dos dois oficiais, e os dois só com as chaves do `[toolchain]` que o
+  oficial usa, o mesmo canal; o `CARGO_HOME` e o `RUSTUP_HOME` fora do
+  repositório; o PATH sem entrada relativa nem pasta do repositório, e o
+  `cargo`, o `rustc`, o `rustdoc` e o `rustfmt` dele os proxies do rustup,
+  ou os binários do toolchain oficial; e nenhum arquivo do commit num
+  diretório de saída do cargo, que ele tomaria pelo que compilou. Depois da
+  instalação pelo arquivo da raiz, todo `cargo` da ação roda no toolchain
+  fixado pelo canal (`RUSTUP_TOOLCHAIN`), e não no que o diretório escolhe;
+  e o `xtask` confere os dois arquivos com as mesmas chaves, no começo de
+  todo comando e no `invariantes` (`desvios_dos_toolchains`);
+  (b) o ambiente (o F1, alto, e o IN4 e o IN6): o `RUSTFLAGS` do job com o
+  `-C linker=` trocava o binário do próprio `xtask` das invariantes, e o
+  `RUSTDOC` e o `RUSTFMT` rodavam um programa do repositório antes delas. O
+  passo do ambiente confere o ambiente do job por uma lista fechada: dos
+  nomes que o cargo, o rustc, o rustdoc, o rustfmt e o rustup leem — os que
+  começam por `CARGO`, `RUST` ou `__CARGO` —, só os que a CI põe — a cor e
+  o `RUST_BACKTRACE` — e os da imagem do runner — o `CARGO_HOME` e o
+  `RUSTUP_HOME` —; o resto é erro, com o nome. A regra dos workflows do
+  `xtask` ganhou o `RUSTDOC`, o `RUSTFMT` e o `PATH` (`SOBREPOSICOES`), o
+  `__CARGO*` e o `RUSTDOCFLAGS` fora do passo da documentação
+  (`variaveis_do_cargo_na_ci`); e o `RUSTDOC`, o `CARGO_BUILD_RUSTDOC` e o
+  `build.rustdoc` viraram desvios do compilador: o `rustdoc` compila e roda
+  os doctests;
+  (c) nada do repositório entre a ação e as invariantes (o IN3): no job de
+  lints, a formatação, os testes do hospedeiro, com os doctests, e o clippy
+  rodavam código do repositório — os `build.rs` e as macros procedurais
+  dos grafos, os testes — antes das invariantes, e esse código podia mudar
+  a árvore que elas leem, ou plantar um executor. Elas passaram a ser o
+  último passo da própria ação, que só o job de lints liga, pela entrada
+  `invariantes: true` (`as_invariantes_na_acao`): nada roda entre a
+  conferência e elas, nem o cache, e o ambiente delas é o que a ação
+  conferiu. O custo é o do `xtask` compilado sem o cache, nesse passo:
+  medido na máquina dos agentes, com quatro núcleos e o registro dos
+  crates já baixado, 27,5 s para compilá-lo do zero, num diretório de
+  saída vazio, e 18 s para as invariantes — o passo separado de antes, que
+  vinha depois do cache, levou de 29 a 37 s na CI 530 —; no runner,
+  soma-se a descida dos crates do grafo do `xtask`, que o cache ainda não
+  trouxe, e a CI do commit dá o número. O canário, que não roda a ação,
+  roda as invariantes primeiro também, e a regra que confere que ele
+  repete os comandos do job de lints
+  lê o passo da ação. E o `cargo metadata` do kernel volta com a rede em
+  qualquer falha sem ela, porque o índice pode não estar no cache (o I1 do
+  adversário do lote A8, que ficava para quem mexesse no passo);
+  (d) o config dos outros diretórios (o F3, médio, e o J): fora da raiz, a
+  ação só lia o apelido, o executor, a chave `linker` e a `[build]` que
+  troca o compilador, e o `[env] PATH`, o `[host] linker` e o `-C linker=`
+  nos rustflags dos programas passavam — o clippy deles ligava com eles,
+  antes das invariantes. O config de cada diretório de build ficou fechado
+  a uma lista — o que os configs do repositório usam: o apelido, o
+  `build.target`, um dos alvos do projeto, e os `rustflags` de cada tabela
+  `target`, nas formas de hoje (o `--cfg`, e o `-C` com o script do
+  ligador, o `--no-pie`, o tamanho da página, o modelo de relocação e o
+  alinhamento dos laços) —, na ação e em `desvios_da_configuracao`, com a
+  mesma regra. Pela lista das formas, e não pelo `-C linker` que se
+  procuraria: o `-C link-arg=-fuse-ld=` e o `-C link-arg=-B` escolhem o
+  ligador também. O config do kernel continua com a lista exata do
+  `invariantes`, que ganhou o `paths`, a terceira forma de trocar um pacote
+  do grafo com o `Cargo.lock` igual (o J);
+  (e) nenhum `mod` nos tokens de uma macro — no corpo de um `macro_rules!`
+  e nos argumentos de uma invocação —: o `#` de um atributo de verdade nos
+  argumentos, capturado por um `tt`, montava o `#[path]` sem `#` nenhum no
+  corpo, e trazia o `neto.inc` (o I, médio). Pela fonte, e não pela forma:
+  um `#[path]` montado por uma macro só alcança um arquivo por um `mod` que
+  passa por ela, e o kernel não tem nenhum;
+  (f) a biblioteca de cada dependência direta do kernel com o nome do
+  pacote, e nenhuma com o de um pacote do sysroot: o `[lib] name = "core"`
+  de uma direta a punha no lugar do `core`, sem renomear nada no
+  `kernel/Cargo.toml` (o G);
+  (g) a linha de comando do `xtask`: nenhum `set_var` nem `remove_var` do
+  ambiente do próprio processo, que todo filho herda; o `--config` e o `-Z`
+  em qualquer lugar de um literal, com os escapes resolvidos; e nenhuma
+  linha de comando com o cargo num literal — um `sh -c` (o H);
+  (h) a conferência da ação lê cada diretório de build como um item da
+  tupla `DIRETORIOS`, e a raiz se rotula `./` — o `""` da raiz aparecia
+  noutra linha do script, e tirá-la da tupla não se acusava (o E5 do
+  revisor) —, e o teste que roda a ação monta um executor em cada
+  diretório: a mutação que lia só a raiz e o kernel passava (a M1);
+  (i) o caso do desfecho dentro de um comando confere que o controle do
+  gancho é o do `user.run` do caso: a decisão que ele cita é a que a
+  execução do caso cita, e o registro dela é o `ALLOW` do `user.run` do
+  caminho do caso, tomado depois que o caso começou — um gancho tomado por
+  outro `user.run` passava (o IN1);
+  (j) o texto: o modelo de ameaça e o inventário das guardas de texto dizem
+  a raiz da confiança, o que a ação garante e a partir de que ponto, e o
+  que fica (o T e o IN2); as correções do revisor do lote A9 — os erros de
+  fato E1 a E4 e as precisões P1 a P17 —; e as notas de correção das
+  mensagens do `d4a3f43`, do `a23f1b1` e do `6c0eeab`, na mensagem do
+  commit deste;
+  (k) o achado deste lote: um `Cargo.toml` com `cargo-features =
+  ["profile-rustflags"]` liga os `rustflags` de um perfil, e com
+  `[profile.dev] rustflags = ["-C", "linker=…"]` no manifesto da raiz o
+  cargo do canal liga tudo o que o perfil compila — o `xtask` das
+  invariantes inclusive — com o programa do repositório: num experimento
+  fora da árvore, com o mesmo cargo, o ligador do perfil montou o binário.
+  É o F1 por outra fonte, e a regra só vale fora do `xtask`: dentro dele
+  chegaria tarde, com o binário já montado. O passo do ambiente da ação
+  recusa o `cargo-features` em todo manifesto da árvore, e os `rustflags`
+  e o `codegen-backend` em todo perfil — lidos como o cargo os lê, o TOML
+  com os escapes das chaves resolvidos —; nenhum manifesto do repositório
+  tem um hoje.
+  O que fica: a definição da CI, com a revisão — um passo novo, um passo
+  entre o checkout e a ação, o `env:` de um passo, o script da ação; as
+  variáveis genéricas do processo, como o `LD_PRELOAD` e o `CC` dos
+  `build.rs`, que mudam qualquer programa, o `python3` da ação também, e
+  que só a definição da CI põe; o código do `xtask` e dos pacotes de que
+  ele depende, que é o próprio conferente; o cache da CI, que vem depois
+  das invariantes e não lhes traz artefato; os passos do job de lints
+  depois delas, que rodam o código do repositório — os testes, os
+  `build.rs` — e podem mudar o que os seguintes fazem, com as invariantes
+  já rodadas; um `[build] jobs` ou um `[net]` pessoal no `CARGO_HOME` de
+  quem compila, que vira desvio — quem o tem o tira, ou declara a
+  execução não oficial —; e o canário, que não roda a ação (o IN5). Os
+  casos do lote A10: `contencao: o desfecho que permite nao grava dentro
+  de um comando`, reforçado; no `xtask`, os seis do
+  adversário — `adversario_a9_i_…`, `adversario_a9_g_…`,
+  `adversario_a9_h_…`, `adversario_a9_j_…`, `adversario_a9_f1_f3_…` e
+  `adversario_a9_m1_…`, estes dois adaptados ao arnês que roda a ação com o
+  proxy do rustup no PATH —, dez novos — `adversario_a9_f2_…`, o caso que
+  o adversário propôs para o F2, com um `cargo` falso que grava um rastro,
+  `o_config_de_um_diretorio_de_build_fechado_a_lista`,
+  `os_rust_toolchain_so_com_as_chaves_do_oficial`,
+  `os_alvos_do_projeto_sao_os_do_toolchain`,
+  `o_job_de_lints_liga_as_invariantes_na_acao`,
+  `o_cargo_de_dois_sublinhados_e_o_rustdocflags_na_ci`,
+  `o_literal_com_os_escapes_resolvidos`,
+  `nenhum_mod_nos_tokens_de_uma_macro`,
+  `a_linha_de_comando_do_xtask_pela_fonte` e
+  `os_manifestos_que_escolhem_o_ligador`, o do achado deste lote —, dois
+  reescritos — `a_acao_tem_os_passos_de_fora_do_cargo`, que era
+  `a_acao_tem_o_passo_do_executor`, e `a_acao_roda_como_no_runner`, que era
+  `a_acao_recusa_o_executor_o_ligador_e_o_apelido` e roda os passos com o
+  proxy do rustup no PATH, como no runner — e os reforçados —
+  `as_variaveis_que_trocam_o_compilador_sao_desvios`, com o `RUSTDOC`,
+  `o_executor_e_o_apelido_sao_desvios`, com o ligador,
+  `o_canario_do_repositorio_repete_os_comandos_dos_lints`, com as
+  invariantes da ação, `a_raiz_e_as_features_do_kernel_pelo_grafo`, com o
+  nome do sysroot, e `o_manifesto_do_kernel_e_os_rustflags_da_ci`, com o
+  `RUSTDOCFLAGS` —; e as mutações (ver *As do lote A10*, em [As mutações
+  do ponto sem volta e de quem
+  pede](#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
 - **A margem de memória da compressão concorrente** (de fora da 14.1 e da
   correção da vaga do morto; investigada em 8 de novembro de 2026, sem mudar
   o comportamento): no x86_64 em debug, o caso `compressao: varias ao mesmo
@@ -9886,7 +10058,31 @@ o texto, e não o que o compilador faz dele. O modelo de ameaça delas é este:
   padrão, o ambiente da CI e a linha de comando do `xtask` —, e formas que
   passavam pela guarda de uma fonte listada — a macro de nome cru, o que as
   macros da lista expandem, o `#$a` e a marca de direção —; o lote A9 as
-  fechou, cada uma pela fonte, e o inventário abaixo é o de depois dele.
+  fechou, cada uma pela fonte. O adversário do lote A9 achou que a guarda
+  "fora do cargo" do lote — a ação do compilador — confiava no `cargo` que
+  resolvia e lia o ambiente do job por três nomes, e mais formas que
+  passavam por guardas listadas; o lote A10 as fechou, e o inventário
+  abaixo é o de depois dele.
+
+**Onde a confiança começa.** A definição da CI — os workflows e as ações
+de `.github/` — é a raiz da confiança, e quem a protege é a revisão: um
+passo novo, um passo entre o checkout e a ação do compilador, o `env:` ou o
+`run:` de um passo, o script da ação mudam o que a CI faz, e nada abaixo
+deles os confere; as regras dos workflows do `cargo xtask invariantes`
+acusam o desvio de quem os escreve, de dentro do `xtask`, que só vale se o
+`xtask` for o de verdade. Abaixo dela, desde o lote A10, a ação do
+compilador garante que o primeiro `cargo` que roda o código do repositório
+— o `cargo xtask invariantes`, no job de lints — é o do toolchain oficial,
+no ambiente conferido, sem nada do repositório antes: antes de qualquer
+programa do toolchain, com o `python3` do sistema, ela confere o ambiente
+do job por uma lista fechada, as casas do cargo e do rustup e o PATH fora
+do repositório, o `cargo` e o `rustc` do PATH, os `rust-toolchain` e os
+manifestos da árvore e os artefatos do commit; instala o canal pelo
+arquivo da raiz e, daí em diante, roda todo `cargo` no toolchain fixado;
+confere o config do cargo de cada diretório de build pela consulta do
+próprio cargo; e roda as invariantes, no job de lints, antes do cache e
+de todo outro `cargo`. A partir daí, o `xtask` que confere é o compilado
+da árvore do commit, e as regras dele valem para o resto da CI.
 
 Elas não são autoridade nem segurança do Duke em execução — quem decide é
 o gate, pela política —: só impedem que o código do kernel o contorne sem
@@ -9895,23 +10091,24 @@ ninguém ver.
 | A fonte | A guarda | O que fica, e por quê |
 |---|---|---|
 | os `.rs` que os `mod` alcançam | todo `.rs` de `kernel/src` é lido — fora da suíte, pelas guardas dos nomes, das chamadas, dos carregadores, do `#[path]` e do `include`; em todo arquivo, a suíte inclusive, pelas dos recursos de macro e do nome das macros da carga —, e a árvore do README confere cada um; sem `#[path]`, um `mod` só alcança um `.rs` de `kernel/src` | — |
-| a suíte, `kernel/src/testes*` | fora das guardas dos nomes, das chamadas e dos carregadores, pelo caminho: só a compilação de teste a tem; e, desde o lote A9, só a raiz do crate declara o módulo dela, como `#[cfg(feature = "modo-teste")] mod testes;`, e nenhum `mod $nome` montado por uma macro, em arquivo nenhum do kernel (`modulo_da_suite_fora`) | — |
+| a suíte, `kernel/src/testes*` | fora das guardas dos nomes, das chamadas e dos carregadores, pelo caminho: só a compilação de teste a tem; e, desde o lote A9, só a raiz do crate declara o módulo dela, como `#[cfg(feature = "modo-teste")] mod testes;`, e nenhum `mod $nome` montado por uma macro, em arquivo nenhum do kernel fora da suíte (`modulo_da_suite_fora`) | — |
 | a raiz do crate | desde o lote A9, pelo grafo do cargo: o binário do kernel em `kernel/src/main.rs`, e a biblioteca de cada pacote do repositório de que ele depende no `src/` dele (`dependencias_fora`) — um `[[bin]] path` ou um `[lib] path` levariam a raiz a um arquivo que nenhuma guarda lê | — |
 | o texto que as guardas leem | o código como o `rustc` o lê, sem os comentários nem os textos (`so_o_codigo`); desde o lote A9, a marca de direção, U+200E e U+200F, como espaço, e a macro de nome cru de uma palavra-chave (`r#if!`) como invocação (`invocacoes_de_macro`) | os outros controles bidirecionais, que o `rustc` recusa no código e cujas lints barram nos comentários e nos textos |
-| o `#[path]`, também montado por macro ou num `cfg_attr` | a palavra `path` em qualquer atributo; o `#[$…]`; desde o lote A8, o `$` em qualquer atributo que não seja o `doc`; e, desde o lote A9, o `#` que não abre um atributo — o `#$a`, o `#` sozinho nos argumentos de uma macro (`onde_traz_outro_arquivo`) | o atributo montado por uma macro de um pacote do crates.io, que o kernel invocaria só com os pedaços — nenhuma dependência tem uma |
+| o `#[path]`, também montado por macro ou num `cfg_attr` | a palavra `path` em qualquer atributo; o `#[$…]`; desde o lote A8, o `$` em qualquer atributo que não seja o `doc`; e, desde o lote A9, o `#` que não abre um atributo — o `#$a`, o `#` sozinho nos argumentos de uma macro (`onde_traz_outro_arquivo`); e, desde o lote A10, pela fonte, nenhum `mod` nos tokens de uma macro — no corpo de um `macro_rules!` e nos argumentos de uma invocação —: o `#[path]` montado por uma macro só alcança um arquivo por um `mod` que passa por ela, e o `#` de um atributo de verdade capturado por um `tt` o montava sem `#` nenhum no corpo | o atributo montado por uma macro de um pacote do crates.io, que o kernel invocaria só com os pedaços — nenhuma dependência tem uma |
 | o `include!` e afins | a palavra `include`, em qualquer forma; desde o lote A8, também nos pacotes do repositório de que o kernel depende | o `include_str!`, o `include_bytes!` e o `.incbin` do montador trazem texto e bytes, e não código |
 | as macros de outros pacotes: o `#[macro_export]` | o nome protegido e o carregador nos tokens de qualquer macro (`carregadores_nas_macros_de_fora`, desde o lote A8); nas funções da carga, só as macros da lista (`MACROS_DA_CARGA`), e o nome delas não se redefine nem se traz de fora — nem `macro_rules!`, `as`, `mod alloc`, `use` de um `alloc` ou de um `assert` de outro pacote, `use` montado nem `#[macro_use]`, e, desde o lote A9, nem o do `format_args`, nem o `as core`, que daria a outro pacote o nome do `core` dos registros do log (`macros_da_carga_redefinidas`); e, desde o lote A8, nenhum `#[macro_export]`, recurso instável ou `include` nos pacotes do repositório de que o kernel depende (`pacotes_do_repositorio_fora`) | as dos pacotes do crates.io — as do `tock-registers`, por exemplo —, travadas pelo `Cargo.lock`, com o resumo de cada pacote, e revistas a cada atualização; e um glob (`use dep::*;`) de uma que exporte um `assert` ou um módulo `alloc` — nenhuma dependência direta exporta; no grafo, o `defmt` exporta um `assert!`, e o `heapless`, um `format!` na raiz, que não troca o `alloc::format!`, e o kernel não nomeia nenhum dos dois |
-| o que as macros da lista expandem | desde o lote A9, o corpo das que o kernel define — os três registros do log — é o da lista, token a token (`CORPO_DE_UM_REGISTRO`, `registros_do_log_fora`), com o `::core::format_args!`, que nenhum item do módulo sombreia, e o `core` e o `alloc` são os pacotes de verdade — nenhum `as core` nem `as alloc` (`PACOTES_DAS_MACROS_DA_CARGA`), nenhuma dependência do kernel renomeada (`dependencias_fora`); o `alloc::format!` expande pelo `$crate` do `alloc`, e o `assert!` é do compilador | — |
+| o que as macros da lista expandem | desde o lote A9, o corpo das que o kernel define — os três registros do log — é o da lista, token a token (`CORPO_DE_UM_REGISTRO`, `registros_do_log_fora`), com o `::core::format_args!`, que nenhum item do módulo sombreia, e o `core` e o `alloc` são os pacotes de verdade — nenhum `as core` nem `as alloc` (`PACOTES_DAS_MACROS_DA_CARGA`), nenhuma dependência do kernel renomeada e, desde o lote A10, nenhuma cuja biblioteca tenha outro nome que o do pacote, ou o de um pacote do sysroot — o `[lib] name = "core"` (`dependencias_fora`); o `alloc::format!` expande pelo `$crate` do `alloc`, e o `assert!` é do compilador | — |
 | as macros procedurais | desde o lote A8, as dependências diretas do kernel numa lista fechada, de onde cada uma vem, e nenhuma de macros procedurais; e os pacotes de macros procedurais do grafo numa lista fechada, com quem usa cada um — pelo grafo que o `cargo metadata` resolve (`dependencias_fora`); e, desde o lote A9, nenhuma direta renomeada | os da lista, que o kernel não alcança pelo nome: o `const_fn` e o `rustversion`, que o `x86_64` usa por dentro; o resto não compila para o kernel — o `defmt` e o `thiserror`, que reexportam os deles, também não |
 | o `build.rs` | desde o lote A8, o pacote do kernel só com o binário, e os pacotes do repositório sem `build.rs`, pelo grafo | os `build.rs` dos pacotes do crates.io, que valem para o pacote deles — menos uma biblioteca nativa ou um caminho do ligador, que chegariam ao do kernel: só o do `defmt` pede um, e ele não compila para o kernel —, travados pelo `Cargo.lock` |
-| o config do cargo, efetivo | desde o lote A8, o valor que o cargo lê de dentro de `kernel/` (`config get`) — o config do kernel, o da raiz e o do `CARGO_HOME` —, em todo arquivo e forma: os rustflags de cada alvo, exatamente os da lista (`RUSTFLAGS_DO_KERNEL`); nenhum ligador, `build.rustflags`, `[unstable]` nem `[env]` (`config_do_kernel_fora`); e nenhum config sem a extensão (`recursos_do_kernel_fora`). Desde o lote A9, a tabela `target` só com as dos dois alvos do kernel — nem a de um `cfg(…)`, nem a do hospedeiro, cujos ligadores rodam na compilação do kernel —, e nenhuma `[source]`, `[patch]`, `[host]` nem `[profile]` | o config da máquina de quem compila, que a consulta lê na máquina em que o `invariantes` roda; e o dos outros diretórios de build — os programas, o iniciador, o modelo do SDK —, que não compila o kernel: lá se conferem o compilador, o executor e o apelido (abaixo) |
-| o executor e o apelido do `cargo xtask` | desde o lote A9, fora do cargo: o passo do executor da ação do compilador, antes de todo `cargo` da CI — em todo diretório de build, o `[alias]` só o oficial, nenhum executor nem ligador, a `[build]` sem trocar o compilador, e a raiz só com o apelido; nenhum `CARGO_ALIAS_*`, `CARGO_TARGET_*_RUNNER` nem `_LINKER` no ambiente —; dentro do `xtask`, a conferência do começo de todo comando e o `cargo xtask compilador`, que veem o executor e o apelido que ainda chamam o `xtask`; e o `invariantes`, que confere que a ação tem o passo (`conferir_a_acao`) | fora da CI, o executor que nunca chama o `xtask`, na máquina de quem o põe; e o código do repositório que roda no job dos lints antes do passo das invariantes — os testes do hospedeiro, os `build.rs` —, que pode mudar a árvore que ele lê, como pode mudar o próprio `xtask`: fica com a revisão |
-| o `Cargo.toml` do kernel, com os perfis | desde o lote A8, sem `cargo-features`, `rustflags` nem barra invertida (`manifesto_do_kernel_fora`); as dependências e o `build.rs`, pelo grafo; e, desde o lote A9, as features numa lista fechada, sem uma padrão (`FEATURES_DO_KERNEL`) | o resto dos perfis — o `opt-level`, o `overflow-checks` —, que muda o binário e não o que o código pode dizer |
-| o ambiente | o `xtask` tira do build do kernel o `RUSTFLAGS` e o `CARGO_ENCODED_RUSTFLAGS`; o `compilador.rs` recusa o `RUSTC`, os embrulhos e, desde o lote A9, as `CARGO_BUILD_RUSTC*`, o `CARGO_TARGET_*_RUNNER` e o `CARGO_ALIAS_*`; a parte da suíte só vem do `xtask`; desde o lote A8, nenhum `RUSTFLAGS` na CI, e os `CARGO_TARGET_<alvo>_RUSTFLAGS` do ambiente do `invariantes` entram na consulta do config; e, desde o lote A9, a CI só põe as variáveis do cargo da lista — a cor, a compilação incremental, o diretório de saída (`variaveis_do_cargo_na_ci`) | um `CARGO_*` do shell de quem compila, só na hora do build: o repositório não o diz, e a CI não o põe; e as variáveis que não são do cargo, que a CI põe sem mudar o que se compila — o `RUST_BACKTRACE`, o `RUSTDOCFLAGS` da documentação, as `DUKE_*` das bancadas |
-| a linha de comando do `xtask` | desde o lote A9, o ambiente que ele põe num processo filho numa lista fechada (`AMBIENTE_DOS_FILHOS`), e nenhum `--config`, `-Z`, `cargo rustc` nem `cargo rustdoc` nos argumentos de um (`linha_de_comando_do_xtask_fora`) | o nome montado em pedaços, ou lido de uma variável, que o texto não diz; e o `compilador.rs`, que consulta o config pelo `-Zunstable-options` e cita as variáveis que recusa: a revisão do `xtask` |
+| o config do cargo, efetivo | desde o lote A8, o valor que o cargo lê de dentro de `kernel/` (`config get`) — o config do kernel, o da raiz e o do `CARGO_HOME` —, em todo arquivo e forma: os rustflags de cada alvo, exatamente os da lista (`RUSTFLAGS_DO_KERNEL`); nenhum ligador, `build.rustflags`, `[unstable]` nem `[env]` (`config_do_kernel_fora`); e nenhum config sem a extensão (`recursos_do_kernel_fora`). Desde o lote A9, a tabela `target` só com as dos dois alvos do kernel — nem a de um `cfg(…)`, nem a do hospedeiro, cujos ligadores rodam na compilação do kernel —, e nenhuma `[source]`, `[patch]`, `[host]` nem `[profile]`; e, desde o lote A10, nenhum `paths`, a terceira forma de trocar um pacote do grafo com o `Cargo.lock` igual. E o config de todo diretório de build — os programas, o iniciador, o modelo do SDK, o kernel —, desde o lote A10, numa lista, na ação e no começo de todo comando (`desvios_da_configuracao`): o apelido, o `build.target`, um dos alvos do projeto, e os `rustflags` de cada tabela `target` nas formas de hoje (`FORMAS_DOS_RUSTFLAGS`) — nenhum `[env]`, `[host]`, `[unstable]`, `[profile]`, `paths`, `[source]` nem `[patch]`, e nenhum rustflag que escolha o ligador, por qualquer opção | o config da máquina de quem compila, que a consulta lê onde o `xtask` roda, e que um `[build] jobs` ou um `[net]` pessoal tornam desvio — quem o tem o tira, ou declara a execução não oficial |
+| o executor e o apelido do `cargo xtask` | desde o lote A9, fora do cargo: o passo do executor da ação do compilador, antes de todo `cargo` da CI que compila ou roda — em todo diretório de build, o `[alias]` só o oficial, nenhuma tabela `target` com executor nem ligador, a `[build]` sem trocar o compilador, e a raiz só com o apelido —; dentro do `xtask`, a conferência do começo de todo comando e o `cargo xtask compilador`, que veem o executor e o apelido que ainda chamam o `xtask`; e o `invariantes`, que confere que a ação tem os passos (`conferir_a_acao`). Desde o lote A10, a consulta roda no toolchain fixado pelo canal, o config fora da raiz fica na lista (acima), e as invariantes rodam na própria ação, no job de lints, antes do cache e de todo outro `cargo` (`as_invariantes_na_acao`): nada do repositório roda entre a conferência e elas | fora da CI, o executor que nunca chama o `xtask`, na máquina de quem o põe; e a definição da CI — um passo entre o checkout e a ação, o script da ação —, a raiz da confiança, com a revisão |
+| o toolchain que roda: os `rust-toolchain`, o PATH, as casas do cargo e do rustup | desde o lote A10, na ação, antes de qualquer programa do toolchain, com o `python3` do sistema: nenhum `rust-toolchain` nem `rust-toolchain.toml` na árvore fora dos dois oficiais, os dois só com as chaves do oficial — nada de `path` — e o mesmo canal; o `CARGO_HOME` e o `RUSTUP_HOME` fora do repositório; o PATH sem entrada relativa nem pasta do repositório, e o `cargo`, o `rustc`, o `rustdoc` e o `rustfmt` dele os proxies do rustup, ou os binários do toolchain oficial; nenhum arquivo do commit num diretório de saída do cargo; e, depois da instalação pelo arquivo da raiz, todo `cargo` da ação no toolchain fixado pelo canal. No `xtask`, os dois arquivos com as mesmas chaves, no começo de todo comando e no `invariantes` (`desvios_dos_toolchains`) | um passo entre o checkout e a ação, que mudaria o que ela confere: a definição da CI, com a revisão |
+| o `Cargo.toml` do kernel, com os perfis | desde o lote A8, sem `cargo-features`, `rustflags` nem barra invertida (`manifesto_do_kernel_fora`); as dependências e o `build.rs`, pelo grafo; e, desde o lote A9, as features numa lista fechada, sem uma padrão (`FEATURES_DO_KERNEL`); e, desde o lote A10, na ação, nenhum manifesto da árvore com `cargo-features`, e nenhum perfil com `rustflags` nem `codegen-backend` | o resto dos perfis — o `opt-level`, o `overflow-checks` —, que muda o binário e não o que o código pode dizer |
+| o ambiente | o `xtask` tira do build do kernel o `RUSTFLAGS` e o `CARGO_ENCODED_RUSTFLAGS`; o `compilador.rs` recusa o `RUSTC`, os embrulhos e, desde o lote A9, as `CARGO_BUILD_RUSTC*`, o `CARGO_TARGET_*_RUNNER` e o `CARGO_ALIAS_*`; a parte da suíte só vem do `xtask`; desde o lote A8, nenhum `RUSTFLAGS` na CI, e os `CARGO_TARGET_<alvo>_RUSTFLAGS` do ambiente do `invariantes` entram na consulta do config; e, desde o lote A9, a CI só põe as variáveis do cargo da lista — a cor, a compilação incremental, o diretório de saída (`variaveis_do_cargo_na_ci`). Desde o lote A10, o ambiente do job, na ação, antes de qualquer programa do toolchain, por uma lista fechada: dos nomes que o cargo, o rustc, o rustdoc, o rustfmt e o rustup leem — os que começam por `CARGO`, `RUST` ou `__CARGO` —, só a cor, o `RUST_BACKTRACE`, o `CARGO_HOME` e o `RUSTUP_HOME`; nos workflows, nenhum `RUSTDOC`, `RUSTFMT` nem `PATH` (`SOBREPOSICOES`), nenhum `__CARGO*`, e o `RUSTDOCFLAGS` só no passo da documentação, com o valor dele; e o `RUSTDOC`, o `CARGO_BUILD_RUSTDOC` e o `build.rustdoc`, desvios do compilador — o `rustdoc` compila e roda os doctests | um `CARGO_*` do shell de quem compila, só na hora do build: o repositório não o diz, e a CI não o põe; as `DUKE_*` das bancadas, que não mudam o que se compila; e as variáveis genéricas do processo — o `LD_PRELOAD`, o `CC` dos `build.rs` —, que mudam qualquer programa, o `python3` da ação também, e que só a definição da CI põe: a raiz da confiança, com a revisão |
+| a linha de comando do `xtask` | desde o lote A9, o ambiente que ele põe num processo filho numa lista fechada (`AMBIENTE_DOS_FILHOS`), e nenhum `--config`, `-Z`, `cargo rustc` nem `cargo rustdoc` nos argumentos de um (`linha_de_comando_do_xtask_fora`); e, desde o lote A10, nenhum `set_var` nem `remove_var` do ambiente do próprio `xtask`, que todo filho herda, o `--config` e o `-Z` em qualquer lugar de um literal, com os escapes resolvidos, e nenhuma linha de comando com o cargo num literal — um `sh -c` | o nome montado em pedaços, ou lido de uma variável, que o texto não diz; e o `compilador.rs`, que consulta o config pelo `-Zunstable-options` e cita as variáveis que recusa: a revisão do `xtask` |
 | o montador: o `global_asm!`, o `asm!` e o `naked_asm!` | desde o lote A8, nenhum nos arquivos da carga (`MONTADOR_E_LIGADOR`), e nas funções dela, macro nenhuma fora da lista (`MACROS_DA_CARGA`) | os do resto do kernel — os vetores, a entrada, os programas de exemplo —, que só alcançam o que se nomeia lá: o `sym` pede um caminho, e um item de dentro de `lancar_por` não se nomeia fora |
-| o ligador: o `#[link_section]`, os símbolos exportados e o script | nos arquivos da carga, nenhum atributo que exporte (desde o lote A7) nem `#[link_section]` (desde o lote A8); o `-C link-arg` e o ligador, pelos rustflags da lista; e, desde o lote A9, nenhum ligador no config do kernel nem no da raiz — o do hospedeiro e o de um `cfg(…)` também —, e, na CI, em diretório de build nenhum | o `linker.ld` do ARM e os `#[no_mangle]` do `arch`, com a revisão; e a referência a um símbolo pelo nome decorado (`_ZN…`), num texto do montador ou num `#[link_name]` |
-| os atributos montados por macro | o `#[$…]`; desde o lote A8, o `$` fora do `doc`; desde o lote A9, o `#$a` e o `#` sozinho; e a macro procedural de atributo, pela lista das dependências | — |
+| o ligador: o `#[link_section]`, os símbolos exportados e o script | nos arquivos da carga, nenhum atributo que exporte (desde o lote A7) nem `#[link_section]` (desde o lote A8); o `-C link-arg` e o ligador, pelos rustflags da lista; e, desde o lote A9, nenhum ligador no config do kernel nem no da raiz — o do hospedeiro e o de um `cfg(…)` também —, e, na CI, nenhuma chave `linker` numa tabela `target`, em diretório de build nenhum; e, desde o lote A10, em todo diretório de build, nenhum rustflag fora das formas da lista — o `-C linker=`, o `-fuse-ld` e o `-B` de um `link-arg` —, nenhum `[host]` nem `[env] PATH`, e, na ação, nenhum rustflag no ambiente do job, nenhum manifesto da árvore com `cargo-features` e nenhum perfil com `rustflags` nem `codegen-backend` — o `profile-rustflags` do manifesto da raiz ligava o próprio `xtask` com um programa do repositório (o achado do lote A10) | o `linker.ld` do ARM e os `#[no_mangle]` do `arch`, com a revisão; e a referência a um símbolo pelo nome decorado (`_ZN…`), num texto do montador ou num `#[link_name]` |
+| os atributos montados por macro | o `#[$…]`; desde o lote A8, o `$` fora do `doc`; desde o lote A9, o `#$a` e o `#` sozinho; desde o lote A10, pela fonte, nenhum `mod` nos tokens de uma macro, que é por onde o `#[path]` montado alcança um arquivo; e a macro procedural de atributo, pela lista das dependências | — |
 | os recursos instáveis | a lista do `main.rs` (`RECURSOS_DO_KERNEL`, desde o lote A7); desde o lote A8, também o `-Z` do atributo de crate e o `@arquivo`, pelos rustflags da lista, e nenhum recurso nos pacotes do repositório; e, desde o lote A9, nenhum `-Z` na linha de comando do `xtask` | — |
 
 ### Da rede ao processo
@@ -12854,7 +13051,7 @@ do lote A8, no item *A soma das cotas de processos e a cota por sessão*, em
 (XT74 a XT107), nos testes do `xtask`; quatro da fiação de uma guarda no
 passo dela (W1 a W4), pelo `cargo xtask` de verdade, com o ataque que ela
 pega; e a do I2 (DGI2), na suíte, em depuração, no x86_64, contra o caso
-dele só, por uma linha temporária de filtro. Uma de cada vez, no
+dele e a cauda da suíte, por uma linha temporária de filtro. Uma de cada vez, no
 repositório, e restauradas byte a byte, com o resumo SHA-256 conferido e a
 hora do arquivo renovada para o cargo recompilar. As trinta e nove
 reprovaram; nenhuma é equivalente. A XT94 foi escrita primeiro com um
@@ -12876,9 +13073,9 @@ reprovou.
 | o segundo `mod testes` do `main.rs` sem acusação (XT83) | o mesmo e `adversario_a8_a5_um_modulo_de_producao_no_caminho_da_suite` |
 | a tabela `target` do config do kernel aberta de novo — a de um `cfg(…)`, a do hospedeiro — (XT85), e a `[source]` sem acusação (XT86) | `o_config_efetivo_do_kernel` e `adversario_a8_a6_a7_a8_o_config_que_a_consulta_nao_le` |
 | a `[patch]` (XT87), a `[host]` (XT88) e a `[profile]` (XT89) sem acusação | `o_config_efetivo_do_kernel`, cada uma pelo caso dela |
-| a marca de direção lida como letra (XT90) | `adversario_a8_b1_a_marca_de_direcao_e_espaco_para_o_rustc` |
+| a marca de direção lida de novo como um caractere, e não como espaço (XT90) | `adversario_a8_b1_a_marca_de_direcao_e_espaco_para_o_rustc` |
 | a CI com qualquer variável do cargo (XT91) | `as_variaveis_do_cargo_na_ci` e `adversario_a8_b3_o_ambiente_da_ci` |
-| o `.env(…)` de fora da lista (XT92), o `--config`, o `-Z`, o `rustc` e o `rustdoc` nos argumentos (XT93) e o `.envs(…)` (XT94) sem acusação | `a_linha_de_comando_do_xtask`, cada uma pelo caso dela. Com a XT92, o `adversario_a8_b4_a_linha_de_comando_do_xtask` passa: ele acha também o `--config`, e pede só que algo se acuse |
+| o `.env(…)` de fora da lista (XT92), o `--config`, o `-Z`, o `rustc` e o `rustdoc` nos argumentos (XT93) e o `.envs(…)` (XT94) sem acusação | `a_linha_de_comando_do_xtask`, cada uma pelo caso dela. Com cada uma das três, o `adversario_a8_b4_a_linha_de_comando_do_xtask` passa: ele põe o `.env(…)` e o `--config` juntos, e pede só que algo se acuse |
 | as `CARGO_BUILD_RUSTC*` fora das variáveis que trocam o compilador (XT95) | `as_variaveis_que_trocam_o_compilador_sao_desvios` |
 | o executor do config (XT96), o apelido do config (XT97) e os dois do ambiente (XT98) sem desvio | `o_executor_e_o_apelido_sao_desvios`, cada uma pelo caso dela |
 | a ação sem o executor e o ligador das tabelas `target` (XT99) | `a_acao_recusa_o_executor_o_ligador_e_o_apelido` e `a_acao_tem_o_passo_do_executor` |
@@ -12894,7 +13091,81 @@ os da cauda —, com o `log.rs` novo; o controle do gancho gravou o registro
 59 no x86_64 e o 58 no aarch64. Com o filtro, o `xtask` sai com falha,
 como deve: o kernel anuncia a suíte inteira (1070 e 1055 casos), e o
 placar diz os que rodaram. A suíte inteira, o release, as bancadas e os
-iniciadores ficaram com a CI.
+iniciadores ficaram com a CI, e o passo novo da ação no runner de verdade:
+a CI 530, no `f77c674`, o rodou — o passo da ação passou nos 48 jobs, no
+`ubuntu-latest` (a imagem `ubuntu26/20261116.202`), sem config no
+`CARGO_HOME`. Os testes `a_acao_recusa_o_executor_o_ligador_e_o_apelido` e
+`a_acao_tem_o_passo_do_executor` da tabela se chamam, desde o lote A10,
+`a_acao_roda_como_no_runner` e `a_acao_tem_os_passos_de_fora_do_cargo`.
+
+#### As do lote A10
+
+Sessenta e seis mutações contra o lote A10 — a guarda "fora do cargo" de
+verdade, os achados do adversário e do revisor do lote A9 e o achado do
+lote, no item *A soma das cotas de processos e a cota por sessão*, em
+[Decisões pendentes](#decisões-pendentes) —: trinta e sete no hospedeiro
+(XT108 a XT144), nos testes do `xtask`; dezoito na ação do compilador (AC1
+a AC18), pelos testes do `xtask` que rodam os passos dela como o runner;
+dez da fiação de uma guarda no passo dela (W1 a W10), com o ataque que ela
+pega — as quatro do lote A9, de novo, no código final deste, as três das
+guardas novas do `xtask`, as duas das guardas do lote A9 que não a
+tiveram, a linha de comando do `xtask` e as variáveis do cargo na CI,
+todas pelo `cargo xtask` de verdade, e a dos manifestos, pelo script da
+ação —; e a do IN1 (IN1M), na suíte, em depuração, no x86_64, contra o
+caso dele e a cauda da suíte, por uma linha temporária de filtro. Uma de
+cada vez, no repositório, e restauradas byte a byte, com o resumo SHA-256
+conferido e a hora do arquivo renovada para o cargo recompilar. As
+sessenta e seis reprovaram. Duas sobreviveram na primeira rodada — a XT135,
+porque a biblioteca com outro nome só escapa da regra das renomeadas
+quando a dependência é renomeada de volta para o nome do pacote, e nenhum
+caso a montava; e a XT139, porque os casos do `--config` no meio de um
+literal tinham o cargo, e a regra do `sh -c` os pegava antes —; os dois
+casos entraram, e elas reprovaram. Do código que as mutações tiram, nada
+mudou depois da rodada: o `compilador.rs` e a ação são os dela, e o
+`main.rs` difere só nos dois casos.
+
+| Mutação | Reprovada por |
+|---|---|
+| uma tabela do config de um diretório de build fora da lista (XT108), uma chave da `[build]` além do `build.target` (XT109), um `build.target` fora dos alvos (XT110), outra chave de uma tabela `target` (XT111), o `-C` com qualquer valor (XT113), todo `link-arg`, e não só o script do ligador (XT114), e uma opção que não é o `--cfg` nem o `-C` (XT115), sem acusação | `o_config_de_um_diretorio_de_build_fechado_a_lista`, cada uma pelo caso dela |
+| o ligador de uma tabela `target` sem acusação (XT112) | `o_executor_e_o_apelido_sao_desvios` |
+| uma chave fora das do oficial no `[toolchain]` (XT116), e o `rust-toolchain.toml` do modelo do SDK sem leitura (XT117) | `os_rust_toolchain_so_com_as_chaves_do_oficial` |
+| o `RUSTDOC` (XT118) e o `CARGO_BUILD_RUSTDOC` (XT119) fora das variáveis que trocam o compilador, e o `build.rustdoc` fora das chaves (XT120) | `as_variaveis_que_trocam_o_compilador_sao_desvios` |
+| a conferência da ação sem as marcas (XT121), sem a ordem (XT122) e sem o shell dos passos (XT123), com cada diretório procurado no texto do script, e não na tupla — o E5 (XT124) —, sem a lista fechada do executor igual à do `xtask` (XT125), sem a entrada e o passo das invariantes (XT126), e com a tupla lida só até o primeiro item (XT127) | `a_acao_tem_os_passos_de_fora_do_cargo`, cada uma pelo caso dela |
+| o `invariantes: true` noutro passo do job de lints (XT128), o `invariantes: false` (XT129) e o `invariantes: true` noutro job (XT130) valendo | `o_job_de_lints_liga_as_invariantes_na_acao` |
+| o canário sem o comando das invariantes da ação (XT131) | `o_canario_do_repositorio_repete_os_comandos_dos_lints` e `o_canario_que_nao_repete_um_comando_dos_lints_e_recusado` |
+| o `mod` nos tokens de uma macro sem acusação (XT132), e só nas invocações, e não no corpo de um `macro_rules!` (XT133) | `nenhum_mod_nos_tokens_de_uma_macro` e `adversario_a9_i_o_path_com_o_cerquilha_de_um_atributo_de_verdade` |
+| o `mod` sem a fronteira da palavra — o `modo`, o `b_mod` — (XT134) | `nenhum_mod_nos_tokens_de_uma_macro` |
+| a biblioteca com outro nome que o do pacote sem acusação (XT135) | `adversario_a9_g_a_biblioteca_de_uma_direta_com_o_nome_core`, pelo caso da dependência renomeada de volta para o nome do pacote. Na primeira rodada, **sobreviveu**: sem renomear, o nome com que a dependência chega ao kernel é o da biblioteca, e a regra das renomeadas já o via |
+| o nome de um pacote do sysroot sem acusação (XT136) | `a_raiz_e_as_features_do_kernel_pelo_grafo` |
+| o `set_var` e o `remove_var` (XT137), o literal sem os escapes resolvidos (XT138) e a linha de comando com o cargo (XT140) sem acusação | `a_linha_de_comando_do_xtask_pela_fonte`, `adversario_a9_h_a_linha_de_comando_por_outras_formas` e `o_literal_com_os_escapes_resolvidos`, cada uma pelo caso dela |
+| o `--config` e o `-Z` só no começo do literal (XT139) | `a_linha_de_comando_do_xtask_pela_fonte`, pelos casos do `--config` e do `-Z` no meio de um literal sem o cargo. Na primeira rodada, **sobreviveu**: os casos de antes tinham o cargo no literal, e a regra do `sh -c` os pegava |
+| o `paths` no config do kernel sem acusação (XT141) | `adversario_a9_j_o_paths_no_config_do_kernel` |
+| na CI, o `__CARGO*` (XT142), o `RUSTDOCFLAGS` em qualquer passo (XT143) e o da documentação noutro passo (XT144) | `o_cargo_de_dois_sublinhados_e_o_rustdocflags_na_ci` |
+| a ação: o ambiente do job sem a lista fechada (AC1) | `a_acao_roda_como_no_runner` e `adversario_a9_f1_f3_o_passo_e_os_outros_nomes_do_ligador` |
+| a ação: as casas do cargo e do rustup no repositório (AC2), uma pasta do repositório (AC3) ou uma entrada relativa (AC4) no PATH, o `cargo` do PATH sem conferência (AC5) ou valendo por estar na pasta dos proxies (AC6), o `path` num `rust-toolchain` oficial (AC7) e outro `rust-toolchain` na árvore (AC8) | `adversario_a9_f2_o_toolchain_de_um_diretorio_e_o_path`, cada uma pelo caso dela |
+| a ação: um arquivo do commit num diretório de saída do cargo (AC9) | `a_acao_roda_como_no_runner` |
+| a ação, fora da raiz: uma tabela fora da lista (AC10), os rustflags sem as formas (AC11), o `build.target` fora dos alvos (AC12), outra chave de uma tabela `target` (AC13) e outra da `[build]` (AC14) | `adversario_a9_f1_f3_o_passo_e_os_outros_nomes_do_ligador`, cada uma pelo caso dela |
+| a ação: o passo do executor só na raiz e no kernel — a M1 — (AC15) | `adversario_a9_m1_o_passo_le_todo_diretorio_de_build` |
+| a ação: o `cargo-features` de um manifesto (AC16), os `rustflags` e o `codegen-backend` de um perfil (AC17), e os manifestos sem conferência (AC18) | `os_manifestos_que_escolhem_o_ligador`, e a AC18 também `a_acao_tem_os_passos_de_fora_do_cargo` |
+| a fiação tirada, cada uma com o ataque que ela pega: os registros do log com o braço novo do `log_warn` (W1), o módulo da suíte com o `mod testes { mod atalho; }` (W2), a conferência da ação com a ação sem o passo do executor (W3), o ambiente do cargo com o `CARGO_ALIAS_B=build` (W4), os `rust-toolchain` no `invariantes` (W5) e no começo de todo comando (W6) com o do modelo do SDK com `path`, o job de lints sem as invariantes na ação (W7), a linha de comando com o `set_var` do H (W8), as variáveis do cargo na CI com o `CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS` (W9), e os manifestos no passo do ambiente com o perfil que escolhe o ligador (W10) | o `cargo xtask` de verdade e o script da ação: com a fiação, cada ataque reprova; sem ela, passa — rc=0 no `invariantes` (a W5 com `DUKE_OUTRO_COMPILADOR=1`), no `compilador` da W4 ("os desvios: nenhum") e nos três passos da ação da W10. A W6 dá rc=1 com ela e sem ela — o modelo mudado na árvore também é o desvio do commit —, e sem ela some a linha do `path` dos desvios: num commit com o `path`, só ela pararia o comando |
+| o controle do gancho tomado por outro `user.run`: de outra pessoa, de um caminho que não existe, antes do `user.run` do caso, o IN1 (IN1M) | `contencao: o desfecho que permite nao grava dentro de um comando`, no x86_64: "o controle do gancho nao cita a decisao do user.run do caso: o gancho rodou noutro comando" — o controle cita a decisão 8, e a execução do caso, a 11. Com ela, o caso de antes do lote passa, 8 de 8: era o IN1 |
+
+Os ataques do adversário do lote A8, do especialista e do adversário do lote
+A9 e os deste lote — trinta, com trinta e oito conferências — rodaram de
+novo no código final, um de cada vez, restaurados como as mutações: cada
+um, sozinho, reprova — pelo `invariantes`, ou pelo script da ação rodado
+como a CI o roda (o ligador do A7, o executor do A8, o F1, o F2, o F3, o
+modelo do SDK com `path`, os configs dos programas fora da lista e o
+perfil que escolhe o ligador, este só por ele: o `cargo xtask` o
+ligaria) —, e a M1, pelo teste dela. O caso reforçado passou nas duas
+arquiteturas, em depuração, na suíte filtrada ao caso e à cauda por uma
+linha temporária — 8 de 8 no x86_64 e 7 de 7 no aarch64 —: o controle do
+gancho citou a decisão 7 no x86_64 e a 6 no aarch64, as mesmas da
+execução do caso. Com o filtro, o `xtask` sai com falha, como deve: o
+kernel anuncia a suíte inteira (1072 e 1058 casos), e o placar diz os que
+rodaram. A suíte inteira, o release, as bancadas e os iniciadores ficam
+com a CI, e os passos novos da ação no runner de verdade, com a CI do
+commit.
 
 ### As mutações do chamado do coletor
 
