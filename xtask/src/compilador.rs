@@ -1669,8 +1669,9 @@ pub(crate) fn conferir_o_canal() -> Result<ExitCode, String> {
 /// ([`conferir_os_workflows`]); a da ação do compilador, que tem de estar lá
 /// ([`conferir_a_acao`]); e, desde o lote A16, a da CI e a do canário, que
 /// as duas regras seguintes acham pelo nome ([`workflows_que_faltam`]); a do
-/// job de lints, que liga as invariantes ([`as_invariantes_na_acao`]); e a
-/// do canário, que repete os comandos dele ([`o_canario_repete_os_lints`]).
+/// job de lints, que liga as invariantes ([`as_invariantes_na_acao`]); a do
+/// canário, que repete os comandos dele ([`o_canario_repete_os_lints`]); e,
+/// desde o lote A17, a do `push` no `on:` da CI ([`a_ci_nos_pushes`]).
 ///
 /// # Uma função sem E/S, desde o lote A16
 ///
@@ -1701,6 +1702,8 @@ fn conferir_a_definicao_da_ci(workflows: &[(String, String)]) -> Vec<String> {
     fora.extend(workflows_que_faltam(workflows));
     if let Some(ci) = texto_de(CI) {
         fora.extend(as_invariantes_na_acao(ci));
+        // E o `push` no `on:` dela, sem filtro (desde o lote A17).
+        fora.extend(a_ci_nos_pushes(ci));
     }
     if let (Some(ci), Some(canario), Some(acao)) = (texto_de(CI), texto_de(CANARIO), acao) {
         fora.extend(o_canario_repete_os_lints(ci, canario, acao));
@@ -3978,12 +3981,86 @@ fn passo_da_acao(acao: &str, id: &str) -> Option<(String, String)> {
 /// agendamento e o disparo manual. Desde o lote A16.
 const GATILHOS_DO_CANARIO: [&str; 2] = ["schedule", "workflow_dispatch"];
 
+/// Um gatilho do `on:` da raiz de um workflow ([`gatilhos_do_on`]): o nome,
+/// a linha dele e se ele tem alguma coisa dentro — um filtro (`branches:`,
+/// `paths-ignore:`), os `types:` — ou um valor na linha da chave.
+struct Gatilho<'a> {
+    nome: String,
+    linha: &'a str,
+    com_algo_dentro: bool,
+}
+
+/// Os gatilhos do `on:` da raiz de um workflow — `linhas`, as de código
+/// dele —, nas formas que o `on:` tem: o valor na linha (`on: push`,
+/// `on: [push, …]`), a lista em bloco (`- push`, também na coluna da própria
+/// chave, a sequência compacta do YAML) e as chaves do mapa (`push:`), na
+/// coluna da primeira linha de dentro dele. Nenhum `on:` na coluna zero, e
+/// é `None`. Desde o lote A17, a leitura que a regra dos gatilhos do canário
+/// ([`gatilhos_fora_da_lista`]) e a da CI nos pushes ([`a_ci_nos_pushes`])
+/// partilham.
+fn gatilhos_do_on<'a>(linhas: &[Linha<'a>]) -> Option<Vec<Gatilho<'a>>> {
+    let codigo: Vec<&Linha<'a>> = linhas
+        .iter()
+        .filter(|l| !l.escalar && !l.texto.is_empty())
+        .collect();
+    let mut gatilhos = Vec::new();
+    let mut achou_o_on = false;
+    let mut no_on = false;
+    let mut coluna: Option<usize> = None;
+    for (k, l) in codigo.iter().enumerate() {
+        let item = l
+            .texto
+            .strip_prefix("- ")
+            .or((l.texto == "-").then_some(""));
+        // Uma linha da raiz é uma chave dela — menos o item de uma lista logo
+        // depois do `on:`, na coluna dele, que é um gatilho.
+        if l.recuo == 0 && !(no_on && item.is_some()) {
+            no_on = false;
+            if let Some(("on", valor)) = chave_e_valor(l.texto) {
+                achou_o_on = true;
+                no_on = true;
+                coluna = None;
+                let dentro = valor
+                    .strip_prefix('[')
+                    .and_then(|v| v.strip_suffix(']'))
+                    .unwrap_or(valor);
+                gatilhos.extend(
+                    dentro
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|g| !g.is_empty())
+                        .map(|g| Gatilho {
+                            nome: sem_aspas(g).to_string(),
+                            linha: l.texto,
+                            com_algo_dentro: false,
+                        }),
+                );
+            }
+            continue;
+        }
+        if !no_on || *coluna.get_or_insert(l.recuo) != l.recuo {
+            continue;
+        }
+        // Dentro dele: a linha de baixo mais recuada que ele.
+        let por_baixo = codigo.get(k + 1).is_some_and(|d| d.recuo > l.recuo);
+        let (nome, na_linha) = match item {
+            Some(item) => (sem_comentario(item.trim()), false),
+            None => chave_e_valor(l.texto).map_or((l.texto, false), |(chave, valor)| {
+                (chave, !valor.is_empty())
+            }),
+        };
+        gatilhos.push(Gatilho {
+            nome: sem_aspas(nome).to_string(),
+            linha: l.texto,
+            com_algo_dentro: por_baixo || na_linha,
+        });
+    }
+    achou_o_on.then_some(gatilhos)
+}
+
 /// Os gatilhos do canário — `linhas`, as de código dele — fora de
 /// [`GATILHOS_DO_CANARIO`]: ele roda no agendamento e no disparo manual,
-/// nunca num push. Nas formas que o `on:` tem: o valor na linha (`on:
-/// push`, `on: [push, …]`), a lista em bloco (`- push`, também na coluna da
-/// própria chave, a sequência compacta do YAML) e as chaves do mapa
-/// (`push:`), na coluna da primeira linha de dentro dele.
+/// nunca num push. Nas formas que o `on:` tem ([`gatilhos_do_on`]).
 ///
 /// # A lista fechada, desde o lote A16
 ///
@@ -4007,64 +4084,58 @@ const GATILHOS_DO_CANARIO: [&str; 2] = ["schedule", "workflow_dispatch"];
 /// zero ([`raiz_fora_da_coluna_zero`]); e o canário sem um `on:` na coluna
 /// zero reprova aqui.
 fn gatilhos_fora_da_lista(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
-    let mut gatilhos: Vec<(String, &str)> = Vec::new();
-    let mut achou_o_on = false;
-    let mut no_on = false;
-    let mut coluna: Option<usize> = None;
-    for l in linhas.iter().filter(|l| !l.escalar && !l.texto.is_empty()) {
-        let item = l
-            .texto
-            .strip_prefix("- ")
-            .or((l.texto == "-").then_some(""));
-        // Uma linha da raiz é uma chave dela — menos o item de uma lista logo
-        // depois do `on:`, na coluna dele, que é um gatilho.
-        if l.recuo == 0 && !(no_on && item.is_some()) {
-            no_on = false;
-            if let Some(("on", valor)) = chave_e_valor(l.texto) {
-                achou_o_on = true;
-                no_on = true;
-                coluna = None;
-                let dentro = valor
-                    .strip_prefix('[')
-                    .and_then(|v| v.strip_suffix(']'))
-                    .unwrap_or(valor);
-                gatilhos.extend(
-                    dentro
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|g| !g.is_empty())
-                        .map(|g| (sem_aspas(g).to_string(), l.texto)),
-                );
-            }
-            continue;
-        }
-        if !no_on || *coluna.get_or_insert(l.recuo) != l.recuo {
-            continue;
-        }
-        let gatilho = match item {
-            Some(item) => sem_comentario(item.trim()),
-            None => chave_e_valor(l.texto).map_or(l.texto, |(chave, _)| chave),
-        };
-        gatilhos.push((sem_aspas(gatilho).to_string(), l.texto));
-    }
-    let mut fora: Vec<String> = gatilhos
+    let Some(gatilhos) = gatilhos_do_on(linhas) else {
+        return vec![format!(
+            "{nome}: nenhum `on:` na coluna zero — a regra lê os gatilhos do canário no `on:` da \
+             raiz, na coluna zero; uma raiz recuada, que o YAML lê igual, os esconde dela"
+        )];
+    };
+    gatilhos
         .into_iter()
-        .filter(|(gatilho, _)| !GATILHOS_DO_CANARIO.contains(&gatilho.as_str()))
-        .map(|(gatilho, linha)| {
+        .filter(|g| !GATILHOS_DO_CANARIO.contains(&g.nome.as_str()))
+        .map(|g| {
             format!(
-                "{nome}: o canário roda em `{gatilho}` (`{linha}`) — só no agendamento e no \
-                 disparo manual ({})",
+                "{nome}: o canário roda em `{}` (`{}`) — só no agendamento e no disparo manual \
+                 ({})",
+                g.nome,
+                g.linha,
                 GATILHOS_DO_CANARIO.join(", ")
             )
         })
-        .collect();
-    if !achou_o_on {
-        fora.push(format!(
-            "{nome}: nenhum `on:` na coluna zero — a regra lê os gatilhos do canário no `on:` da \
-             raiz, na coluna zero; uma raiz recuada, que o YAML lê igual, os esconde dela"
-        ));
+        .collect()
+}
+
+/// O `on:` da raiz da CI oficial — `ci`, o [`CI`] — tem o `push` sem nada
+/// dentro — nem um filtro (`branches:`, `branches-ignore:`, `paths:`,
+/// `paths-ignore:`, `tags:`), nem um valor na linha da chave —, em qualquer
+/// das formas do `on:` que a leitura dos gatilhos lê ([`gatilhos_do_on`]).
+///
+/// # Por quê, desde o lote A17
+///
+/// A regra das invariantes confere que o job de lints as liga
+/// ([`as_invariantes_na_acao`]), e a da falta, que a CI existe pelo nome
+/// ([`workflows_que_faltam`]); nenhuma lia o `on:` dela: a CI só com o
+/// `workflow_dispatch:` passava, e as invariantes deixavam de rodar a cada
+/// push, como com a CI renomeada (o I1 do adversário do lote A16). Um filtro
+/// do `push` também as tira de uma parte dos pushes, e reprova. O `if:` de
+/// um job inteiro, que também as tiraria, fica com a revisão; e o
+/// `[skip ci]` na mensagem de um commit, que, pela documentação do GitHub,
+/// tira os workflows do `push` daquele push, está fora da definição da CI.
+fn a_ci_nos_pushes(ci: &str) -> Vec<String> {
+    let linhas = linhas_de_codigo(ci);
+    let nos_pushes = gatilhos_do_on(&linhas)
+        .unwrap_or_default()
+        .iter()
+        .any(|g| g.nome == "push" && !g.com_algo_dentro);
+    if nos_pushes {
+        Vec::new()
+    } else {
+        vec![format!(
+            "{CI}: a CI oficial não roda em todo push — o `on:` da raiz, na coluna zero, sem o \
+             `push`, ou com um filtro ou um valor nele: as invariantes do job de lints rodam a \
+             cada push"
+        )]
     }
-    fora
 }
 
 /// O modo do cache do canário — `linhas`, as de código dele —: o
@@ -9418,6 +9489,9 @@ jobs:
             1,
         );
         assert_ne!(acao_reatribuida, ACAO);
+        let gatilhos = "on:\n  push:\n  pull_request:\n";
+        assert_eq!(ci.matches(gatilhos).count(), 1);
+        let so_no_disparo = ci.replacen(gatilhos, "on:\n  workflow_dispatch:\n", 1);
         for (rotulo, trocas, esperado) in [
             (
                 "a CI renomeada, sem a entrada",
@@ -9463,6 +9537,11 @@ jobs:
                 vec![(ACAO_DO_COMPILADOR, Some(acao_reatribuida.as_str()))],
                 format!("{ACAO_DO_COMPILADOR}: `canal=nightly-2000-01-01` no passo `conferir`"),
             ),
+            (
+                "a CI só no disparo manual (o lote A17)",
+                vec![(CI, Some(so_no_disparo.as_str()))],
+                format!("{CI}: a CI oficial não roda em todo push"),
+            ),
         ] {
             let fora = definicao(&trocas);
             assert!(
@@ -9470,6 +9549,58 @@ jobs:
                 "{rotulo}: {fora:#?}"
             );
         }
+    }
+
+    /// A CI em todo push (o I1 do adversário do lote A16): a CI só no disparo
+    /// manual passava, e as invariantes do job de lints deixavam de rodar a
+    /// cada push. O `on:` da CI do repositório passa, e o `push` nas formas do
+    /// `on:` — o valor na linha, a lista em bloco, a chave do mapa —; sem o
+    /// `push`, com um filtro dentro dele ou com um valor na linha da chave, e
+    /// com a raiz recuada, reprova uma vez.
+    #[test]
+    fn adversario_a16_a_ci_nos_pushes() {
+        let ci = include_str!("../../.github/workflows/ci.yml");
+        assert_eq!(a_ci_nos_pushes(ci), Vec::<String>::new());
+        let gatilhos = "on:\n  push:\n  pull_request:\n";
+        assert_eq!(ci.matches(gatilhos).count(), 1);
+        for passa in [
+            "on: push\n",
+            "on: [push, pull_request]\n",
+            "on:\n  - pull_request\n  - push\n",
+            "on:\n- push\n",
+            "on:\n  pull_request:\n    types: [opened]\n  push: # todo push\n",
+        ] {
+            assert_eq!(
+                a_ci_nos_pushes(&ci.replacen(gatilhos, passa, 1)),
+                Vec::<String>::new(),
+                "{passa}"
+            );
+        }
+        for reprova in [
+            "on:\n  workflow_dispatch:\n",
+            "on: [pull_request]\n",
+            "on:\n  push:\n    branches-ignore: ['**']\n  pull_request:\n",
+            "on:\n  push:\n    paths:\n      - kernel/**\n",
+            "on:\n  push: {}\n",
+            "on:\n  - push:\n      branches: [x]\n",
+        ] {
+            let fora = a_ci_nos_pushes(&ci.replacen(gatilhos, reprova, 1));
+            assert!(
+                fora.len() == 1 && fora[0].contains("não roda em todo push"),
+                "{reprova}: {fora:#?}"
+            );
+        }
+        let recuada: String = ci
+            .lines()
+            .map(|l| {
+                if l.trim().is_empty() {
+                    String::from("\n")
+                } else {
+                    format!("  {l}\n")
+                }
+            })
+            .collect();
+        assert_eq!(a_ci_nos_pushes(&recuada).len(), 1);
     }
 
     /// Os gatilhos do canário (o B3 do adversário do lote A15): a regra não
