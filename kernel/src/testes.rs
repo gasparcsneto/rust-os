@@ -17805,7 +17805,7 @@ fn uma_troca_gravada(
         [(_, e)] if e.codigo == codigo && e.detalhe.contains(motivo) => Ok(e.clone()),
         outras => {
             for (_, e) in outras {
-                crate::log_error!("teste", "{:?}", e);
+                crate::log_error!("teste", "{}", sem_segredo(&alloc::format!("{e:?}"), &[]));
             }
             crate::log_error!("teste", "esperado {} com `{}`", codigo.nome(), motivo);
             Err("a troca nao gravou o desfecho esperado, uma vez")
@@ -18040,6 +18040,36 @@ fn onde_esta<'a>(texto: &str, segredos: &'a Segredos) -> Option<Achado<'a>> {
 /// a forma escrita de uma credencial?
 fn leva_segredo(texto: &str, segredos: &Segredos) -> bool {
     onde_esta(texto, segredos).is_some()
+}
+
+/// O texto de um diagnóstico de falha, sem os segredos da suíte: ele mesmo,
+/// se não leva um pedaço nem uma palavra inteira das senhas de
+/// [`SENHAS_DA_SUITE`] e dos `digitados` do caso, nem a forma escrita de uma
+/// credencial; senão, o tamanho dele e o que ele leva e onde, sem o texto —
+/// ver [`Achado`].
+///
+/// Os casos que digitam um segredo diziam na falha, inteiros, o registro da
+/// auditoria, as linhas do log e a tela, antes da conferência dos segredos
+/// — que diz só onde desde o lote ICACHE-6. Uma regressão que levasse a
+/// senha a um desses lugares reprovava o caso ali, e o diagnóstico a levava
+/// à serial — na suíte, ao log da CI —, aonde ela sozinha não chegava: o
+/// motivo de uma recusa da troca que dissesse as senhas digitadas vai à
+/// auditoria e à tela do Terminal, e não ao log (o adversário da rodada 8).
+fn sem_segredo(texto: &str, digitados: &[&str]) -> alloc::string::String {
+    let mut senhas: alloc::vec::Vec<&str> = SENHAS_DA_SUITE
+        .iter()
+        .filter_map(|(_, s)| core::str::from_utf8(s).ok())
+        .collect();
+    senhas.extend_from_slice(digitados);
+    let segredos = segredos(&senhas, &[]);
+    match onde_esta(texto, &segredos) {
+        None => alloc::string::String::from(texto),
+        Some(achado) => alloc::format!(
+            "um texto de {} byte(s), que leva {}",
+            texto.len(),
+            segredos.dizer(achado)
+        ),
+    }
 }
 
 /// Nenhum texto da auditoria — campo nenhum de registro nenhum —, do log
@@ -18287,7 +18317,7 @@ fn senha_a_pessoa_troca_a_propria() -> Resultado {
             || e.parametros != politica::auditoria::resumo_dos_parametros(&[])
             || !e.detalhe.contains("console")
         {
-            crate::log_error!("teste", "{:?}", e);
+            crate::log_error!("teste", "{}", sem_segredo(&alloc::format!("{e:?}"), &[]));
             return Err("a troca nao foi gravada como da pessoa, sobre ela mesma");
         }
         // A mesma pessoa, com a credencial das novas.
@@ -18330,7 +18360,7 @@ fn senha_a_pessoa_troca_a_propria() -> Resultado {
                 return Err("uma senha apareceu na tela, ou a resposta nao");
             }
             if !texto.contains("senha trocada") {
-                crate::log_error!("teste", "{}", texto);
+                crate::log_error!("teste", "{}", sem_segredo(&texto, &[]));
                 return Err("uma senha apareceu na tela, ou a resposta nao");
             }
         }
@@ -18602,7 +18632,7 @@ fn senha_so_a_propria_com_a_sessao_e_a_permissao() -> Resultado {
         digitar_no_console(CONSOLE, "senha\n");
         let e = uma_troca_gravada(seq, Codigo::DenyNotAuthenticated, "ninguem entrou")?;
         if e.titular != Titular::Anonimo || e.recurso != "terminal:2" {
-            crate::log_error!("teste", "{:?}", e);
+            crate::log_error!("teste", "{}", sem_segredo(&alloc::format!("{e:?}"), &[]));
             return Err("a troca sem login nao foi gravada com o console");
         }
         if crate::interpretador::pedindo_senha(CONSOLE) {
@@ -18850,7 +18880,11 @@ fn senha_a_gravacao_o_journal_e_a_maquina_que_vai() -> Resultado {
             [(Codigo::Allow, _), (Codigo::Error, motivo)]
                 if motivo.contains("nao ficou gravada") => {}
             outras => {
-                crate::log_error!("teste", "{:?}", outras);
+                crate::log_error!(
+                    "teste",
+                    "{}",
+                    sem_segredo(&alloc::format!("{outras:?}"), &[])
+                );
                 return Err("a troca que nao se gravou nao disse a falha depois da decisao");
             }
         }
@@ -19008,7 +19042,12 @@ fn senha_o_que_vem_no_meio() -> Resultado {
             match recusa {
                 Some((_, e)) if e.codigo == codigo && e.detalhe.contains(motivo) => {}
                 outro => {
-                    crate::log_error!("teste", "{}: {:?}", nome, outro);
+                    crate::log_error!(
+                        "teste",
+                        "{}: {}",
+                        nome,
+                        sem_segredo(&alloc::format!("{outro:?}"), &[])
+                    );
                     return Err("o que veio no meio da troca nao a recusou como devia");
                 }
             }
@@ -19385,7 +19424,12 @@ fn consoles_nada_antes_do_login() -> Resultado {
             let antes = crate::log::total_emitidos();
             digitar_no_console(Console::Fisico, linha);
             if !sem_login_com(metodo, parametros) {
-                crate::log_error!("teste", "{:?}", ultimo_registro().map(|r| r.evento));
+                let ultimo = ultimo_registro().map(|r| r.evento);
+                crate::log_error!(
+                    "teste",
+                    "{}",
+                    sem_segredo(&alloc::format!("{ultimo:?}"), &[])
+                );
                 return Err("um comando antes do login nao foi recusado e gravado");
             }
             let mut executou = false;
@@ -19415,7 +19459,12 @@ fn consoles_nada_antes_do_login() -> Resultado {
             crate::interpretador::fechar_console(terminal, "fim do caso");
             let _ = crate::pseudoterminal::tirar_de_teste(k as u8);
             if !gravado {
-                crate::log_error!("teste", "{:?}", ultimo_registro().map(|r| r.evento));
+                let ultimo = ultimo_registro().map(|r| r.evento);
+                crate::log_error!(
+                    "teste",
+                    "{}",
+                    sem_segredo(&alloc::format!("{ultimo:?}"), &[])
+                );
                 return Err(
                     "a linha que nao e comando, num Terminal sem ninguem, nao foi gravada com o marcador",
                 );
@@ -19520,11 +19569,11 @@ fn consoles_sem_ninguem_o_comando_vai_sem_o_resumo() -> Resultado {
                 || e.codigo != Codigo::DenyNotAuthenticated
                 || e.recurso != Console::Fisico.texto()
             {
-                crate::log_error!("teste", "{:?}", e);
+                crate::log_error!("teste", "{}", sem_segredo(&alloc::format!("{e:?}"), &[]));
                 return Err("o comando sem ninguem nao foi gravado com o nome e o console");
             }
             if e.parametros != vazio {
-                crate::log_error!("teste", "{:?}", e);
+                crate::log_error!("teste", "{}", sem_segredo(&alloc::format!("{e:?}"), &[]));
                 return Err("o comando sem ninguem foi gravado com o resumo dos parametros");
             }
         }
@@ -19552,7 +19601,8 @@ fn consoles_sem_ninguem_o_comando_vai_sem_o_resumo() -> Resultado {
         let resumo = resumo_dos_parametros(br#"{"count":4}"#);
         if gravado.len() != 1 || gravado[0].1.parametros != resumo {
             for (seq, e) in &gravado {
-                crate::log_error!("teste", "registro {}: {:?}", seq, e);
+                let e = sem_segredo(&alloc::format!("{e:?}"), &[]);
+                crate::log_error!("teste", "registro {}: {}", seq, e);
             }
             return Err("com alguem entrado, o comando nao foi gravado com o resumo");
         }
@@ -19685,6 +19735,9 @@ fn consoles_o_executado_sai_depois_da_decisao() -> Resultado {
     /// comando, e a chave que o comando não declara.
     const NAO_E_COMANDO: &str = "carambola-no-pe";
     const CHAVE_DE_QUEM_DIGITOU: &str = "graviola-madura";
+    /// O que se digitou, que os diagnósticos do caso não levam — ver
+    /// [`sem_segredo`].
+    const DIGITADOS: &[&str] = &[NAO_E_COMANDO, CHAVE_DE_QUEM_DIGITOU];
     let k = crate::pseudoterminal::donos()
         .iter()
         .position(Option::is_none)
@@ -19745,7 +19798,8 @@ fn consoles_o_executado_sai_depois_da_decisao() -> Resultado {
             let negado =
                 alloc::format!("negado: {metodo} (pessoa) em {em}: DENY_NOT_AUTHENTICATED");
             if !uma_e_so(&linhas, &negado, metodo) {
-                crate::log_error!("teste", "linhas: {:?}", linhas);
+                let linhas = sem_segredo(&alloc::format!("{linhas:?}"), DIGITADOS);
+                crate::log_error!("teste", "linhas: {}", linhas);
                 return Err("sem ninguem entrado, o log nao disse so o negado do comando");
             }
             if !nada_que_se_digitou(marca, NAO_E_COMANDO)? {
@@ -19771,7 +19825,8 @@ fn consoles_o_executado_sai_depois_da_decisao() -> Resultado {
             return Err("a recusa do keyboard.read nao foi gravada uma vez");
         };
         if recusa.codigo != Codigo::DenyPermission {
-            crate::log_error!("teste", "{:?}", recusa);
+            let recusa = sem_segredo(&alloc::format!("{recusa:?}"), DIGITADOS);
+            crate::log_error!("teste", "{}", recusa);
             return Err("o keyboard.read do operador nao foi DENY_PERMISSION");
         }
         let linhas = linhas_do_console_desde(marca)?;
@@ -19779,14 +19834,16 @@ fn consoles_o_executado_sai_depois_da_decisao() -> Resultado {
             "negado: keyboard.read (pessoa) em {em}: DENY_PERMISSION; registro {registro}"
         );
         if !uma_e_so(&linhas, &negado, "keyboard.read") {
-            crate::log_error!("teste", "linhas: {:?}", linhas);
+            let linhas = sem_segredo(&alloc::format!("{linhas:?}"), DIGITADOS);
+            crate::log_error!("teste", "linhas: {}", linhas);
             return Err("o comando negado pelo gate nao deixou so o negado no log");
         }
         let na_tela = tela();
         if !na_tela.contains("negado: Seu papel (operador) nao permite keyboard.read")
             || !na_tela.contains(&alloc::format!("(DENY_PERMISSION; registro {registro})"))
         {
-            crate::log_error!("teste", "tela: {:?}", na_tela);
+            let na_tela = sem_segredo(&alloc::format!("{na_tela:?}"), DIGITADOS);
+            crate::log_error!("teste", "tela: {}", na_tela);
             return Err("a frase da recusa do gate na tela mudou");
         }
 
@@ -19806,13 +19863,15 @@ fn consoles_o_executado_sai_depois_da_decisao() -> Resultado {
             crate::interpretador::confirmar_de_teste(console, &alloc::format!("log.tail {params}"));
             let gravados = registros_depois(antes, |e| e.metodo == "log.tail");
             if gravados.len() != 1 || gravados[0].1.codigo != Codigo::InvalidArgument {
-                crate::log_error!("teste", "{:?}", gravados);
+                let gravados = sem_segredo(&alloc::format!("{gravados:?}"), DIGITADOS);
+                crate::log_error!("teste", "{}", gravados);
                 return Err("o parametro invalido nao foi gravado uma vez");
             }
             let linhas = linhas_do_console_desde(marca)?;
             let invalido = alloc::format!("parametro invalido: log.tail (pessoa) em {em}: {campo}");
             if !uma_e_so(&linhas, &invalido, "log.tail") {
-                crate::log_error!("teste", "linhas: {:?}", linhas);
+                let linhas = sem_segredo(&alloc::format!("{linhas:?}"), DIGITADOS);
+                crate::log_error!("teste", "linhas: {}", linhas);
                 return Err("o parametro invalido nao deixou so a linha dele no log");
             }
             if !nada_que_se_digitou(marca, CHAVE_DE_QUEM_DIGITOU)? {
@@ -19831,13 +19890,15 @@ fn consoles_o_executado_sai_depois_da_decisao() -> Resultado {
         crate::interpretador::confirmar_de_teste(console, r#"log.tail {"count":16}"#);
         let gravados = registros_depois(antes, |e| e.metodo == "log.tail");
         if gravados.len() != 1 || gravados[0].1.codigo != Codigo::Allow {
-            crate::log_error!("teste", "{:?}", gravados);
+            let gravados = sem_segredo(&alloc::format!("{gravados:?}"), DIGITADOS);
+            crate::log_error!("teste", "{}", gravados);
             return Err("o log.tail permitido nao foi gravado uma vez");
         }
         let linhas = linhas_do_console_desde(marca)?;
         let executado = alloc::format!("executado: log.tail (pessoa) em {em}");
         if !uma_e_so(&linhas, &executado, "log.tail") {
-            crate::log_error!("teste", "linhas: {:?}", linhas);
+            let linhas = sem_segredo(&alloc::format!("{linhas:?}"), DIGITADOS);
+            crate::log_error!("teste", "linhas: {}", linhas);
             return Err("o comando permitido nao deixou so o executado no log");
         }
         if !tela().contains(&executado) {
@@ -19867,7 +19928,8 @@ fn consoles_o_executado_sai_depois_da_decisao() -> Resultado {
             }
             let linhas = linhas_do_console_desde(marca)?;
             if linhas.iter().any(|l| l.contains("net.send")) {
-                crate::log_error!("teste", "linhas: {:?}", linhas);
+                let linhas = sem_segredo(&alloc::format!("{linhas:?}"), DIGITADOS);
+                crate::log_error!("teste", "linhas: {}", linhas);
                 return Err("o envio adiado deixou linha no log antes de rodar");
             }
             if !registros_depois(cabeca, |e| e.metodo == "net.send").is_empty() {
@@ -19888,12 +19950,14 @@ fn consoles_o_executado_sai_depois_da_decisao() -> Resultado {
             let linhas = linhas_do_console_desde(marca)?;
             let executado = alloc::format!("executado: net.send (pessoa) em {em}");
             if !uma_e_so(&linhas, &executado, "net.send") {
-                crate::log_error!("teste", "linhas: {:?}", linhas);
+                let linhas = sem_segredo(&alloc::format!("{linhas:?}"), DIGITADOS);
+                crate::log_error!("teste", "linhas: {}", linhas);
                 return Err("o envio adiado nao deixou um executado so, o da reexecucao");
             }
             let gravados = registros_depois(h, |e| e.metodo == "net.send");
             if gravados.len() != 1 || gravados[0].1.codigo != Codigo::Allow {
-                crate::log_error!("teste", "{:?}", gravados);
+                let gravados = sem_segredo(&alloc::format!("{gravados:?}"), DIGITADOS);
+                crate::log_error!("teste", "{}", gravados);
                 return Err("a reexecucao do envio adiado nao foi uma decisao nova do gate");
             }
             if ler_da_conexao(quem, c, 6)? != b"adiado" {
@@ -19957,7 +20021,8 @@ fn consoles_a_senha_com_algo_na_linha_sem_ninguem_e_a_mesma_recusa() -> Resultad
             let registros = registros_depois(antes, |_| true);
             let [(_, e)] = registros.as_slice() else {
                 for (seq, e) in &registros {
-                    crate::log_error!("teste", "registro {}: {:?}", seq, e);
+                    let e = sem_segredo(&alloc::format!("{e:?}"), &[]);
+                    crate::log_error!("teste", "registro {}: {}", seq, e);
                 }
                 return Err("a troca da propria senha sem ninguem nao gravou um registro so");
             };
@@ -19967,7 +20032,7 @@ fn consoles_a_senha_com_algo_na_linha_sem_ninguem_e_a_mesma_recusa() -> Resultad
                 || e.recurso != Console::Fisico.texto()
                 || e.parametros != vazio
             {
-                crate::log_error!("teste", "{:?}", e);
+                crate::log_error!("teste", "{}", sem_segredo(&alloc::format!("{e:?}"), &[]));
                 return Err(
                     "a troca da propria senha sem ninguem nao foi a recusa de antes do login",
                 );
@@ -20127,7 +20192,7 @@ fn consoles_login_e_logout() -> Resultado {
             let (console, _) = console_da_arvore(&arvore)?;
             let texto = texto_do_console(&console)?;
             if texto.contains("cavalo") || !texto.contains("ola, ana") {
-                crate::log_error!("teste", "{}", texto);
+                crate::log_error!("teste", "{}", sem_segredo(&texto, &[]));
                 return Err("a senha apareceu na tela, ou a saudacao nao");
             }
         }
@@ -20149,7 +20214,7 @@ fn consoles_login_e_logout() -> Resultado {
             || r.papel != "operador"
             || !r.codigo.permite()
         {
-            crate::log_error!("teste", "{:?}", r);
+            crate::log_error!("teste", "{}", sem_segredo(&alloc::format!("{r:?}"), &[]));
             return Err("o comando da pessoa nao foi gravado como dela");
         }
         // O que o papel não deixa, ela não faz.
