@@ -18470,6 +18470,19 @@ dentro da guarda. O último job foi o dos fluxos entre dispositivos (x86_64
 e aarch64), que esperou 40,6 minutos na fila e rodou 31,1; o maior, a
 persistência do x86, parte 2/3, com 53,8.
 
+A CI 544 (`16a0c64`, o lote A14 e os parágrafos das CIs 542 e 543) passou
+verde, 48 de 48, na primeira tentativa, em 72,5 minutos e 1095 de máquina.
+Foi a primeira rodada no runner do `git` da ação sem o ambiente do job —
+só o PATH, sem a configuração global e a do sistema, com o git 2.56.1 da
+imagem —, e os passos do ambiente e da conferência passaram nos 48 jobs: a
+ação levou de 14 a 21 s em 47 deles, e 77 s no job de lints, com as
+invariantes e as regras novas do lote contra os workflows de verdade. O
+holdover da bancada de tempo, na parte 3/3: o x86 a -92 ppm (2056 s em
+2056) e o ARM a -8 ppm (2056 s em 2056), os dois dentro da guarda. O
+último job foi o dos fluxos entre dispositivos (mesma arquitetura), que
+esperou 39,5 minutos na fila e rodou 26,1; o maior, a tela da virtio-gpu
+do x86, parte 2/2, com 48,5.
+
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na
 508 e 58 na 509 —, e o que sobra até o piso é a ordem da fila, que não se
