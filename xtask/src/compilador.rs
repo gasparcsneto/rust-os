@@ -66,8 +66,9 @@
 //!   o escolhem pelo job: nenhum `container:`, o `env:` do workflow e o dos
 //!   jobs numa lista fechada, nenhum `GITHUB_ENV`, e o checkout só do
 //!   commit ([`o_que_o_job_escolhe`]); e, desde o lote A15, nem os comandos
-//!   do runner que escrevem nele ([`COMANDOS_DO_RUNNER`]) — e conferem o
-//!   compilador
+//!   do runner que escrevem nele ([`COMANDOS_DO_RUNNER`]), e os dois
+//!   primeiros passos de cada job são o checkout e a ação
+//!   ([`o_comeco_dos_jobs`]) — e conferem o compilador
 //!   — a ação `.github/actions/compilador`, num passo sem `if:` nem
 //!   `continue-on-error:`, que, desde o lote A12, a leitura lê inteiro e
 //!   falha fechada ([`linhas_que_o_passo_nao_le`]) — depois de cada
@@ -2289,7 +2290,8 @@ fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str>
 /// workflow e o de cada job só têm os nomes de [`VARIAVEIS_DOS_JOBS`]
 /// ([`o_que_o_job_escolhe`]), nenhum passo escreve no `GITHUB_ENV`
 /// ([`SOBREPOSICOES`]), e o checkout só tem as chaves de
-/// [`CHAVES_DO_CHECKOUT`]. O canário
+/// [`CHAVES_DO_CHECKOUT`]; e, desde o lote A15, os dois primeiros passos de
+/// cada job são o checkout e a ação ([`o_comeco_dos_jobs`]). O canário
 /// sobrepõe, mas não roda nos pushes, não usa o cache nem publica a
 /// proveniência. As ações locais seguem a leitura que falha fechada, abaixo,
 /// e as regras dos workflows oficiais que leem o texto de cada linha — as
@@ -2459,6 +2461,9 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
         // compilador confere não depende de um programa nem de um commit que
         // o workflow escolhe.
         fora.extend(o_que_o_job_escolhe(nome, &linhas));
+        // Os dois primeiros passos de cada job são o checkout e a ação (desde
+        // o lote A15): nenhum outro passo do job roda antes dela.
+        fora.extend(o_comeco_dos_jobs(nome, &linhas));
 
         let mut pendente = false;
         for (i, l) in linhas.iter().enumerate() {
@@ -2623,6 +2628,82 @@ fn o_que_o_job_escolhe(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
                     d.texto
                 )),
             }
+        }
+    }
+    fora
+}
+
+/// Os jobs de um workflow oficial — `nome`, e `linhas`, as de código dele —
+/// começam pelo checkout e pela conferência do compilador: os dois
+/// primeiros itens do `steps:` de cada um ([`passos_do_job`]) são o
+/// `actions/checkout` e a ação `./.github/actions/compilador`. Um workflow
+/// sem o `jobs:` em bloco, ou com um job sem os dois, reprova.
+///
+/// # Por quê, desde o lote A15
+///
+/// A ordem ([`conferir_os_workflows`]) começava no primeiro checkout, e só
+/// recusava, entre ele e a ação, o cache e uma linha com o `cargo`. Passavam,
+/// e escolhiam o programa que a ação roda, o commit dela ou o que ela
+/// confere — ou a dispensavam —: um passo antes do checkout — o cache que
+/// restaura o `~/.rustup`, fora da árvore, que o checkout não apaga, com o
+/// canal da chave ainda vazio; um `run:` que troca o `/usr/bin/python3` —;
+/// um entre o checkout e a ação — o `git checkout` da pasta da ação de
+/// outro commit, um toolchain com o nome do oficial no `~/.rustup`, o
+/// `core.fsmonitor` no `.git/config`, que o `git` dela ainda lê, um script
+/// do repositório —; e um job sem o `actions/checkout`, que clona o
+/// repositório e roda o `cargo` sem a ação (o M2 do adversário do lote
+/// A14). Os jobs da CI já começavam assim, e a regra tira do job todo passo
+/// antes da ação — a classe que o texto dava como da revisão —; um job sem
+/// código — sem o checkout — pede a regra revisada.
+fn o_comeco_dos_jobs(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
+    let Some(jobs) = linhas
+        .iter()
+        .position(|l| !l.escalar && l.recuo == 0 && chave_e_valor(l.texto) == Some(("jobs", "")))
+    else {
+        return vec![format!(
+            "{nome}: sem o `jobs:` em bloco, que a leitura lê — os jobs dos workflows oficiais \
+             começam pelo checkout e pela conferência do compilador"
+        )];
+    };
+    // Os jobs: as chaves do `jobs:`, na coluna da primeira linha de dentro,
+    // até a próxima chave da raiz.
+    let fim_dos_jobs = (jobs + 1..linhas.len())
+        .find(|&k| !linhas[k].escalar && !linhas[k].texto.is_empty() && linhas[k].recuo == 0)
+        .unwrap_or(linhas.len());
+    let dentro: Vec<usize> = (jobs + 1..fim_dos_jobs)
+        .filter(|&k| !linhas[k].escalar && !linhas[k].texto.is_empty())
+        .collect();
+    let Some(coluna) = dentro.first().map(|&k| linhas[k].recuo) else {
+        return Vec::new();
+    };
+    let comecos: Vec<usize> = dentro
+        .into_iter()
+        .filter(|&k| linhas[k].recuo == coluna)
+        .collect();
+    let mut fora = Vec::new();
+    for (n, &comeco) in comecos.iter().enumerate() {
+        let job = &linhas[comeco..comecos.get(n + 1).copied().unwrap_or(fim_dos_jobs)];
+        let passos = passos_do_job(job);
+        // A ação que o passo `p` usa: o `uses:` dele, sem a versão.
+        let usa = |p: Option<&usize>| {
+            p.and_then(|&p| {
+                chaves_do_item(job, p)
+                    .into_iter()
+                    .find(|c| c.chave == "uses")
+                    .map(|c| nome_da_acao(c.valor))
+            })
+        };
+        if usa(passos.first()) != Some("actions/checkout")
+            || usa(passos.get(1)) != Some("./.github/actions/compilador")
+        {
+            fora.push(format!(
+                "{nome}: o job `{}` não começa pelo checkout e pela conferência do compilador — os \
+                 dois primeiros passos de um job oficial são o `actions/checkout` e a ação \
+                 `./.github/actions/compilador`: um passo antes dela — um cache do `~/.rustup`, um \
+                 `run:` — escolhe o programa que ela roda, o commit dela ou o que ela confere, e \
+                 um job sem o checkout roda sem ela",
+                chave_e_valor(linhas[comeco].texto).map_or(linhas[comeco].texto, |(c, _)| c)
+            ));
         }
     }
     fora
@@ -6798,6 +6879,172 @@ jobs:
         assert_eq!(conferir_a_acao(ACAO), Vec::<String>::new());
     }
 
+    /// Os jobs começam pelo checkout e pela ação (o M2 do adversário do lote
+    /// A14): um passo entre o checkout e a ação — o `git checkout` da pasta
+    /// dela de outro commit, um toolchain com o nome do oficial, o
+    /// `core.fsmonitor`, um script do repositório —, um antes do checkout — o
+    /// cache do `~/.rustup`, um `run:` com o `sudo` —, um job sem o checkout,
+    /// que clona e roda o `cargo`, um job só com o checkout, um job sem passos
+    /// e um workflow sem o `jobs:` passavam pela ordem; cada um reprova, uma
+    /// vez, com o nome do job — também a ação logo depois de um clone, sem o
+    /// checkout. E, na revisão do lote A15, o checkout num bloco `parallel:`,
+    /// e o checkout ou a conferência com `background: true`, reprovam, cada
+    /// um pela regra dele. O nome no checkout, um segundo job que começa pelos
+    /// dois, uma chave da raiz depois do `jobs:` e os workflows do repositório
+    /// passam.
+    #[test]
+    fn adversario_a14_os_jobs_comecam_pelo_checkout_e_pela_acao() {
+        let checkout = "      - uses: actions/checkout@v4\n";
+        let passos = "    steps:\n";
+        assert_eq!(OFICIAL.matches(checkout).count(), 1);
+        assert_eq!(OFICIAL.matches(passos).count(), 1);
+        let entre = |passo: &str| OFICIAL.replacen(checkout, &format!("{checkout}{passo}"), 1);
+        let antes = |passo: &str| OFICIAL.replacen(passos, &format!("{passos}{passo}"), 1);
+        let testes = "o job `testes` não começa pelo checkout e pela conferência do compilador";
+        let outro = "o job `outro` não começa pelo checkout e pela conferência do compilador";
+        let casos: Vec<(&str, String, &str)> = vec![
+            (
+                "a ação de outro commit",
+                entre("      - run: git checkout FETCH_HEAD -- .github/actions/compilador\n"),
+                testes,
+            ),
+            (
+                "um toolchain com o nome do oficial",
+                entre(
+                    "      - run: mkdir -p ~/.rustup/toolchains/nightly-2026-11-15-x86_64-unknown-linux-gnu\n",
+                ),
+                testes,
+            ),
+            (
+                "o fsmonitor no .git/config",
+                entre("      - run: git config core.fsmonitor ./ferramentas/monitor\n"),
+                testes,
+            ),
+            (
+                "um script do repositório",
+                entre("      - name: Preparar\n        run: ./ferramentas/preparar.sh\n"),
+                testes,
+            ),
+            (
+                "o cache do rustup antes do checkout",
+                antes(
+                    "      - uses: actions/cache@v4\n        with:\n          path: ~/.rustup\n          \
+                     key: rustup-${{ steps.compilador.outputs.canal }}\n",
+                ),
+                testes,
+            ),
+            (
+                "o sudo antes do checkout",
+                antes("      - run: sudo install -m 0755 /dev/stdin /usr/bin/python3\n"),
+                testes,
+            ),
+            (
+                "um job sem o checkout",
+                format!(
+                    "{OFICIAL}  outro:\n    steps:\n      - run: git clone https://github.com/x/y . && \
+                     cargo xtask test\n"
+                ),
+                outro,
+            ),
+            (
+                "um job só com o checkout",
+                format!("{OFICIAL}  outro:\n    steps:\n      - uses: actions/checkout@v4\n"),
+                outro,
+            ),
+            (
+                "a ação depois de um clone, sem o checkout",
+                format!(
+                    "{OFICIAL}  outro:\n    steps:\n      - run: git clone --branch outro \
+                     https://github.com/x/y .\n      - id: compilador\n        uses: \
+                     ./.github/actions/compilador\n"
+                ),
+                outro,
+            ),
+            (
+                "um job sem passos",
+                format!("{OFICIAL}  outro:\n    runs-on: ubuntu-latest\n"),
+                outro,
+            ),
+            (
+                "um workflow sem o jobs",
+                OFICIAL.replacen("jobs:\n", "trabalhos:\n", 1),
+                "sem o `jobs:` em bloco",
+            ),
+            // Na revisão do lote A15, os passos que o esquema dos workflows
+            // ganhou — o bloco `parallel:`, que roda os passos dele juntos, e
+            // o `background:`, que segue sem esperar o passo —: o primeiro
+            // passo não é o checkout, ou um dos dois tem uma chave que a
+            // regra dele não aceita.
+            (
+                "o checkout num bloco parallel, com um script",
+                OFICIAL.replacen(
+                    checkout,
+                    "      - parallel:\n          - uses: actions/checkout@v4\n          - run: \
+                     ./ferramentas/preparar.sh\n",
+                    1,
+                ),
+                testes,
+            ),
+            (
+                "o checkout em segundo plano",
+                OFICIAL.replacen(
+                    checkout,
+                    &format!("{checkout}        background: true\n"),
+                    1,
+                ),
+                "`background: true` no checkout",
+            ),
+            (
+                "a conferência em segundo plano",
+                OFICIAL.replacen(
+                    "        uses: ./.github/actions/compilador\n",
+                    "        uses: ./.github/actions/compilador\n        background: true\n",
+                    1,
+                ),
+                "`background: true` no passo da conferência do compilador",
+            ),
+        ];
+        let mut cegos = Vec::new();
+        for (rotulo, texto, esperado) in &casos {
+            assert_ne!(texto, OFICIAL, "{rotulo}");
+            let fora = um(CI, texto);
+            if fora.iter().filter(|f| f.contains(*esperado)).count() != 1 {
+                cegos.push(format!("{rotulo}: {fora:#?}"));
+            }
+        }
+        assert!(cegos.is_empty(), "{cegos:#?}");
+        // Passam: o nome no checkout, e um segundo job que começa pelos dois.
+        for texto in [
+            OFICIAL.replacen(
+                checkout,
+                "      - name: O checkout\n        uses: actions/checkout@v4\n",
+                1,
+            ),
+            format!(
+                "{OFICIAL}  outro:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: \
+                 actions/checkout@v4\n      - id: compilador\n        uses: \
+                 ./.github/actions/compilador\n      - run: cargo xtask fumaca\n"
+            ),
+            format!("{OFICIAL}env:\n  RUST_BACKTRACE: 1\n"),
+        ] {
+            assert_ne!(texto, OFICIAL);
+            assert_eq!(um(CI, &texto), Vec::<String>::new(), "{texto}");
+        }
+        // Os workflows do repositório passam.
+        for (nome, texto) in [
+            (CI, include_str!("../../.github/workflows/ci.yml")),
+            (
+                ".github/workflows/rede-principal.yml",
+                include_str!("../../.github/workflows/rede-principal.yml"),
+            ),
+        ] {
+            assert_eq!(
+                o_comeco_dos_jobs(nome, &linhas_de_codigo(texto)),
+                Vec::<String>::new()
+            );
+        }
+    }
+
     /// O passo da ação como o texto de um bloco (no lote A13, o M2 do
     /// adversário do lote A12): o `-`, o `id: compilador` e o `uses:` da ação
     /// no conteúdo de um escalar em bloco — numa entrada do `with:` do
@@ -6859,13 +7106,22 @@ jobs:
             [false, false, true, true, true, false]
         );
         // O controle: um bloco com um item que não é o da ação, antes do
-        // passo de verdade, passa.
-        let com_bloco = OFICIAL.replacen(
-            checkout,
-            &format!("{checkout}      - name: Lista\n        run: |\n          - item: x\n            outro: y\n"),
-            1,
+        // passo de verdade, não é lido como o passo — desde o lote A15, um
+        // passo antes da ação reprova pela ordem dos jobs
+        // ([`o_comeco_dos_jobs`]), e só por ela —; e, depois da ação, passa.
+        let lista =
+            "      - name: Lista\n        run: |\n          - item: x\n            outro: y\n";
+        let com_bloco = OFICIAL.replacen(checkout, &format!("{checkout}{lista}"), 1);
+        let fora = um(nome, &com_bloco);
+        assert!(
+            fora.len() == 1
+                && fora[0].contains("o job `testes` não começa pelo checkout e pela conferência"),
+            "{fora:#?}"
         );
-        assert_eq!(um(nome, &com_bloco), Vec::<String>::new());
+        let cache = "      - name: Cache do cargo\n";
+        assert_eq!(OFICIAL.matches(cache).count(), 1);
+        let depois = OFICIAL.replacen(cache, &format!("{lista}{cache}"), 1);
+        assert_eq!(um(nome, &depois), Vec::<String>::new());
     }
 
     /// As formas que a leitura não lê, no arquivo inteiro (no lote A13, o M3
