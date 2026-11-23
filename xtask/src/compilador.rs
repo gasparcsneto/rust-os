@@ -1650,8 +1650,8 @@ pub(crate) fn conferir_o_canal() -> Result<ExitCode, String> {
              e a ação do compilador com os passos de fora do cargo — o ambiente, o PATH e os \
              rust-toolchain, o canal fixado, o executor — e o das invariantes, que o job de lints \
              liga antes de todo outro `cargo`; e o canário, o único que sobrepõe, só no \
-             agendamento e no disparo manual, sem a ação do cache, com as versões da lista e com \
-             os comandos do job de lints",
+             agendamento e no disparo manual, sem a ação do cache e com o `cache-mode: none`, com \
+             as versões da lista e com os comandos do job de lints",
             canal.as_deref().unwrap_or("")
         );
         Ok(ExitCode::SUCCESS)
@@ -2709,6 +2709,8 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
                 ));
             }
             fora.extend(gatilhos_fora_da_lista(nome, &linhas));
+            // Sem cache nenhum, pelo token do job (desde o lote A17).
+            fora.extend(o_modo_do_cache_do_canario(nome, &linhas));
             continue;
         }
 
@@ -4061,6 +4063,55 @@ fn gatilhos_fora_da_lista(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
             "{nome}: nenhum `on:` na coluna zero — a regra lê os gatilhos do canário no `on:` da \
              raiz, na coluna zero; uma raiz recuada, que o YAML lê igual, os esconde dela"
         ));
+    }
+    fora
+}
+
+/// O modo do cache do canário — `linhas`, as de código dele —: o
+/// `cache-mode: none` na raiz, uma vez, e nenhuma outra chave `cache-mode` —
+/// a de um job (`jobs.<id>.cache-mode`) troca o da raiz para ele. Fora do
+/// conteúdo dos blocos, em qualquer coluna.
+///
+/// # Por quê, desde o lote A17
+///
+/// O cache do GitHub é do ramo, e não do workflow: um passo do canário que
+/// gravasse um cache no ramo em que roda — uma ação, o código do
+/// repositório ou o compilador candidato — o deixaria para os jobs da CI
+/// oficial restaurarem (o M2 do adversário do lote A15), e o que o impedia
+/// era só a falta da ação do cache no canário, que diz o que os passos
+/// escolhem. A documentação do GitHub diz que o modo vale pelo token de
+/// cache que o job recebe ("enforced with scoped cache tokens") e que, com
+/// `none`, nenhum passo restaura nem grava; que o GitHub aceita a chave, o
+/// run 5 do canário confirmou — o `abd9253` a pôs na raiz, e o job rodou —;
+/// que o token do job fica sem cache, não se rodou. A regra confere a chave,
+/// e não o efeito.
+fn o_modo_do_cache_do_canario(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
+    let mut na_raiz = Vec::new();
+    let mut fora = Vec::new();
+    for l in linhas.iter().filter(|l| !l.escalar) {
+        let Some(("cache-mode", valor)) = chave_e_valor(l.texto) else {
+            continue;
+        };
+        if l.recuo == 0 {
+            na_raiz.push(sem_aspas(valor));
+        } else {
+            fora.push(format!(
+                "{nome}: `{}` — um `cache-mode` fora da raiz: o de um job troca o da raiz para \
+                 ele, e o canário fica sem cache nenhum (`cache-mode: none`, só na raiz)",
+                l.texto
+            ));
+        }
+    }
+    if na_raiz != ["none"] {
+        fora.insert(
+            0,
+            format!(
+                "{nome}: o canário sem o `cache-mode: none` na raiz, uma vez (achados: {na_raiz:?}) \
+                 — o cache do GitHub é do ramo, e um passo do canário que gravasse um cache o \
+                 deixaria para os jobs da CI oficial; com `none`, o token de cache do job não \
+                 restaura nem grava"
+            ),
+        );
     }
     fora
 }
@@ -8944,6 +8995,7 @@ jobs:
     fn o_canario_sobrepoe_mas_sem_o_cache_da_ci_nem_a_proveniencia() {
         let canario = "\
 on: workflow_dispatch
+cache-mode: none
 jobs:
   canario:
     env:
@@ -9073,7 +9125,7 @@ jobs:
 
     #[test]
     fn o_canario_nao_roda_nos_pushes() {
-        let base = "on:\n  schedule:\n    - cron: '17 4 * * 1'\n  workflow_dispatch:\njobs:\n  canario:\n    steps:\n      - uses: actions/checkout@v4\n";
+        let base = "on:\n  schedule:\n    - cron: '17 4 * * 1'\n  workflow_dispatch:\ncache-mode: none\njobs:\n  canario:\n    steps:\n      - uses: actions/checkout@v4\n";
         assert_eq!(um(CANARIO, base), Vec::<String>::new());
         let com_push = base.replace(
             "  workflow_dispatch:\n",
@@ -9429,7 +9481,7 @@ jobs:
     /// manual passam, nas formas do `on:`, e o canário do repositório também.
     #[test]
     fn adversario_a15_os_gatilhos_do_canario() {
-        let base = "on:\n  schedule:\n    - cron: '17 4 * * 1'\n  workflow_dispatch:\njobs:\n  canario:\n    steps:\n      - uses: actions/checkout@v4\n";
+        let base = "on:\n  schedule:\n    - cron: '17 4 * * 1'\n  workflow_dispatch:\ncache-mode: none\njobs:\n  canario:\n    steps:\n      - uses: actions/checkout@v4\n";
         let on = "on:\n  schedule:\n    - cron: '17 4 * * 1'\n  workflow_dispatch:\n";
         assert_eq!(um(CANARIO, base), Vec::<String>::new());
         for (rotulo, novo, gatilho) in [
@@ -9492,13 +9544,13 @@ jobs:
     /// O canário com a raiz recuada (o B1 do adversário do lote A16, a pista
     /// do revisor da rodada 9): as chaves de cima na coluna dois são o mesmo
     /// YAML, e a regra dos gatilhos não achava o `on:`, nem o `push:` dele.
-    /// Reprova agora duas vezes — pela leitura, a raiz fora da coluna zero, e
-    /// pela regra dos gatilhos, nenhum `on:` na coluna zero —, com o `push:`
-    /// ou sem ele, e também depois de um `---`; o canário do repositório
-    /// passa.
+    /// Reprova agora pela leitura — a raiz fora da coluna zero — e pela regra
+    /// dos gatilhos — nenhum `on:` na coluna zero —, uma vez cada, com o
+    /// `push:` ou sem ele, e também depois de um `---` (e, recuado, o
+    /// `cache-mode` sai da raiz); o canário do repositório passa.
     #[test]
     fn adversario_a16_o_canario_com_a_raiz_recuada() {
-        let base = "on:\n  schedule:\n    - cron: '17 4 * * 1'\n  workflow_dispatch:\njobs:\n  canario:\n    steps:\n      - uses: actions/checkout@v4\n";
+        let base = "on:\n  schedule:\n    - cron: '17 4 * * 1'\n  workflow_dispatch:\ncache-mode: none\njobs:\n  canario:\n    steps:\n      - uses: actions/checkout@v4\n";
         let recuar = |texto: &str| -> String {
             texto
                 .lines()
@@ -9516,10 +9568,18 @@ jobs:
             ),
         ] {
             let fora = um(CANARIO, &texto);
-            assert_eq!(fora.len(), 2, "{rotulo}: {fora:#?}");
+            for regra in [
+                "a raiz do documento fora da coluna zero",
+                "nenhum `on:` na coluna zero",
+            ] {
+                assert_eq!(
+                    fora.iter().filter(|f| f.contains(regra)).count(),
+                    1,
+                    "{rotulo}: {regra}: {fora:#?}"
+                );
+            }
             assert!(
-                fora[0].contains("a raiz do documento fora da coluna zero")
-                    && fora[1].contains("nenhum `on:` na coluna zero"),
+                !fora.iter().any(|f| f.contains("o canário roda em")),
                 "{rotulo}: {fora:#?}"
             );
         }
@@ -9539,6 +9599,57 @@ jobs:
                 .iter()
                 .any(|f| f.contains("coluna zero"))
         );
+    }
+
+    /// O canário sem cache nenhum (o lote A17, a recomendação do M2 do
+    /// adversário do lote A15, depois do run 5 do canário): o canário do
+    /// repositório tem o `cache-mode: none` na raiz, e passa — também com a
+    /// chave entre aspas ou com um comentário. Sem ela, com outro valor, com
+    /// duas na raiz e com a de um job (`jobs.<id>.cache-mode`), reprova uma
+    /// vez, pela regra do modo do cache.
+    #[test]
+    fn o_canario_sem_cache_nenhum() {
+        let canario = include_str!("../../.github/workflows/canario.yml");
+        let modo = "cache-mode: none\n";
+        assert_eq!(canario.matches(modo).count(), 1);
+        assert!(
+            !um(CANARIO, canario)
+                .iter()
+                .any(|f| f.contains("cache-mode")),
+            "{:#?}",
+            um(CANARIO, canario)
+        );
+        let job = "    timeout-minutes: 150\n";
+        assert_eq!(canario.matches(job).count(), 1);
+        for (rotulo, texto) in [
+            ("sem a chave", canario.replacen(modo, "", 1)),
+            (
+                "com outro valor",
+                canario.replacen(modo, "cache-mode: write\n", 1),
+            ),
+            (
+                "duas na raiz",
+                canario.replacen(modo, "cache-mode: none\ncache-mode: read\n", 1),
+            ),
+            (
+                "a de um job",
+                canario.replacen(job, "    timeout-minutes: 150\n    cache-mode: write\n", 1),
+            ),
+        ] {
+            assert_ne!(texto, canario, "{rotulo}");
+            let fora = um(CANARIO, &texto);
+            assert!(
+                fora.len() == 1 && fora[0].contains("cache-mode"),
+                "{rotulo}: {fora:#?}"
+            );
+        }
+        for passa in ["cache-mode: 'none'\n", "cache-mode: none # sem cache\n"] {
+            assert_eq!(
+                um(CANARIO, &canario.replacen(modo, passa, 1)),
+                Vec::<String>::new(),
+                "{passa}"
+            );
+        }
     }
 
     /// A raiz na coluna zero, em todo workflow e ação (o lote A17, a forma
