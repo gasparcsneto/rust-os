@@ -117,8 +117,9 @@
 //!     no `with:` do primeiro passo do `steps:` dele que usa a ação
 //!     ([`as_invariantes_na_acao`]);
 //!   - o canário, o único que sobrepõe — ele testa o candidato —, não roda
-//!     nos pushes, não usa o cache da CI, não publica proveniência e repete
-//!     os comandos do job de lints;
+//!     nos pushes, não usa a ação do cache, só usa as ações dele nas versões
+//!     de [`USOS_OFICIAIS`] (desde o lote A16), não publica proveniência e
+//!     repete os comandos do job de lints;
 //! - **no `cargo xtask compilador`** ([`relatar`]): o canal, o toolchain
 //!   ativo, o `rustc -Vv` completo, o `cargo -V` e os desvios — o que todo
 //!   relatório de validação cita.
@@ -475,13 +476,15 @@ const ACOES_OFICIAIS: [&str; 4] = [
     "./.github/actions/compilador",
 ];
 
-/// As do canário: sem o cache da CI nem a conferência do oficial.
+/// As do canário: sem a ação do cache nem a conferência do oficial — e,
+/// desde o lote A16, só nas versões de [`USOS_OFICIAIS`], como nos
+/// workflows oficiais.
 const ACOES_DO_CANARIO: [&str; 2] = ["actions/checkout", "actions/upload-artifact"];
 
-/// O `uses:` inteiro — a ação com a versão — que os workflows oficiais e as
-/// ações locais usam, a lista fechada ([`conferir_os_workflows`]): as de
-/// [`ACOES_OFICIAIS`] nas versões de hoje. Uma versão nova entra aqui, de
-/// propósito, com a revisão.
+/// O `uses:` inteiro — a ação com a versão — que os workflows oficiais, as
+/// ações locais e, desde o lote A16, o canário usam, a lista
+/// fechada ([`conferir_os_workflows`]): as de [`ACOES_OFICIAIS`] nas versões
+/// de hoje. Uma versão nova entra aqui, de propósito, com a revisão.
 ///
 /// # Por quê, desde o lote A15
 ///
@@ -495,6 +498,22 @@ const ACOES_DO_CANARIO: [&str; 2] = ["actions/checkout", "actions/upload-artifac
 /// começo do job, antes de todo passo (o M4 do adversário do lote A14; o
 /// efeito no GitHub não foi rodado aqui). A etiqueta da lista (`@v4`) é a do
 /// próprio repositório da ação, e quem a move é o dono dele.
+///
+/// # O canário, desde o lote A16
+///
+/// O lote A15 deixou o canário de fora: ele não tem a conferência do
+/// compilador, e testa outro. Mas o cache do GitHub é do repositório e do
+/// ramo, e não do workflow: o canário roda no agendamento e no disparo
+/// manual, que, pela documentação do GitHub, gravam no escopo do ramo
+/// padrão — ou no do ramo disparado —, e os jobs da CI restauram de lá, pela
+/// chave de cada um e pelo prefixo das chaves de restauração; e toda ação
+/// JavaScript recebe o token do job, com que se grava no cache (o
+/// `NodeScriptActionHandler` do runner). O checkout do canário por um commit
+/// de um fork gravaria, com a chave de um job da CI, o `target/` ou o
+/// `~/.cargo` que esse job restaura depois da conferência dele — o mesmo M4,
+/// por outro workflow (o M2 do adversário do lote A15; o efeito no GitHub
+/// não foi rodado aqui). As versões valem também no canário; o nome, ele
+/// segue na lista dele ([`ACOES_DO_CANARIO`]).
 const USOS_OFICIAIS: [&str; 4] = [
     "actions/checkout@v4",
     "actions/cache@v4",
@@ -1605,7 +1624,8 @@ pub(crate) fn conferir_o_canal() -> Result<ExitCode, String> {
              e a ação do compilador com os passos de fora do cargo — o ambiente, o PATH e os \
              rust-toolchain, o canal fixado, o executor — e o das invariantes, que o job de lints \
              liga antes de todo outro `cargo`; e o canário, o único que sobrepõe, fora dos \
-             pushes, sem o cache da CI e com os comandos do job de lints",
+             pushes, sem a ação do cache, com as versões da lista e com os comandos do job de \
+             lints",
             canal.as_deref().unwrap_or("")
         );
         Ok(ExitCode::SUCCESS)
@@ -2402,8 +2422,10 @@ fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str>
 /// pasta da ação escapavam delas (o M1 e o M2 do adversário do lote A14).
 /// Cada regra pega as formas que ela lê; o resto da definição da CI é da
 /// revisão. O canário
-/// sobrepõe, mas não roda nos pushes, não usa o cache nem publica a
-/// proveniência. As ações locais seguem a leitura que falha fechada, abaixo,
+/// sobrepõe, mas não roda nos pushes, não usa a ação do cache nem publica a
+/// proveniência, e, desde o lote A16, só usa as ações dele nas versões de
+/// [`USOS_OFICIAIS`]. As ações locais seguem a leitura que falha
+/// fechada, abaixo,
 /// e as regras dos workflows oficiais que leem o texto de cada linha — as
 /// ações permitidas, as sobreposições, a escrita num `rust-toolchain` e a
 /// leitura do passo que usa a ação —, e não as de um workflow: a ordem, a
@@ -2489,13 +2511,16 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
                         nome_da_acao(valor),
                         permitidas.join(", ")
                     ));
-                } else if !canario && !USOS_OFICIAIS.contains(&sem_aspas(valor)) {
-                    // A versão também, desde o lote A15.
+                } else if !USOS_OFICIAIS.contains(&sem_aspas(valor)) {
+                    // A versão também, desde o lote A15 — e, desde o lote
+                    // A16, no canário.
                     fora.push(format!(
                         "{nome}: `{}` — a versão de uma ação permitida fora da lista ({}): um \
                          commit (`@<sha>`) pode ser de um fork da rede do repositório da ação, e o \
                          checkout, ou o `pre:` de uma ação JavaScript, roda antes da conferência do \
-                         compilador; uma versão nova entra na lista, revisada",
+                         compilador; e toda ação JavaScript recebe o token do job, que grava no \
+                         cache que os jobs da CI restauram — também a do canário. Uma versão nova \
+                         entra na lista, revisada",
                         sem_aspas(valor),
                         USOS_OFICIAIS.join(", ")
                     ));
@@ -8230,5 +8255,69 @@ jobs:
         let erro = arquivos_do_repositorio(&arvore).expect_err("o caminho que não é UTF-8");
         assert!(erro.contains("não é UTF-8"), "{erro}");
         let _ = std::fs::remove_dir_all(&arvore);
+    }
+
+    /// As versões das ações no canário (o M2 do adversário do lote A15): o
+    /// lote A15 o deixou de fora da lista das versões, e o checkout ou a
+    /// publicação dele por um commit — que pode ser de um fork — ou por um
+    /// ramo passavam; o canário grava no cache do ramo em que roda, que os
+    /// jobs da CI restauram. Reprovam agora, uma vez cada, pela regra das
+    /// versões; o canário do repositório passa, e o nome de uma ação fora da
+    /// lista dele continua reprovando pela regra do nome.
+    #[test]
+    fn adversario_a15_as_versoes_do_canario() {
+        let canario = include_str!("../../.github/workflows/canario.yml");
+        let checkout = "        uses: actions/checkout@v4\n";
+        let publicacao = "        uses: actions/upload-artifact@v4\n";
+        assert_eq!(canario.matches(checkout).count(), 1);
+        assert_eq!(canario.matches(publicacao).count(), 1);
+        let versao = "a versão de uma ação permitida fora da lista";
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        for (rotulo, texto, esperado) in [
+            (
+                "o checkout por um commit",
+                canario.replacen(
+                    checkout,
+                    &format!("        uses: actions/checkout@{commit}\n"),
+                    1,
+                ),
+                format!("`actions/checkout@{commit}` — "),
+            ),
+            (
+                "a publicação por um commit",
+                canario.replacen(
+                    publicacao,
+                    &format!("        uses: actions/upload-artifact@{commit}\n"),
+                    1,
+                ),
+                format!("`actions/upload-artifact@{commit}` — "),
+            ),
+            (
+                "o checkout por um ramo",
+                canario.replacen(checkout, "        uses: actions/checkout@main\n", 1),
+                String::from("`actions/checkout@main` — "),
+            ),
+        ] {
+            assert_ne!(texto, canario, "{rotulo}");
+            let fora = um(CANARIO, &texto);
+            assert_eq!(
+                fora.iter()
+                    .filter(|f| f.contains(&esperado) && f.contains(versao))
+                    .count(),
+                1,
+                "{rotulo}: {fora:#?}"
+            );
+        }
+        assert!(!um(CANARIO, canario).iter().any(|f| f.contains(versao)));
+        // O cache, que a lista das versões tem, continua fora do canário pelo
+        // nome.
+        let com_cache = canario.replacen(checkout, "        uses: actions/cache@v4\n", 1);
+        let fora = um(CANARIO, &com_cache);
+        assert!(
+            fora.iter()
+                .any(|f| f.contains("`actions/cache` não é uma ação permitida")),
+            "{fora:#?}"
+        );
+        assert!(!fora.iter().any(|f| f.contains(versao)), "{fora:#?}");
     }
 }
