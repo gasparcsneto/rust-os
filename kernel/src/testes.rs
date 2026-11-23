@@ -7499,7 +7499,7 @@ fn linha_da_senha_no_terminal() -> Resultado {
             || !r.contains(&format!(r#""error":"{motivo}""#))
             || r.contains(r#""code":"#)
         {
-            crate::log_error!("teste", "{}: {}", acao, r);
+            crate::log_error!("teste", "{}: {}", acao, sem_segredo(&r, &[]));
             return Err(
                 "a acao do agente na linha da pessoa no terminal nao foi recusada como no fisico",
             );
@@ -7664,7 +7664,7 @@ fn linha_da_senha_no_terminal() -> Resultado {
         &no_campo(r#","action":"set_value","value":"agent.ping""#),
     )?;
     if !r.contains(r#""ok":true"#) {
-        crate::log_error!("teste", "{}", r);
+        crate::log_error!("teste", "{}", sem_segredo(&r, &[]));
         return Err("o set_value no terminal pedindo um comando foi recusado");
     }
     // Pelo Terminal: ele diz no log o que digitou logo depois de escrever no
@@ -7689,7 +7689,7 @@ fn linha_da_senha_no_terminal() -> Resultado {
         &no_campo(r#","action":"confirm""#),
     )?;
     if !r.contains(r#""ok":true"#) {
-        crate::log_error!("teste", "{}", r);
+        crate::log_error!("teste", "{}", sem_segredo(&r, &[]));
         return Err("o confirm no terminal pedindo um comando foi recusado");
     }
     esperar_ate(
@@ -7713,7 +7713,7 @@ fn linha_da_senha_no_terminal() -> Resultado {
         &no_campo(r#","action":"set_value","value":"agent.ping""#),
     )?;
     if !r.contains(r#""ok":true"#) {
-        crate::log_error!("teste", "{}", r);
+        crate::log_error!("teste", "{}", sem_segredo(&r, &[]));
         return Err("o segundo set_value no terminal pedindo um comando foi recusado");
     }
     esperar_ate(
@@ -7732,7 +7732,7 @@ fn linha_da_senha_no_terminal() -> Resultado {
         &no_campo(r#","action":"cancel""#),
     )?;
     if !r.contains(r#""ok":true"#) {
-        crate::log_error!("teste", "{}", r);
+        crate::log_error!("teste", "{}", sem_segredo(&r, &[]));
         return Err("o cancel no terminal pedindo um comando foi recusado");
     }
     esperar_ate(
@@ -7859,7 +7859,7 @@ fn edicao_que_corre_com_o_enter(
         let marca = crate::log::total_emitidos();
         let r = pela_porta(&mut agente, &mut sessao, "ui.act", &no_campo(extra))?;
         if !r.contains(r#""ok":true"#) {
-            crate::log_error!("teste", "{}: {}", acao, r);
+            crate::log_error!("teste", "{}: {}", acao, sem_segredo(&r, &[]));
             return Err("a acao do agente com a linha pedindo um comando foi recusada na entrada");
         }
         if !ultimo_com_metodo("ui.act")
@@ -7981,7 +7981,7 @@ fn edicao_que_corre_com_o_enter(
         &no_campo(r#","action":"set_value","value":"agent.ping""#),
     )?;
     if !r.contains(r#""ok":true"#) {
-        crate::log_error!("teste", "{}", r);
+        crate::log_error!("teste", "{}", sem_segredo(&r, &[]));
         return Err("o set_value no terminal pedindo um comando foi recusado");
     }
     esperar_ate(
@@ -8053,7 +8053,7 @@ fn edicao_que_corre_com_o_enter(
         crate::interpretador::desistir_da_edicao_da_arvore(console, n);
     }
     if !cheio {
-        crate::log_error!("teste", "{}", r);
+        crate::log_error!("teste", "{}", sem_segredo(&r, &[]));
         return Err("com as reservas cheias, a edicao nao foi recusada com o motivo delas");
     }
     let _ = esperar_ate(
@@ -17034,6 +17034,12 @@ fn executar_admin_com(
 
 /// Executa uma operação e confere o código da recusa — ou, com `None`, que
 /// ela foi executada.
+///
+/// Na falha, diz a operação, os parâmetros e a resposta, e o registro, por
+/// [`sem_segredo`]: o `person.register` e o `credential.rotate` levam nos
+/// parâmetros a forma escrita de uma credencial — a da senha da suíte, com
+/// o custo mínimo —, e o caso que reprova pela regra que ele confere a
+/// levava à serial (o adversário da rodada 9).
 fn admin_espera(
     sessao: u8,
     chave: &[u8; 32],
@@ -17049,13 +17055,20 @@ fn admin_espera(
         None => r.contains(r#""executed":true"#),
     };
     if !certo {
-        crate::log_error!("teste", "{} {}: {}", comando, parametros, r);
+        crate::log_error!(
+            "teste",
+            "{} {}: {}",
+            comando,
+            sem_segredo(parametros, &[]),
+            sem_segredo(&r, &[])
+        );
         return Err("uma operacao administrativa nao teve o desfecho que as regras mandam");
     }
     // E foi gravada, com o administrador e o código.
     let reg = ultimo_registro().ok_or("a auditoria esta vazia")?;
     if reg.evento.metodo != comando || reg.evento.codigo.nome() != recusa.unwrap_or("ALLOW") {
-        crate::log_error!("teste", "{:?}", reg.evento);
+        let evento = sem_segredo(&alloc::format!("{:?}", reg.evento), &[]);
+        crate::log_error!("teste", "{}", evento);
         return Err("o desfecho administrativo nao foi gravado");
     }
     Ok(())
@@ -18055,6 +18068,15 @@ fn leva_segredo(texto: &str, segredos: &Segredos) -> bool {
 /// à serial — na suíte, ao log da CI —, aonde ela sozinha não chegava: o
 /// motivo de uma recusa da troca que dissesse as senhas digitadas vai à
 /// auditoria e à tela do Terminal, e não ao log (o adversário da rodada 8).
+/// E os de [`admin_espera`], que dizem os parâmetros de uma operação
+/// administrativa — os de um `person.register` ou de um `credential.rotate`
+/// levam a forma escrita de uma credencial, a da senha da suíte com o custo
+/// mínimo —, e os de três casos que digitam a senha da suíte num console e
+/// diziam inteiras a resposta de um `ui.act` e o `detalhe` de um
+/// `person.login` (o adversário da rodada 9).
+///
+/// O texto que leva um segredo sai inteiro: o diagnóstico diz o tamanho, o
+/// segredo e o byte, e nada mais dele — nem o que nele não é segredo.
 fn sem_segredo(texto: &str, digitados: &[&str]) -> alloc::string::String {
     let mut senhas: alloc::vec::Vec<&str> = SENHAS_DA_SUITE
         .iter()
@@ -31670,7 +31692,12 @@ fn smp_o_login_nao_entra_no_console_reaberto() -> Resultado {
             .is_some_and(|e| e.codigo == politica::Codigo::Allow);
         if !entrou {
             if let Some(e) = login {
-                crate::log_error!("teste", "o login acabou em {:?}: {}", e.codigo, e.detalhe);
+                crate::log_error!(
+                    "teste",
+                    "o login acabou em {:?}: {}",
+                    e.codigo,
+                    sem_segredo(&e.detalhe, &[])
+                );
             }
             return Err("a senha do caso nao abriu sessao nenhuma");
         }
