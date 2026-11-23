@@ -881,7 +881,7 @@ xtask/src/
 ├── icp.rs           a bancada do IC: a PocketIC fixada e conferida pelo SHA-256, o canister da bancada, e o proxy TLS que mente de um jeito por nome — `xtask/bancada/icp.py` —, a cada conexão; e os módulos que o `implantacao` e o `gestor` instalam, os do gestor nas bordas do tamanho
 ├── fluxo.rs         a bancada dos fluxos da malha: duas máquinas de pé e uma ponte do meio no hospedeiro — 4 MiB em cada sentido, local e entre os Dukes, com a auditoria dos dois lados e nada do conteúdo nela; a contrapressão do leitor lento, com o pico dos buffers; a adulteração e o homem no meio na ponte; a política, a suspensão, o esquecimento, o corte e a revogação no meio do fluxo; e as vagas da porta do enlace com outro dispositivo que a bancada faz, nos quatro pares
 ├── pareamento.rs    a bancada do pareamento: duas máquinas de pé e a Pessoa no teclado das duas, sem administrador — ela lê o código de cada tela pela árvore semântica e o digita no outro, com a senha dela —, e uma ponte do meio no hospedeiro que passa os bytes, faz o homem no meio com uma chave dela, ou segura o que o destino manda depois do aperto: o código errado, o homem no meio, a mesma relação nos dois e a entrega por ela, o corte, o `device.forget` de um lado, a meia relação e a lápide
-├── partes.rs        as partes de uma rodada no hospedeiro: o `DUKE_PARTE` das bancadas que se dividem entre máquinas — a de persistência, a de tempo e a da atualização — e da suíte do kernel, que o recebe na compilação (`DUKE_PARTE_DA_SUITE`), e a conferência do anúncio da parte e do placar na saída da suíte
+├── partes.rs        as partes de uma rodada no hospedeiro: o `DUKE_PARTE` das bancadas que se dividem entre máquinas — a de persistência, a de tempo e a da atualização — e da suíte do kernel, que o recebe na compilação (`DUKE_PARTE_DA_SUITE`), e a conferência do anúncio da parte e do placar na saída da suíte — e, desde o lote ICACHE-7, de que nenhum caso disse `FALHOU` com o placar cheio
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia; e a espera de um boot pelo andamento da máquina, a de todas as bancadas
 ├── sdk.rs           o SDK da malha: o contrato público v2 conferido contra o protocolo, o registro e a política; o aviso só em `kernel::aviso`; `selar` e `sdk-conferir`; e o modelo compilado e selado fora do workspace
 ├── rede_principal.rs a fumaça real da rede principal do IC, à mão e fora da CI: o pré-voo do TLS, os destinos pelo `policy.write`, a consulta, o saldo do `gestor` pelas consultas assinadas, a auditoria e a revogação
@@ -1478,7 +1478,9 @@ superfícies e do Argon2 e ao MMIO, de 19 a 42 µs por página com quatro
 núcleos no emulador. O emulador não abre a janela, e o caso `paginacao: a
 entrada nova so do processo publica, e a compartilhada leva o tlbi` confere
 a regra pelos `tlbi` que o núcleo fez a cada mapeamento, com as interrupções
-mascaradas, nos dois sentidos.
+mascaradas, nos dois sentidos — e, desde o lote ICACHE-7, a ordem e o
+endereço do da compartilhada, pela anotação do `tlbi` deste núcleo (ver "A
+ordem do mapeamento compartilhado", abaixo).
 
 **As tabelas voltam ao alocador depois da invalidação.** No ARM, a remoção
 que esvaziava uma tabela da entrada privada a devolvia ao alocador antes do
@@ -1832,6 +1834,33 @@ da CI, em depuração, a remoção passou na parte 1/3 das duas, com a anotaçã
 deste núcleo certa, e, no ARM, a marca na 3/3 e o `fork` na 2/3, com o
 descritor novo.
 
+**A ordem do mapeamento compartilhado.** O adversário da rodada 8 achou a
+mesma classe em outra função que escreve a entrada (o achado 3 dele): no
+ARM, o mapeamento da entrada nova compartilhada (`mmu::mapear_frame_com`)
+com o `tlbi` difundido antes de escrever a entrada, e nada depois — a falta
+de tradução espúria de um núcleo sem o FEAT_ETS de volta (ver "A entrada
+nova compartilhada leva o `tlbi`", acima). O caso da regra contava os `tlbi`
+deste núcleo a cada mapeamento, e a conta não muda com a ordem: ele passava,
+e a remoção e os dois da cópia na escrita também. A anotação por núcleo do
+lote ICACHE-6 já guardava, a cada `tlbi` por endereço, o endereço e o
+descritor que ele viu; o lote ICACHE-7, [B], só na suíte, a lê: depois de
+cada mapeamento compartilhado, no mesmo trecho mascarado, o último `tlbi`
+por endereço deste núcleo tem de ser o do endereço mapeado, e o descritor
+que ele viu, o novo — válido, de página —, ou o caso reprova ("o tlbi da
+entrada nova compartilhada saiu antes de a entrada ser escrita, ou com
+outro endereco"). Fecha também o `tlbi` do endereço errado, que a doc do
+caso dava como limite da conta. As provas, com quatro núcleos e a suíte
+filtrada à lista do lote — a do adversário, com os controles, os segredos,
+a regra, a remoção e a cópia na escrita, e a parte da paginação do lote
+ICACHE-4 —, no ARM, em depuração e em release: a mutação do adversário
+reprova só o caso da regra, 66 de 67, com a conta de sempre — um `tlbi` por
+endereço em cada compartilhada — e "o ultimo tlbi deste nucleo foi o de
+0x2004001000, com a folha nova: false" nas três; a remoção e os dois da
+cópia na escrita passam. Sem ela, 67 de 67, as três com o `tlbi` no endereço
+mapeado e a folha nova; e no x86, que não tem o caso, a lista passa, 67 de
+67. Na suíte inteira pelas partes da CI, em depuração, o caso passou na
+parte 2/3 do ARM.
+
 **As travas são justas.** O `spin::Mutex` é um teste-e-troca: ganha quem
 chegar primeiro naquele instante, e um núcleo que solta e pede de novo ganha
 quase sempre. Medido: um processo num núcleo secundário escrevendo no log,
@@ -2152,7 +2181,8 @@ não compila.
   as pega sem segurar a NMI de um leitor (o informativo 4 do adversário da
   rodada 5; não rodadas). E a ordem do aviso, desde o lote ICACHE-5 — e a da
   troca de permissão no ARM e a do `invlpg` deste núcleo no x86, desde o lote
-  ICACHE-6 —, só a anotação a vê, e não as leituras: o percurso especulativo
+  ICACHE-6, e a do `tlbi` da entrada nova compartilhada no ARM, desde o lote
+  ICACHE-7 —, só a anotação a vê, e não as leituras: o percurso especulativo
   que a tornaria visível, só um processador de verdade faz.
 - No x86, a troca de permissão — a marca da cópia na escrita numa página do
   processo — invalida só este núcleo, por um `invlpg` sem anotação: a ordem
@@ -12752,6 +12782,46 @@ registro de mais de 160 bytes caiu nos oito casos, nas duas arquiteturas: os
 longos do sistema, de 23 a 49 por parte, são de casos que não conferem
 segredos.
 
+O adversário da rodada 8 achou o mesmo fora da conferência (o achado 1
+dele): os diagnósticos dos próprios casos que digitam um segredo — o de
+`uma_troca_gravada`, os da troca, dos consoles e do login, e os do caso do
+lote EXECUTADO — diziam na falha, inteiros, o registro da auditoria, as
+linhas do log e a tela, antes da conferência. Uma regressão que levasse a
+senha a um desses lugares reprovava o caso ali, e o diagnóstico a levava à
+serial — na suíte, ao log da CI —, aonde ela sozinha não chegava: com o
+motivo da recusa da troca dizendo as senhas digitadas, que vai à auditoria
+e à tela do Terminal, e não ao log, `SENHA_NOVA` e `OUTRA_SENHA_NOVA` foram
+inteiras a uma linha da serial; e com o parâmetro não declarado gravado
+duas vezes, a chave que o caso do lote EXECUTADO digita, `graviola-madura`
+— o "O que fica" do lote ICACHE-6 não citava o diagnóstico dele. O lote
+ICACHE-7, [B], só na suíte: os 26 diagnósticos passam por `sem_segredo`,
+que devolve o texto se ele não leva um pedaço nem uma palavra inteira das
+senhas da suíte e do que o caso digitou, nem a forma escrita de uma
+credencial, e senão diz o tamanho dele, o que ele leva e onde, pelo mesmo
+`Achado` da conferência — "um texto de 545 byte(s), que leva um pedaco de
+SENHA_NOVA, no byte 467 de 545". O que os casos conferem não muda: só o que
+dizem na falha. As provas, com quatro núcleos, nas duas arquiteturas, em
+depuração e em release, com a suíte filtrada à lista do lote: as duas
+mutações do adversário reprovam os mesmos casos de antes — a do motivo, a
+troca e três casos da conferência, pela auditoria que a recusa da troca
+deixou, 63 de 67; a do parâmetro gravado duas vezes, o do lote EXECUTADO, 66
+de 67 —, e os diagnósticos dizem "um texto de 548 byte(s), que leva um
+pedaco de SENHA_NOVA, no byte 470 de 548" e "um texto de 884 byte(s), que
+leva um pedaco de a senha 9 de 9 da lista do caso, no byte 422 de 884" (no
+ARM, em depuração; os tamanhos variam de 545 a 548 e de 884 a 892 bytes
+entre as rodadas). Nenhuma linha da serial leva uma senha da suíte inteira,
+nem o que o caso do lote EXECUTADO digitou, fora os ecos do console físico,
+e nenhuma linha do subsistema `teste` leva uma palavra de seis bytes ou
+mais delas. Sem as mutações, a lista passa, 67 de 67; e, na suíte inteira
+pelas partes da CI, em depuração, cada um dos dez casos passou na parte
+dele, nas duas.
+
+Ficam: os diagnósticos dos casos do registro de pessoas (`pessoas: …`), que
+dão a senha à função, e não a um console, e dizem o registro inteiro — o
+primeiro teste de cada um usa uma senha que não é da suíte, e uma regressão
+uniforme reprova ali —; e, por desenho, os ecos do console físico, que
+escreve na serial o que se digita nele como linha de comando.
+
 O que ela não vê, por enquanto: a chave de um objeto JSON que uma pessoa
 entrada digita no console vai como veio ao `detalhe` do registro
 `INVALID_ARGUMENT` da auditoria, e com ele ao journal — o log leva `(campo
@@ -17908,7 +17978,10 @@ O kernel anuncia a parte no começo — `suite de testes :: x86_64 :: parte 2
 de 3: 334 de 989 casos`, e a fatia na linha seguinte — e o placar do fim
 conta os casos que rodaram; o `xtask` confere os dois contra a parte que
 pediu, e um ELF de outra compilação, de outra parte ou da suíte inteira,
-não passa. Sem `DUKE_PARTE`, a suíte inteira, como sempre.
+não passa. Sem `DUKE_PARTE`, a suíte inteira, como sempre. E, desde o lote
+ICACHE-7, nenhum caso diz `FALHOU` numa suíte cujo placar diz que todos
+passaram: o placar e o código de saída vêm do mesmo laço, e um laço que
+dissesse a falha e não a contasse daria os dois de uma suíte que passou.
 
 O CI roda formatação, lints, as conferências de fonte de `cargo xtask
 invariantes`, os testes do `xtask`, a conferência dos ELFs, o boot pela UEFI,
@@ -18211,8 +18284,11 @@ confere a minúscula, e um caso no fim da tabela é o controle da
 conferência — da função; que o laço do executor a chama depois de cada
 caso, prova outro, desde o lote ICACHE-4; e um terceiro prova, desde o lote
 ICACHE-5, que a função por onde o laço roda cada caso junta ao resultado o
-que a conferência diz, e, desde o lote ICACHE-6, que o laço roda os casos
-por ela. O resto do estado global — as
+que a conferência diz, e, desde o lote ICACHE-6, que o laço roda por ela o
+caso desse controle — os outros, porque o laço é um só para a fatia e a
+cauda: um laço partido, com a cauda por fora, passaria nele. E, desde o
+lote ICACHE-7, o `cargo xtask test` reprova a linha `FALHOU` de um caso com
+o placar dizendo que todos passaram (abaixo). O resto do estado global — as
 filas, o histórico e os cursores do teclado, entre outros — continua com a
 disciplina de cada caso. As mutações, no ARM, com a suíte filtrada aos casos
 do teclado, do HID, do pareamento e do executor: a conferência sem o shift,
@@ -18457,6 +18533,85 @@ cinco que ela não viu. Os três passaram na lista do lote em release, nas
 duas; e, na varredura, cada um na parte em que cai: o do laço na 3/3 do ARM
 e na 1/3 do x86, o da política na 2/3 do ARM e na 3/3 do x86, e o estendido
 na 1/3 do ARM e na 2/3 do x86.
+
+O adversário da rodada 8 achou o que esses controles ainda deixavam passar,
+dois níveis abaixo (o achado 2 dele), e o que nem eles nem o `cargo xtask
+test` viam (o informativo 1). O da política mudava, de cada linha de dois
+números, só o último — a taxa por segundo, as mensagens por remetente, os
+bytes do armazém, quantos apertos e o grupo de um quórum ficavam como
+estavam —, e as listas de um papel só cresciam; o estendido do registro
+mudava as fontes de hora só pela incerteza. Uma comparação da política que
+visse de cada par o último número e, das listas, quantos itens, e uma
+impressão que visse das fontes o quórum, os tetos e quantas são, passavam
+nos dois. E o laço que roda o caso por `rodar_um_caso`, diz `FALHOU` e não
+soma a falha deu, com cinco casos reprovados, "29 de 29 passaram", o
+emulador saindo com sucesso e o `cargo xtask test` dizendo que todos
+passaram: ele conferia o código de saída, o anúncio e o placar, que vêm do
+mesmo laço, e não as linhas `FALHOU`. O lote ICACHE-7, [B]:
+
+- o controle da política muda mais nove coisas, uma de cada vez — o
+  primeiro número das linhas `taxa`, `mensagens`, `armazem` e `apertos`; o
+  grupo do quórum do `system.update`, de 2 de 3 para 2 de 2, no piso; e um
+  prefixo, um editor, um domínio e uma inclusão trocados por outros, com a
+  conta igual (a inclusão, por `@tempo`, que não inclui nada: sem ciclo) —,
+  vinte e cinco ao todo;
+- o estendido do registro troca as chaves das duas primeiras fontes de hora
+  entre si, com os nomes, os destinos e os parâmetros iguais — dezoito ao
+  todo;
+- o `cargo xtask test` reprova a suíte que saiu com sucesso e tem a linha
+  `FALHOU` de um caso com o placar dizendo que todos passaram, e diz as
+  linhas — inteira ou numa parte (`partes::conferir_a_suite`, pela mesma
+  regra com que o andamento reconhece o caso que reprovou,
+  `partes::e_um_caso_que_falhou`). A linha é a que leva o ` FALHOU -- `
+  com que o laço a termina, onde quer que ela comece: o começo pode trazer
+  o que o caso ou o console escreveram sem fim de linha — o `X` de
+  `console: o log humano chega a tela`, o `duke> ` do prompt —, e pelo
+  recuo a linha desse caso escaparia. Só o laço escreve o ` FALHOU -- `; uma
+  linha do log que o citasse reprovaria a suíte, o lado seguro. O boot pela
+  UEFI do ARM, que roda a suíte pelo firmware, já reprovava toda linha
+  `FALHOU`. Três testes novos no hospedeiro: a linha de um caso que
+  reprovou, também depois do `X` e do prompt, e as que não são; a
+  conferência com as linhas da rodada do adversário, inteira e numa parte,
+  com uma linha só e sem nenhuma; e um processo de verdade, pelo andamento.
+
+As provas, com quatro núcleos, nas duas arquiteturas, em depuração e em
+release, com a suíte filtrada à lista do lote: a comparação da política
+reduzida do adversário — de cada par, o último número; das listas, quantos
+itens; das inclusões, quantas — reprova só o controle da política, 66 de
+67, que diz as nove mudanças novas que ela não viu, e nenhuma das dezesseis
+de antes; e a impressão das fontes de hora pelo quórum, pelo salto, pela
+incerteza e por quantas são reprova só o estendido do registro, 66 de 67:
+"a chave de uma fonte de hora". O laço que diz `FALHOU` e não conta, com a
+recusa da troca dizendo as senhas — quatro casos reprovados —, deu "67 de 67
+passaram" e o emulador saindo com sucesso, e o `cargo xtask test` reprova,
+com o código 1: "a suíte saiu com sucesso, mas o placar diz que os 67 casos
+passaram, e 4 caso(s) disseram `FALHOU` na serial — o laço disse a falha e
+não a contou", com as quatro linhas; e o mesmo numa parte, a 1/1 do ARM.
+Com a conferência nova desfeita no `xtask`, a mesma rodada diz "todos os
+testes passaram", como na do adversário. Sem as mutações, 67 de 67. E a
+suíte inteira, nas duas arquiteturas, em depuração, pelas partes da CI,
+passou — 360 de 360 em cada parte do ARM; 366 de 366, 365 de 365 e 365 de
+365 no x86 —, com o controle da política na parte 2/3 do ARM e na 3/3 do
+x86, o estendido na 1/3 do ARM e na 2/3 do x86, e a regra da entrada nova
+na 2/3 do ARM: a conferência nova não achou linha `FALHOU` numa suíte que
+passou.
+
+As mutações da conferência nova, uma de cada vez, contra os testes do
+`xtask` inteiros, reprovam só pelos testes novos — o da leitura da linha, o
+da conferência e o do processo de verdade —: a conferência sem as linhas
+`FALHOU` reprova o da conferência e o do processo; o andamento sem
+guardá-las, o do processo; a linha só com o recuo do começo — a do caso que
+escreveu sem fim de linha antes dela escapa —, os três; a linha só com dois
+espaços antes do `FALHOU` — a dos casos de nome mais longo que a coluna
+escapa —, o da leitura e o da conferência; e o erro sem as linhas, o da
+conferência e o do processo.
+
+Fica de fora o laço que jogasse fora o resultado inteiro de `rodar_um_caso`
+— o caso que falha dito `ok` e contado como passado —, que nenhum controle
+de dentro alcança e o `xtask` não distingue de uma suíte que passou; numa
+linha de lista, o segundo item trocado sozinho — a mesma regressão sem fim:
+a troca de um item guarda a comparação pela conta, e a do último, a que só
+visse o primeiro —; e o nome de um papel que já existe.
 
 Os casos que conferem um `person.login` — o registro do login, as recusas,
 o limite de tentativas, a pessoa revogada, o login que chega atrasado — o
