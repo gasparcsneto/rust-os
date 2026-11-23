@@ -115,7 +115,9 @@
 //!     [`COMANDOS_DO_RUNNER`];
 //!   - o job de lints liga as invariantes pela entrada `invariantes: true`
 //!     no `with:` do primeiro passo do `steps:` dele que usa a ação
-//!     ([`as_invariantes_na_acao`]);
+//!     ([`as_invariantes_na_acao`]); e, desde o lote A16, a CI e o canário,
+//!     que essa regra e a de baixo acham pelo nome, existem
+//!     ([`workflows_que_faltam`]);
 //!   - o canário, o único que sobrepõe — ele testa o candidato —, não roda
 //!     nos pushes, não usa a ação do cache, só usa as ações dele nas versões
 //!     de [`USOS_OFICIAIS`] (desde o lote A16), não publica proveniência e
@@ -1593,26 +1595,7 @@ pub(crate) fn conferir_o_canal() -> Result<ExitCode, String> {
         let rotulo = if dir.is_empty() { "./" } else { dir.as_str() };
         fora.extend(desvios_do_config(&raiz.join(dir), rotulo, dir.is_empty()));
     }
-    fora.extend(conferir_os_workflows(&workflows));
-    let texto_de = |nome: &str| {
-        workflows
-            .iter()
-            .find(|(n, _)| n == nome)
-            .map(|(_, t)| t.as_str())
-    };
-    let acao = texto_de(ACAO_DO_COMPILADOR);
-    match acao {
-        Some(acao) => fora.extend(conferir_a_acao(acao)),
-        None => fora.push(format!(
-            "{ACAO_DO_COMPILADOR}: a ação que confere o compilador não foi achada"
-        )),
-    }
-    if let Some(ci) = texto_de(CI) {
-        fora.extend(as_invariantes_na_acao(ci));
-    }
-    if let (Some(ci), Some(canario), Some(acao)) = (texto_de(CI), texto_de(CANARIO), acao) {
-        fora.extend(o_canario_repete_os_lints(ci, canario, acao));
-    }
+    fora.extend(conferir_a_definicao_da_ci(&workflows));
 
     if fora.is_empty() {
         println!(
@@ -1635,6 +1618,80 @@ pub(crate) fn conferir_o_canal() -> Result<ExitCode, String> {
         }
         Ok(ExitCode::FAILURE)
     }
+}
+
+/// A definição da CI — `workflows`, cada `.yml` e `.yaml` de `.github/` que
+/// o git lista, com o texto ([`da_definicao_da_ci`]) — pelas regras de
+/// `cargo xtask invariantes` que a leem: as dos workflows
+/// ([`conferir_os_workflows`]); a da ação do compilador, que tem de estar lá
+/// ([`conferir_a_acao`]); e, desde o lote A16, a da CI e a do canário, que
+/// as duas regras seguintes acham pelo nome ([`workflows_que_faltam`]); a do
+/// job de lints, que liga as invariantes ([`as_invariantes_na_acao`]); e a
+/// do canário, que repete os comandos dele ([`o_canario_repete_os_lints`]).
+///
+/// # Uma função sem E/S, desde o lote A16
+///
+/// As chamadas estavam em [`conferir_o_canal`], que lê o repositório de
+/// verdade e roda o cargo, e nenhum teste de unidade a chama: tirar uma
+/// delas — a de [`workflows_que_faltam`], a de [`as_invariantes_na_acao`] —
+/// sobrevivia aos testes, e só o `xtask invariantes` rodado numa árvore com
+/// o caso a pegava (a MC7 do adversário do lote A15). Aqui, o teste
+/// `adversario_a15_a_ci_e_o_canario_pelo_nome` passa a definição do
+/// repositório e as trocas, e cada chamada reprova a dela.
+fn conferir_a_definicao_da_ci(workflows: &[(String, String)]) -> Vec<String> {
+    let mut fora = conferir_os_workflows(workflows);
+    let texto_de = |nome: &str| {
+        workflows
+            .iter()
+            .find(|(n, _)| n == nome)
+            .map(|(_, t)| t.as_str())
+    };
+    let acao = texto_de(ACAO_DO_COMPILADOR);
+    match acao {
+        Some(acao) => fora.extend(conferir_a_acao(acao)),
+        None => fora.push(format!(
+            "{ACAO_DO_COMPILADOR}: a ação que confere o compilador não foi achada"
+        )),
+    }
+    // A CI e o canário, que as duas regras abaixo acham pelo nome (desde o
+    // lote A16).
+    fora.extend(workflows_que_faltam(workflows));
+    if let Some(ci) = texto_de(CI) {
+        fora.extend(as_invariantes_na_acao(ci));
+    }
+    if let (Some(ci), Some(canario), Some(acao)) = (texto_de(CI), texto_de(CANARIO), acao) {
+        fora.extend(o_canario_repete_os_lints(ci, canario, acao));
+    }
+    fora
+}
+
+/// Os workflows que as regras acham pelo nome — a CI oficial, cujo job de
+/// lints liga as invariantes ([`as_invariantes_na_acao`]), e o canário, que
+/// repete os comandos dele ([`o_canario_repete_os_lints`]) — e que não estão
+/// entre os `workflows` lidos, cada um com o erro dele.
+///
+/// # Por quê, desde o lote A16
+///
+/// As duas regras só rodavam com o arquivo achado, e nada acusava a falta
+/// dele: a CI com outro nome — o `ci.yml` renomeado para `principal.yml`,
+/// com o job de lints sem a entrada das invariantes — passava pelo `cargo
+/// xtask invariantes`, e as invariantes deixavam de rodar na CI; e, sem o
+/// canário, a paridade dele com o job de lints não se conferia (o M3 do
+/// adversário do lote A15). A ação do compilador já reprovava assim.
+fn workflows_que_faltam(workflows: &[(String, String)]) -> Vec<String> {
+    [
+        (CI, "a CI oficial, cujo job de lints liga as invariantes"),
+        (CANARIO, "o canário, que repete os comandos do job de lints"),
+    ]
+    .into_iter()
+    .filter(|(nome, _)| !workflows.iter().any(|(n, _)| n == nome))
+    .map(|(nome, oque)| {
+        format!(
+            "{nome}: {oque}, não foi achado — as regras que o acham pelo nome não se conferem \
+             noutro arquivo"
+        )
+    })
+    .collect()
 }
 
 /// O canal citado em `texto` como ele mesmo — entre crases —, e não como
@@ -8319,5 +8376,138 @@ jobs:
             "{fora:#?}"
         );
         assert!(!fora.iter().any(|f| f.contains(versao)), "{fora:#?}");
+    }
+
+    /// A CI e o canário achados pelo nome (o M3 do adversário do lote A15):
+    /// a regra que confere que o job de lints liga as invariantes, e a que
+    /// confere que o canário repete os comandos dele, só rodavam com o
+    /// arquivo achado — a CI renomeada, sem a entrada, passava. A falta de
+    /// cada um reprova, uma vez; com os dois, nada. E a definição da CI do
+    /// repositório, pelas regras que a leem ([`conferir_a_definicao_da_ci`]):
+    /// passa inteira, e cada troca — a CI renomeada sem a entrada, o canário
+    /// ou a ação apagados, a CI sem a entrada, o canário sem um comando do
+    /// job de lints, o checkout da rede principal por um commit, a ação com o
+    /// canal reatribuído — reprova uma vez, pela regra dela: tirar uma
+    /// chamada de lá reprova aqui (a MC7 do adversário).
+    #[test]
+    fn adversario_a15_a_ci_e_o_canario_pelo_nome() {
+        let ci = (CI.to_string(), OFICIAL.to_string());
+        let canario = (CANARIO.to_string(), String::new());
+        let outro = (
+            ".github/workflows/principal.yml".to_string(),
+            OFICIAL.to_string(),
+        );
+        assert_eq!(
+            workflows_que_faltam(&[ci.clone(), canario.clone()]),
+            Vec::<String>::new()
+        );
+        for (rotulo, workflows, falta) in [
+            ("a CI renomeada", vec![outro.clone(), canario.clone()], CI),
+            ("sem o canário", vec![ci.clone(), outro.clone()], CANARIO),
+        ] {
+            let fora = workflows_que_faltam(&workflows);
+            assert_eq!(fora.len(), 1, "{rotulo}: {fora:#?}");
+            assert!(
+                fora[0].starts_with(&format!("{falta}: ")),
+                "{rotulo}: {fora:#?}"
+            );
+            assert!(fora[0].contains("não foi achado"), "{rotulo}: {fora:#?}");
+        }
+        assert_eq!(workflows_que_faltam(&[outro]).len(), 2);
+
+        // A definição da CI do repositório, inteira, e as trocas.
+        let ci = include_str!("../../.github/workflows/ci.yml");
+        let canario = include_str!("../../.github/workflows/canario.yml");
+        let rede = include_str!("../../.github/workflows/rede-principal.yml");
+        let definicao = |trocas: &[(&str, Option<&str>)]| -> Vec<String> {
+            let mut workflows: Vec<(String, String)> = [
+                (CI, ci),
+                (CANARIO, canario),
+                (".github/workflows/rede-principal.yml", rede),
+                (ACAO_DO_COMPILADOR, ACAO),
+            ]
+            .into_iter()
+            .map(|(nome, texto)| (nome.to_string(), texto.to_string()))
+            .collect();
+            for &(nome, texto) in trocas {
+                workflows.retain(|(n, _)| n != nome);
+                if let Some(texto) = texto {
+                    workflows.push((nome.to_string(), texto.to_string()));
+                }
+            }
+            conferir_a_definicao_da_ci(&workflows)
+        };
+        assert_eq!(definicao(&[]), Vec::<String>::new());
+        let entrada = "        with:\n          invariantes: true\n";
+        assert_eq!(ci.matches(entrada).count(), 1);
+        let sem_a_entrada = ci.replacen(entrada, "", 1);
+        let sem_o_comando = canario.replace("cargo xtask invariantes", "true");
+        assert_ne!(sem_o_comando, canario);
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let rede_por_um_commit = rede.replacen(
+            "      - uses: actions/checkout@v4\n",
+            &format!("      - uses: actions/checkout@{commit}\n"),
+            1,
+        );
+        assert_ne!(rede_por_um_commit, rede);
+        let saida = format!("        {SAIDA_DO_CANAL}\n");
+        let acao_reatribuida = ACAO.replacen(
+            &saida,
+            &format!("        canal=nightly-2000-01-01\n{saida}"),
+            1,
+        );
+        assert_ne!(acao_reatribuida, ACAO);
+        for (rotulo, trocas, esperado) in [
+            (
+                "a CI renomeada, sem a entrada",
+                vec![
+                    (CI, None),
+                    (
+                        ".github/workflows/principal.yml",
+                        Some(sem_a_entrada.as_str()),
+                    ),
+                ],
+                format!("{CI}: a CI oficial"),
+            ),
+            (
+                "o canário apagado",
+                vec![(CANARIO, None)],
+                format!("{CANARIO}: o canário"),
+            ),
+            (
+                "a ação apagada",
+                vec![(ACAO_DO_COMPILADOR, None)],
+                format!("{ACAO_DO_COMPILADOR}: a ação que confere o compilador não foi achada"),
+            ),
+            (
+                "a CI sem a entrada",
+                vec![(CI, Some(sem_a_entrada.as_str()))],
+                format!("{CI}: o job `{JOB_DE_LINTS}` não liga as invariantes"),
+            ),
+            (
+                "o canário sem um comando do job de lints",
+                vec![(CANARIO, Some(sem_o_comando.as_str()))],
+                format!("{CANARIO}: não repete `cargo xtask invariantes`"),
+            ),
+            (
+                "a rede principal com o checkout por um commit",
+                vec![(
+                    ".github/workflows/rede-principal.yml",
+                    Some(rede_por_um_commit.as_str()),
+                )],
+                format!(".github/workflows/rede-principal.yml: `actions/checkout@{commit}` — "),
+            ),
+            (
+                "a ação com o canal reatribuído",
+                vec![(ACAO_DO_COMPILADOR, Some(acao_reatribuida.as_str()))],
+                format!("{ACAO_DO_COMPILADOR}: `canal=nightly-2000-01-01` no passo `conferir`"),
+            ),
+        ] {
+            let fora = definicao(&trocas);
+            assert!(
+                fora.len() == 1 && fora[0].starts_with(&esperado),
+                "{rotulo}: {fora:#?}"
+            );
+        }
     }
 }
