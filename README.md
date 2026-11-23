@@ -19200,6 +19200,35 @@ holdover da bancada de tempo, na parte 3/3: o x86 a -84 ppm (2056 s em
 esperou 43,8 minutos na fila e rodou 30,5; o maior, a persistência do x86,
 parte 2/3, com 53,5.
 
+A CI 548 (`3991a87`, o lote A16) passou verde, 48 de 48, na primeira
+tentativa, em 73,2 minutos e 1135 de máquina. As regras novas do lote — a
+leitura pelo caminho como o git o tem, as versões e os gatilhos do
+canário, a CI e o canário pelo nome, o canal na chave pela expressão e o
+passo da conferência lido em toda linha — passaram contra os workflows de
+verdade: no job de lints, a ação com as invariantes levou 61 s, e nos
+outros 47 jobs, de 15 a 23 s. O ARM em release, 1068 de 1068. O holdover
+da bancada de tempo, na parte 3/3: o x86 a -141 ppm (2057 s em 2057) e o
+ARM a -13 ppm (2056 s em 2056), os dois dentro da guarda. O último job foi
+o dos fluxos entre dispositivos (mesma arquitetura), que esperou 40,4
+minutos na fila e rodou 27,3; o maior, a bancada de tempo do x86, parte
+3/3, com 47,0. A CI 549 começou dez minutos depois, com esta ainda na
+fila, e as duas dividiram os runners.
+
+A CI 549 (`abd9253`, o canário com `cache-mode: none`) passou verde, 48
+de 48, na primeira tentativa, em 113,8 minutos — começou com a 548 na fila
+e dividiu os runners com ela — e 1122 de máquina. O commit só muda o
+`canario.yml`, que nenhum job da CI roda. O ARM em release, 1068 de 1068.
+O holdover da bancada de tempo, na parte 3/3: o x86 a -95 ppm (2056 s em
+2056) e o ARM a +1 ppm (2056 s em 2056), os dois dentro da guarda. O
+último job foi o do SDK da malha entre dispositivos (x86_64 e aarch64),
+que esperou 44,2 minutos na fila e rodou 20,3; o maior, a persistência do
+x86, parte 2/3, com 53,9. O canário disparado no mesmo commit rodou o job
+com a chave — o GitHub a aceitou — e reprovou só o passo dos testes do
+hospedeiro: os testes que rodam a ação disputavam o rustup ao instalar o
+toolchain oficial, que no canário não está instalado antes deles, e,
+atrás dessa falha, um deles tomava o cargo do candidato pelo
+`env!("CARGO")`.
+
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na
 508 e 58 na 509 —, e o que sobra até o piso é a ordem da fila, que não se
