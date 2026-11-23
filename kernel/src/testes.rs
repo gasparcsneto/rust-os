@@ -64790,7 +64790,14 @@ fn anotar_as_pessoas(quando: &str) {
 /// —, que passaria por eles (o achado 5 do adversário da rodada 5); e as
 /// sete de dentro de um papel, a de uma comparação que visse de cada papel
 /// só o nome, as permissões escritas nele e a taxa (o achado 4 do
-/// adversário da rodada 6). O
+/// adversário da rodada 6). E as nove seguintes mudam, cada uma, um campo
+/// que nenhuma das de antes muda sozinho: o outro número de cada linha — a
+/// taxa por segundo, as mensagens por remetente, os bytes do armazém,
+/// quantos apertos e o grupo de um quórum —, e um recurso, um editor, um
+/// domínio e uma inclusão trocados por outros, com a conta igual. São a
+/// guarda de uma comparação que visse de cada par só o último número, e das
+/// listas de um papel só quantas: ela passava nas dezesseis de antes (o
+/// adversário da rodada 8). O
 /// nome de um papel que já existe fica sem mudança própria: ele está em
 /// todas as linhas do papel e nas que o citam, e trocá-lo é reescrever a
 /// política inteira; a comparação de hoje é a `PartialEq` da política, que
@@ -64836,6 +64843,56 @@ fn suite_o_executor_ve_e_devolve_a_politica_em_vigor() -> Resultado {
     };
     let sem_random = |linha: &str| {
         linha.starts_with("papel ") && !linha.split_ascii_whitespace().any(|w| w == "random.read")
+    };
+    // O primeiro número da linha, mais um; o último, menos um; e a última
+    // palavra trocada por `por` — uma de cada vez, com a conta igual.
+    let primeiro_mais_um = |linha: &str| -> alloc::string::String {
+        let mut feito = false;
+        let palavras: alloc::vec::Vec<alloc::string::String> = linha
+            .split(' ')
+            .map(|w| match w.parse::<u64>() {
+                Ok(n) if !feito => {
+                    feito = true;
+                    alloc::format!("{}", n + 1)
+                }
+                _ => alloc::string::String::from(w),
+            })
+            .collect();
+        palavras.join(" ")
+    };
+    let ultimo_menos_um = |linha: &str| -> alloc::string::String {
+        match linha.rsplit_once(' ') {
+            Some((resto, n)) => alloc::format!(
+                "{resto} {}",
+                n.parse::<u64>().unwrap_or(1).saturating_sub(1)
+            ),
+            None => alloc::string::String::from(linha),
+        }
+    };
+    let trocar_o_ultimo = |por: &'static str| {
+        move |linha: &str| -> alloc::string::String {
+            match linha.rsplit_once(' ') {
+                Some((resto, _)) => alloc::format!("{resto} {por}"),
+                None => alloc::string::String::from(linha),
+            }
+        }
+    };
+    // A primeira inclusão da linha trocada por `@tempo`, um papel que não
+    // inclui nada: sem ciclo.
+    let outra_inclusao = |linha: &str| -> alloc::string::String {
+        let mut feito = false;
+        let palavras: alloc::vec::Vec<&str> = linha
+            .split(' ')
+            .map(|w| {
+                if !feito && w.starts_with('@') {
+                    feito = true;
+                    "@tempo"
+                } else {
+                    w
+                }
+            })
+            .collect();
+        palavras.join(" ")
     };
     let outra_serial = comeco
         .papeis()
@@ -64935,6 +64992,62 @@ fn suite_o_executor_ve_e_devolve_a_politica_em_vigor() -> Resultado {
                         && l.split_ascii_whitespace().nth(1) != Some("observador")
                 },
                 &|l| alloc::format!("{l} @observador"),
+            )?,
+        ),
+        // Dois níveis abaixo: o outro número de cada linha, e as listas de um
+        // papel com a conta igual (o adversário da rodada 8).
+        (
+            "a taxa por segundo de um papel",
+            com_a_linha(&|l| l.starts_with("taxa "), &primeiro_mais_um)?,
+        ),
+        (
+            "as mensagens por remetente de um papel",
+            com_a_linha(&|l| l.starts_with("mensagens "), &primeiro_mais_um)?,
+        ),
+        (
+            "os bytes do armazem de um papel",
+            com_a_linha(&|l| l.starts_with("armazem "), &primeiro_mais_um)?,
+        ),
+        (
+            "quantos apertos",
+            com_a_linha(&|l| l.starts_with("apertos "), &primeiro_mais_um)?,
+        ),
+        (
+            "o grupo de um quorum",
+            com_a_linha(
+                &|l| l.starts_with("quorum system.update "),
+                &ultimo_menos_um,
+            )?,
+        ),
+        (
+            "um recurso de um papel, trocado por outro",
+            com_a_linha(
+                &|l| {
+                    l.starts_with("recurso ")
+                        && l.split_ascii_whitespace().nth(2) == Some("fs.read")
+                },
+                &trocar_o_ultimo("/controle-da-suite"),
+            )?,
+        ),
+        (
+            "um editor de um papel, trocado por outro",
+            com_a_linha(
+                &|l| l.starts_with("editores "),
+                &trocar_o_ultimo("controle-da-suite"),
+            )?,
+        ),
+        (
+            "um dominio de um papel, trocado por outro",
+            com_a_linha(
+                &|l| l.starts_with("dominios "),
+                &trocar_o_ultimo("controle-da-suite"),
+            )?,
+        ),
+        (
+            "uma inclusao de um papel, trocada por outra",
+            com_a_linha(
+                &|l| l.starts_with("papel ") && l.contains(" @"),
+                &outra_inclusao,
             )?,
         ),
     ];
@@ -65214,7 +65327,11 @@ fn suite_o_executor_confere_depois_de_cada_caso() -> Resultado {
 /// E essas doze deixavam passar uma impressão sem a chave dos
 /// administradores — a ordem também muda os nomes —, com só a conta dos
 /// editores e das lápides e só o "tem ou não tem" das fontes; as cinco
-/// últimas são a guarda dela (o achado 4 do adversário da rodada 6).
+/// seguintes são a guarda dela (o achado 4 do adversário da rodada 6). E o
+/// conteúdo das fontes de hora mudava só pela incerteza: uma impressão que
+/// visse das fontes o quórum, os tetos e quantas são, e não cada uma,
+/// passava; a última troca as chaves das duas primeiras fontes, com os
+/// nomes, os destinos e os parâmetros iguais (o adversário da rodada 8).
 ///
 /// Cada mudança mexe só no campo dela: a de um agente troca o registro de
 /// agentes por um igual com só aquele campo mudado
@@ -65310,15 +65427,21 @@ fn suite_a_impressao_do_registro_ve_cada_campo() -> Resultado {
     // registro: o que o refaz igual é o dele — e refazê-lo igual confere o
     // texto. A outra incerteza muda o conteúdo, e não as fontes.
     let fontes = crate::identidade::fontes_de_hora().ok_or("a imagem nao tem fontes de hora")?;
-    let refeito = |q: u64, incerteza_s: u64| -> Option<hora::registro::Registro> {
+    // Com `trocadas`, as chaves das duas primeiras fontes trocadas entre si.
+    let refeito = |q: u64, incerteza_s: u64, trocadas: bool| -> Option<hora::registro::Registro> {
+        let lista = fontes.fontes();
         let mut texto = alloc::string::String::new();
-        for f in fontes.fontes() {
+        for (i, f) in lista.iter().enumerate() {
+            let chave = match i {
+                0 | 1 if trocadas => lista.get(1 - i)?.chave(),
+                _ => f.chave(),
+            };
             texto.push_str(&alloc::format!(
                 "fonte {} {} {}{}\n",
                 f.nome(),
                 f.destino(),
                 hora::registro::PREFIXO_DA_CHAVE,
-                sigilo::hex(f.chave())
+                sigilo::hex(chave)
             ));
         }
         let salto_s = fontes.parametros().salto_maximo_ms / 1000;
@@ -65329,15 +65452,17 @@ fn suite_a_impressao_do_registro_ve_cada_campo() -> Resultado {
     };
     let incerteza_s = fontes.parametros().teto_da_incerteza_ms / 1000;
     let quorum = (hora::registro::MENOR_QUORUM..=hora::registro::MAIS_FONTES as u64)
-        .find(|&q| refeito(q, incerteza_s) == Some(*fontes))
+        .find(|&q| refeito(q, incerteza_s, false) == Some(*fontes))
         .ok_or("o registro de fontes de hora da imagem nao se refaz pelo texto")?;
     let outra_incerteza = if incerteza_s < hora::registro::MAIOR_INCERTEZA_S {
         incerteza_s + 1
     } else {
         incerteza_s - 1
     };
-    let outras_fontes = refeito(quorum, outra_incerteza)
+    let outras_fontes = refeito(quorum, outra_incerteza, false)
         .ok_or("as fontes de hora mudadas pelo controle nao se leem")?;
+    let fontes_trocadas = refeito(quorum, incerteza_s, true)
+        .ok_or("as fontes de hora com as chaves trocadas pelo controle nao se leem")?;
     let esperado: Resultado = Err("o caso deixou o registro de identidade mudado");
     let mut falhas: alloc::vec::Vec<&'static str> = alloc::vec::Vec::new();
     let mut conferir = |qual: &'static str, mudar: &dyn Fn()| {
@@ -65445,6 +65570,11 @@ fn suite_a_impressao_do_registro_ve_cada_campo() -> Resultado {
     });
     conferir("o conteudo das fontes de hora", &|| {
         let _ = crate::identidade::trocar_fontes_de_hora_de_teste(Some(outras_fontes));
+    });
+    // Dois níveis abaixo: uma fonte de hora, com o número delas e os
+    // parâmetros iguais (o adversário da rodada 8).
+    conferir("a chave de uma fonte de hora", &|| {
+        let _ = crate::identidade::trocar_fontes_de_hora_de_teste(Some(fontes_trocadas));
     });
     // O conteúdo de uma lápide: uma trocada por outra, com a conta igual. A
     // referência é o registro com a primeira, e não o do começo, sem lápide
