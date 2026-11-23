@@ -34507,14 +34507,27 @@ fn ctr_el0_de_cada_nucleo() -> Result<alloc::vec::Vec<(usize, u64)>, &'static st
 /// arm-tlbi, levava a carga da imagem no teto, com quatro núcleos, a
 /// 1,77–1,92 s, contra 0,51–0,78 sem ele —, também.
 ///
-/// Ele conta os `tlbi` deste núcleo, e não o endereço nem o alcance deles:
-/// um `tlbi` do endereço errado, ou só deste núcleo, passaria por ele — a
-/// M5, o `tlbi` só local, é pega pelos casos que conferem o efeito noutro
-/// núcleo —; é o limite da conta, num emulador que não mostra o efeito (o
-/// informativo 7 do adversário do lote ICACHE).
+/// Ele conta os `tlbi` deste núcleo, e não o alcance deles: um `tlbi` só
+/// deste núcleo passaria por ele — a M5, o `tlbi` só local, é pega pelos
+/// casos que conferem o efeito noutro núcleo —; é o limite da conta, num
+/// emulador que não mostra o efeito (o informativo 7 do adversário do lote
+/// ICACHE).
+///
+/// # A ordem, e o endereço
+///
+/// O `tlbi` da compartilhada vem depois da escrita da entrada: antes dela,
+/// ele não ordena percurso nenhum — o do outro núcleo ainda pode ver a
+/// entrada inválida depois dele, e a falta espúria volta —, e a conta não
+/// muda. O emulador não mostra; a anotação do `tlbi` deste núcleo, sim
+/// (`mmu::ultima_folha_deste_nucleo_de_teste`): depois de cada mapeamento
+/// compartilhado, o último `tlbi` por endereço deste núcleo é o do endereço
+/// mapeado, e a folha que ele viu já era a nova — válida, de página. O
+/// mapeamento com o `tlbi` antes de escrever a entrada passava pela conta
+/// (o adversário da rodada 8), e o do endereço errado também.
 #[cfg(target_arch = "aarch64")]
 fn paginacao_a_entrada_nova_privada_publica_e_a_compartilhada_invalida() -> Resultado {
     use crate::arch::aarch64::mmu::tlbi_deste_nucleo_de_teste as tlbi;
+    use crate::arch::aarch64::mmu::ultima_folha_deste_nucleo_de_teste;
     use crate::arch::{self, Permissoes, TAMANHO_PAGINA};
 
     // Uma página da área das pilhas bem além de todas as vagas — memória do
@@ -34524,12 +34537,19 @@ fn paginacao_a_entrada_nova_privada_publica_e_a_compartilhada_invalida() -> Resu
     const DO_USUARIO: u64 = crate::usuario::BASE;
 
     // Os `tlbi` deste núcleo — por endereço e inteiros — que mapear
-    // `endereco` fez.
-    fn contados(endereco: u64, permissoes: Permissoes) -> Result<(u64, u64), &'static str> {
+    // `endereco` fez; e o último por endereço deste núcleo depois dele: o
+    // endereço, e se a folha que ele viu já era a nova — os dois bits de
+    // baixo, válida e de página (ver "A ordem, e o endereço").
+    type Visto = ((u64, u64), (u64, bool));
+    fn contados(endereco: u64, permissoes: Permissoes) -> Result<Visto, &'static str> {
         let antes = tlbi();
         crate::paginacao::mapear_novo(endereco, permissoes)?;
         let depois = tlbi();
-        Ok((depois.0 - antes.0, depois.1 - antes.1))
+        let (onde, folha, _) = ultima_folha_deste_nucleo_de_teste();
+        Ok((
+            (depois.0 - antes.0, depois.1 - antes.1),
+            (onde, folha & 0b11 == 0b11),
+        ))
     }
 
     let privada = arch::ENTRADA_PRIVADA as usize;
@@ -34565,21 +34585,25 @@ fn paginacao_a_entrada_nova_privada_publica_e_a_compartilhada_invalida() -> Resu
         Ok([
             (
                 "a do kernel, na raiz do kernel",
+                DO_KERNEL,
                 kernel_na_do_kernel,
                 (1, 0),
             ),
             (
                 "a do usuario, na raiz do kernel",
+                DO_USUARIO,
                 usuario_na_do_kernel,
                 (1, 0),
             ),
             (
                 "a do usuario, numa raiz de processo",
+                DO_USUARIO,
                 usuario_no_processo,
                 (0, 0),
             ),
             (
                 "a do kernel, numa raiz de processo",
+                DO_KERNEL,
                 kernel_no_processo,
                 (1, 0),
             ),
@@ -34587,7 +34611,8 @@ fn paginacao_a_entrada_nova_privada_publica_e_a_compartilhada_invalida() -> Resu
     })?;
 
     let mut certo = true;
-    for (qual, visto, esperado) in vistos {
+    let mut na_ordem = true;
+    for (qual, endereco, (visto, (onde, nova)), esperado) in vistos {
         crate::log_info!(
             "teste",
             "entrada nova {}: {} tlbi por endereco e {} inteiro(s), esperados {} e {}",
@@ -34598,10 +34623,27 @@ fn paginacao_a_entrada_nova_privada_publica_e_a_compartilhada_invalida() -> Resu
             esperado.1
         );
         certo &= visto == esperado;
+        // A compartilhada: o `tlbi` dela é o do endereço, e veio depois da
+        // escrita — ver "A ordem, e o endereço".
+        if esperado.0 == 1 {
+            crate::log_info!(
+                "teste",
+                "{}: o ultimo tlbi deste nucleo foi o de {:#x}, com a folha nova: {}",
+                qual,
+                onde,
+                nova
+            );
+            na_ordem &= onde == endereco && nova;
+        }
     }
     if !certo {
         return Err(
             "a entrada nova nao seguiu a regra: so a privada de um processo dispensa o tlbi",
+        );
+    }
+    if !na_ordem {
+        return Err(
+            "o tlbi da entrada nova compartilhada saiu antes de a entrada ser escrita, ou com outro endereco",
         );
     }
     Ok(())
