@@ -119,8 +119,10 @@
 //!     que essa regra e a de baixo acham pelo nome, existem
 //!     ([`workflows_que_faltam`]);
 //!   - o canário, o único que sobrepõe — ele testa o candidato —, não roda
-//!     nos pushes, não usa a ação do cache, só usa as ações dele nas versões
-//!     de [`USOS_OFICIAIS`] (desde o lote A16), não publica proveniência e
+//!     nos pushes — desde o lote A16, só nos gatilhos de
+//!     [`GATILHOS_DO_CANARIO`], em toda forma do `on:` que a leitura lê —,
+//!     não usa a ação do cache, só usa as ações dele nas versões de
+//!     [`USOS_OFICIAIS`] (desde o lote A16), não publica proveniência e
 //!     repete os comandos do job de lints;
 //! - **no `cargo xtask compilador`** ([`relatar`]): o canal, o toolchain
 //!   ativo, o `rustc -Vv` completo, o `cargo -V` e os desvios — o que todo
@@ -1606,9 +1608,9 @@ pub(crate) fn conferir_o_canal() -> Result<ExitCode, String> {
              conferindo o compilador depois de cada checkout, com o canal na chave de todo cache, \
              e a ação do compilador com os passos de fora do cargo — o ambiente, o PATH e os \
              rust-toolchain, o canal fixado, o executor — e o das invariantes, que o job de lints \
-             liga antes de todo outro `cargo`; e o canário, o único que sobrepõe, fora dos \
-             pushes, sem a ação do cache, com as versões da lista e com os comandos do job de \
-             lints",
+             liga antes de todo outro `cargo`; e o canário, o único que sobrepõe, só no \
+             agendamento e no disparo manual, sem a ação do cache, com as versões da lista e com \
+             os comandos do job de lints",
             canal.as_deref().unwrap_or("")
         );
         Ok(ExitCode::SUCCESS)
@@ -2594,7 +2596,7 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
                     "{nome}: o canário publica a proveniência — ele não produz artefato oficial"
                 ));
             }
-            fora.extend(gatilhos_de_push(nome, &linhas));
+            fora.extend(gatilhos_fora_da_lista(nome, &linhas));
             continue;
         }
 
@@ -3654,32 +3656,77 @@ fn passo_da_acao(acao: &str, id: &str) -> Option<(String, String)> {
     Some((shell, format!("{script}\n")))
 }
 
-/// Os gatilhos de push do canário — ele roda no agendamento e no disparo
-/// manual, nunca num push.
-fn gatilhos_de_push(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
-    let mut fora = Vec::new();
+/// Os gatilhos do canário, a lista fechada ([`gatilhos_fora_da_lista`]): o
+/// agendamento e o disparo manual. Desde o lote A16.
+const GATILHOS_DO_CANARIO: [&str; 2] = ["schedule", "workflow_dispatch"];
+
+/// Os gatilhos do canário — `linhas`, as de código dele — fora de
+/// [`GATILHOS_DO_CANARIO`]: ele roda no agendamento e no disparo manual,
+/// nunca num push. Nas formas que o `on:` tem: o valor na linha (`on:
+/// push`, `on: [push, …]`), a lista em bloco (`- push`, também na coluna da
+/// própria chave, a sequência compacta do YAML) e as chaves do mapa
+/// (`push:`), na coluna da primeira linha de dentro dele.
+///
+/// # A lista fechada, desde o lote A16
+///
+/// A regra procurava o `push` e o `pull_request` no valor da linha, e o
+/// `push`, o `pull_request` e o `pull_request_target` nas chaves de recuo
+/// dois, e não lia a lista em bloco: com `on:` seguido de `- push`, o canário
+/// rodaria em todo push, e o `cargo xtask invariantes` passava; e um gatilho
+/// fora dos três — o `workflow_run` depois da CI, que também roda a cada push
+/// — passava (o B3 do adversário do lote A15). Agora, o que não é da lista
+/// reprova, em qualquer dessas formas; a lista em bloco na coluna do `on:`,
+/// o lote A16 a achou na revisão do patch do adversário.
+fn gatilhos_fora_da_lista(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
+    let mut gatilhos: Vec<(String, &str)> = Vec::new();
     let mut no_on = false;
-    for l in linhas {
-        if l.recuo == 0 && !l.texto.is_empty() {
-            no_on = chave_e_valor(l.texto).is_some_and(|(chave, valor)| {
-                if chave == "on" && ["push", "pull_request"].iter().any(|g| valor.contains(g)) {
-                    fora.push(format!("{nome}: o canário roda num push (`{}`)", l.texto));
-                }
-                chave == "on"
-            });
+    let mut coluna: Option<usize> = None;
+    for l in linhas.iter().filter(|l| !l.escalar && !l.texto.is_empty()) {
+        let item = l
+            .texto
+            .strip_prefix("- ")
+            .or((l.texto == "-").then_some(""));
+        // Uma linha da raiz é uma chave dela — menos o item de uma lista logo
+        // depois do `on:`, na coluna dele, que é um gatilho.
+        if l.recuo == 0 && !(no_on && item.is_some()) {
+            no_on = false;
+            if let Some(("on", valor)) = chave_e_valor(l.texto) {
+                no_on = true;
+                coluna = None;
+                let dentro = valor
+                    .strip_prefix('[')
+                    .and_then(|v| v.strip_suffix(']'))
+                    .unwrap_or(valor);
+                gatilhos.extend(
+                    dentro
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|g| !g.is_empty())
+                        .map(|g| (sem_aspas(g).to_string(), l.texto)),
+                );
+            }
             continue;
         }
-        if no_on
-            && l.recuo == 2
-            && let Some((chave, _)) = chave_e_valor(l.texto)
-            && ["push", "pull_request", "pull_request_target"].contains(&chave)
-        {
-            fora.push(format!(
-                "{nome}: o canário roda em `{chave}` — só no agendamento e no disparo manual"
-            ));
+        if !no_on || *coluna.get_or_insert(l.recuo) != l.recuo {
+            continue;
         }
+        let gatilho = match item {
+            Some(item) => sem_comentario(item.trim()),
+            None => chave_e_valor(l.texto).map_or(l.texto, |(chave, _)| chave),
+        };
+        gatilhos.push((sem_aspas(gatilho).to_string(), l.texto));
     }
-    fora
+    gatilhos
+        .into_iter()
+        .filter(|(gatilho, _)| !GATILHOS_DO_CANARIO.contains(&gatilho.as_str()))
+        .map(|(gatilho, linha)| {
+            format!(
+                "{nome}: o canário roda em `{gatilho}` (`{linha}`) — só no agendamento e no \
+                 disparo manual ({})",
+                GATILHOS_DO_CANARIO.join(", ")
+            )
+        })
+        .collect()
 }
 
 /// O canário repete os comandos do job de lints da CI oficial: um comando
@@ -8509,5 +8556,74 @@ jobs:
                 "{rotulo}: {fora:#?}"
             );
         }
+    }
+
+    /// Os gatilhos do canário (o B3 do adversário do lote A15): a regra não
+    /// lia a lista em bloco do `on:`, e o `- push` passava; nem um gatilho
+    /// fora do `push`, do `pull_request` e do `pull_request_target` — o
+    /// `workflow_run` depois da CI, o `merge_group`. Reprovam agora, uma vez
+    /// cada, pela lista fechada — também a lista em bloco na coluna do `on:`,
+    /// que o lote A16 achou na revisão do patch —; o agendamento e o disparo
+    /// manual passam, nas formas do `on:`, e o canário do repositório também.
+    #[test]
+    fn adversario_a15_os_gatilhos_do_canario() {
+        let base = "on:\n  schedule:\n    - cron: '17 4 * * 1'\n  workflow_dispatch:\njobs:\n  canario:\n    steps:\n      - uses: actions/checkout@v4\n";
+        let on = "on:\n  schedule:\n    - cron: '17 4 * * 1'\n  workflow_dispatch:\n";
+        assert_eq!(um(CANARIO, base), Vec::<String>::new());
+        for (rotulo, novo, gatilho) in [
+            (
+                "a lista em bloco",
+                "on:\n  - push\n  - workflow_dispatch\n",
+                "push",
+            ),
+            (
+                "a lista em bloco com aspas e comentário",
+                "on:\n  - 'push' # x\n  - workflow_dispatch\n",
+                "push",
+            ),
+            (
+                "o workflow_run depois da CI",
+                "on:\n  workflow_run:\n    workflows: [CI]\n    types: [completed]\n  schedule:\n    - cron: '17 4 * * 1'\n",
+                "workflow_run",
+            ),
+            (
+                "o merge_group",
+                "on:\n  merge_group:\n  workflow_dispatch:\n",
+                "merge_group",
+            ),
+            ("o valor na linha", "on: pull_request\n", "pull_request"),
+            (
+                "a lista em bloco na coluna do `on:` (a sequência compacta)",
+                "on:\n- push\n- workflow_dispatch\n",
+                "push",
+            ),
+        ] {
+            let texto = base.replace(on, novo);
+            assert_ne!(texto, base, "{rotulo}");
+            let fora = um(CANARIO, &texto);
+            assert_eq!(fora.len(), 1, "{rotulo}: {fora:#?}");
+            assert!(
+                fora[0].contains(&format!("o canário roda em `{gatilho}`")),
+                "{rotulo}: {fora:#?}"
+            );
+        }
+        for passa in [
+            "on:\n  - workflow_dispatch\n",
+            "on:\n- workflow_dispatch\n",
+            "on: [workflow_dispatch]\n",
+            "on: workflow_dispatch\n",
+        ] {
+            assert_eq!(
+                um(CANARIO, &base.replace(on, passa)),
+                Vec::<String>::new(),
+                "{passa}"
+            );
+        }
+        let canario = include_str!("../../.github/workflows/canario.yml");
+        assert!(
+            !um(CANARIO, canario)
+                .iter()
+                .any(|f| f.contains("o canário roda em"))
+        );
     }
 }
