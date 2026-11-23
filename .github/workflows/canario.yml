@@ -41,6 +41,12 @@ on:
 permissions:
   contents: read
 
+# Sem cache nenhum: nenhum passo do canário restaura nem grava um cache — nem
+# o do ramo, que os jobs da CI oficial restauram. A falta da ação do cache só
+# diz o que os passos escolhem; o modo do cache, a documentação do GitHub diz,
+# vale pelo token de cache que o job recebe.
+cache-mode: none
+
 # Um canário por canal de cada vez, e o que está rodando não é cancelado: o
 # segundo pedido do mesmo canal espera o primeiro (o GitHub guarda um só na
 # espera; um terceiro toma o lugar dele).
