@@ -9783,6 +9783,82 @@ jobs:
         );
     }
 
+    /// Os falsos positivos de propósito das regras do lote A16 no passo
+    /// `conferir` (o adversário do lote A16, rodada 9): quatro formas
+    /// plausíveis, sem defeito, que a regra do canal reprova, uma vez cada, e
+    /// que falham fechadas — o resumo do job depois da linha da saída (a
+    /// saída na última linha), um `()` num comentário e uma lista vazia do
+    /// bash (`faltam=()`, a definição de uma função), e uma palavra com
+    /// `alias` dentro (`avaliasse`, o apelido). A mensagem diz a linha — a do
+    /// comentário, a da lista, a da palavra —, e, na regra da saída, a que tem
+    /// de ser a última. O quinto — um arquivo não versionado com o nome em
+    /// Latin-1 na árvore de quem roda — reprova a lista dos arquivos do
+    /// repositório, e o teste `adversario_a15_o_nome_que_o_git_cita` o tem. O
+    /// custo é aceitável: a linha muda, e a regra fica larga de propósito.
+    #[test]
+    fn adversario_a16_os_falsos_positivos_de_proposito() {
+        let instala = "        rustc -V > /dev/null\n";
+        let saida = format!("        {SAIDA_DO_CANAL}\n");
+        let git =
+            "        # O arquivo do commit, pelo git sem o ambiente do job — só o PATH, que\n";
+        for (trecho, vezes) in [(instala, 1), (saida.as_str(), 1), (git, 1)] {
+            assert_eq!(ACAO.matches(trecho).count(), vezes, "{trecho}");
+        }
+        for (rotulo, texto, regra, linha) in [
+            (
+                "o resumo do job depois da saída",
+                ACAO.replacen(
+                    &saida,
+                    &format!(
+                        "{saida}        echo \"o compilador oficial: $ativo\" >> \"$GITHUB_STEP_SUMMARY\"\n"
+                    ),
+                    1,
+                ),
+                "não termina pela linha da saída",
+                SAIDA_DO_CANAL,
+            ),
+            (
+                "um `()` num comentário",
+                ACAO.replacen(
+                    instala,
+                    &format!(
+                        "        # A versão sai do tomllib.load() do Python, como o rustup a lê.\n{instala}"
+                    ),
+                    1,
+                ),
+                "a definição de uma função",
+                "# A versão sai do tomllib.load() do Python, como o rustup a lê.",
+            ),
+            (
+                "uma lista vazia do bash",
+                ACAO.replacen(instala, &format!("        faltam=()\n{instala}"), 1),
+                "a definição de uma função",
+                "faltam=()",
+            ),
+            (
+                "uma palavra com `alias` dentro",
+                ACAO.replacen(
+                    git,
+                    &format!(
+                        "        # O git não avaliasse o índice do job: sem o ambiente dele.\n{git}"
+                    ),
+                    1,
+                ),
+                "um apelido do bash",
+                "# O git não avaliasse o índice do job: sem o ambiente dele.",
+            ),
+        ] {
+            assert_ne!(texto, ACAO, "{rotulo}");
+            let fora = conferir_a_acao(&texto);
+            assert!(
+                fora.len() == 1
+                    && fora[0].contains(regra)
+                    && fora[0].contains(&format!("`{linha}`")),
+                "{rotulo}: {fora:#?}"
+            );
+        }
+    }
+
     /// A publicação do canário só com a pasta dos registros (o I2 do
     /// adversário do lote A16 e o E4 do revisor da rodada 9): a regra da
     /// proveniência é o texto `target/proveniencia`, e um `path:` mais largo
