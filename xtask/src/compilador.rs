@@ -4719,6 +4719,9 @@ mod testes {
     /// verdade —, o `RUSTUP_HOME` de verdade, e nada mais que o `ambiente`
     /// do caso; e `antes_no_path`, uma pasta posta na frente do PATH. Os
     /// arquivos de `ferramentas/` — os programas falsos — são executáveis.
+    /// Desde o lote A17, o toolchain oficial é instalado antes, uma vez só
+    /// ([`o_oficial_instalado`]), e a `saida` começa pelo que a instalação
+    /// disse.
     fn rodar_a_acao(
         base: &Path,
         nome: &str,
@@ -4835,23 +4838,23 @@ mod testes {
         // O CARGO_HOME do caso, com os proxies ligados ao rustup de verdade,
         // como o rustup os instala.
         let rustup = rustup_de_verdade();
-        let rustup_home = std::env::var_os("RUSTUP_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".rustup")))
-            .expect("o RUSTUP_HOME");
+        let rustup_home = rustup_home_de_verdade();
+        // O toolchain oficial, instalado uma vez só, antes da primeira ação
+        // (desde o lote A17): o passo `conferir` só o confere.
+        let instalado = match o_oficial_instalado() {
+            Ok(instalado) => &instalado.versao,
+            Err(e) => panic!("a instalação do toolchain oficial, antes da ação: {e}"),
+        };
         let casa = base.join(format!("{nome}-casa"));
         let _ = std::fs::remove_dir_all(&casa);
-        std::fs::create_dir_all(casa.join("bin")).expect("a casa");
-        for proxy in ["rustup", "cargo", "rustc", "rustdoc", "rustfmt"] {
-            std::os::unix::fs::symlink(&rustup, casa.join("bin").join(proxy)).expect("o proxy");
-        }
+        casa_com_os_proxies(&casa, &rustup);
         let mut caminho = format!("{}:/usr/bin:/bin", casa.join("bin").display());
         if let Some(pasta) = antes_no_path {
             caminho = format!("{pasta}:{caminho}");
         }
         let saida_do_github = base.join(format!("{nome}-saida"));
         let mut passou = true;
-        let mut saida = String::new();
+        let mut saida = format!("[instalação de antes] {instalado}\n");
         for (id, _, _) in PASSOS_DA_ACAO {
             if id == "invariantes" {
                 continue;
@@ -4902,6 +4905,162 @@ mod testes {
         NaAcao { passou, saida }
     }
 
+    /// O `RUSTUP_HOME` de quem roda o teste — o da variável, ou o
+    /// `~/.rustup` —, onde moram os toolchains que os passos da ação rodam.
+    fn rustup_home_de_verdade() -> PathBuf {
+        std::env::var_os("RUSTUP_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".rustup")))
+            .expect("o RUSTUP_HOME")
+    }
+
+    /// Um `CARGO_HOME` em `casa`, com os proxies do rustup — o `rustup`, o
+    /// `cargo`, o `rustc`, o `rustdoc` e o `rustfmt` — ligados ao `rustup` de
+    /// verdade, como o rustup os instala.
+    fn casa_com_os_proxies(casa: &Path, rustup: &Path) {
+        std::fs::create_dir_all(casa.join("bin")).expect("a casa");
+        for proxy in ["rustup", "cargo", "rustc", "rustdoc", "rustfmt"] {
+            std::os::unix::fs::symlink(rustup, casa.join("bin").join(proxy)).expect("o proxy");
+        }
+    }
+
+    /// Os nomes do ambiente de quem roda o teste que levam o rustup à rede,
+    /// na instalação de antes da ação ([`o_oficial_instalado`]), se ele os
+    /// tem: o proxy, os certificados e o servidor da distribuição. Nenhum
+    /// escolhe o toolchain.
+    const A_REDE_DO_RUSTUP: [&str; 12] = [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "RUSTUP_DIST_SERVER",
+        "RUSTUP_UPDATE_ROOT",
+    ];
+
+    /// O ambiente da instalação de antes da ação ([`o_oficial_instalado`]):
+    /// o dos passos da ação nos testes ([`rodar_a_acao_na_arvore`]) — o PATH
+    /// com os proxies de `casa`, o `HOME`, o `CARGO_HOME` e o `RUSTUP_HOME` —
+    /// e, do ambiente de quem roda o teste (`ler`), só os nomes de
+    /// [`A_REDE_DO_RUSTUP`]: nem o `RUSTUP_TOOLCHAIN`, que o proxy do rustup
+    /// põe no ambiente do cargo — e o canário, no do job, com o candidato —,
+    /// nem o `RUSTUP_AUTO_INSTALL`, que o canário desliga para o candidato.
+    fn ambiente_da_instalacao(
+        casa: &Path,
+        home: &Path,
+        rustup_home: &Path,
+        ler: impl Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> Vec<(String, std::ffi::OsString)> {
+        let mut ambiente = vec![
+            (
+                String::from("PATH"),
+                format!("{}:/usr/bin:/bin", casa.join("bin").display()).into(),
+            ),
+            (String::from("HOME"), home.as_os_str().to_owned()),
+            (String::from("CARGO_HOME"), casa.as_os_str().to_owned()),
+            (
+                String::from("RUSTUP_HOME"),
+                rustup_home.as_os_str().to_owned(),
+            ),
+        ];
+        for nome in A_REDE_DO_RUSTUP {
+            if let Some(valor) = ler(nome) {
+                ambiente.push((nome.to_string(), valor));
+            }
+        }
+        ambiente
+    }
+
+    /// O toolchain oficial instalado uma vez só, antes da primeira ação
+    /// rodada como o runner ([`rodar_a_acao_na_arvore`]), no `RUSTUP_HOME`
+    /// dos passos: o mesmo pedido que o passo `conferir` da ação faz — o
+    /// `rustc -V` pelo proxy do rustup, numa árvore com o
+    /// `rust-toolchain.toml` do repositório, que instala o toolchain do
+    /// arquivo, com os componentes e os alvos, na primeira chamada —, no
+    /// ambiente de [`ambiente_da_instalacao`]. Devolve o que o `rustc -V`
+    /// disse e o toolchain do sysroot, ou por que não rodou; o resultado
+    /// fica para todos os testes do processo.
+    ///
+    /// # Por quê, desde o lote A17
+    ///
+    /// Os passos da ação nos testes usam o `RUSTUP_HOME` de quem os roda, e o
+    /// `rustc -V` do passo `conferir` instala o toolchain do arquivo quando
+    /// ele falta. Na CI oficial, a ação do job o instalou antes, e as chamadas
+    /// dos testes não instalam nada; no canário, os testes rodam com o
+    /// candidato, o oficial não está instalado — o `RUSTUP_AUTO_INSTALL=0`
+    /// do job vale para os `cargo` dele, e os passos dos testes rodam sem o
+    /// ambiente do job —, e os oito testes que rodam a ação, em paralelo, o
+    /// instalavam ao mesmo tempo, no mesmo `RUSTUP_HOME`: os oito reprovaram,
+    /// com os erros do rustup ("could not remove 'component' file", no run 5
+    /// do canário). Oito `rustc -V` assim, ao mesmo tempo, num `RUSTUP_HOME`
+    /// novo, reprovaram sete vezes em oito, com o mesmo erro; um só passou.
+    /// Aqui, a instalação vem antes, uma vez — o `OnceLock` faz os outros
+    /// testes esperarem por ela —, e os passos dos testes acham o toolchain
+    /// instalado.
+    fn o_oficial_instalado() -> &'static Result<Instalado, String> {
+        static INSTALADO: OnceLock<Result<Instalado, String>> = OnceLock::new();
+        INSTALADO.get_or_init(|| {
+            let projeto = super::super::raiz_do_projeto();
+            let base = std::env::temp_dir().join(format!(
+                "xtask-instalacao-do-oficial-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&base);
+            let arvore = base.join("arvore");
+            let casa = base.join("casa");
+            std::fs::create_dir_all(&arvore).map_err(|e| format!("a árvore: {e}"))?;
+            std::fs::copy(
+                projeto.join(TOOLCHAIN_DA_RAIZ),
+                arvore.join(TOOLCHAIN_DA_RAIZ),
+            )
+            .map_err(|e| format!("o {TOOLCHAIN_DA_RAIZ}: {e}"))?;
+            casa_com_os_proxies(&casa, &rustup_de_verdade());
+            let ambiente = ambiente_da_instalacao(&casa, &base, &rustup_home_de_verdade(), |n| {
+                std::env::var_os(n)
+            });
+            let rodar = |args: &[&str]| {
+                let feito = Command::new(casa.join("bin").join("rustc"))
+                    .args(args)
+                    .current_dir(&arvore)
+                    .env_clear()
+                    .envs(ambiente.iter().map(|(n, v)| (n, v)))
+                    .output()
+                    .map_err(|e| format!("o rustc {args:?} não rodou: {e}"))?;
+                if !feito.status.success() {
+                    return Err(format!(
+                        "o rustc {args:?} saiu com {}: {}",
+                        feito.status,
+                        String::from_utf8_lossy(&feito.stderr).trim()
+                    ));
+                }
+                Ok(String::from_utf8_lossy(&feito.stdout).trim().to_string())
+            };
+            let versao = rodar(&["-V"]);
+            let sysroot = rodar(&["--print", "sysroot"]);
+            let _ = std::fs::remove_dir_all(&base);
+            let sysroot = sysroot?;
+            Ok(Instalado {
+                versao: format!("{}, o toolchain {}", versao?, nome_do_toolchain(&sysroot)),
+                sysroot: PathBuf::from(sysroot),
+            })
+        })
+    }
+
+    /// O toolchain oficial que a instalação de antes da ação instalou, ou
+    /// achou instalado ([`o_oficial_instalado`]): o que o `rustc -V` dele
+    /// disse, com o nome do toolchain, e o sysroot — no `RUSTUP_HOME` dos
+    /// passos, e não o do cargo que compilou o teste, que no canário é o do
+    /// candidato.
+    struct Instalado {
+        versao: String,
+        sysroot: PathBuf,
+    }
+
     /// O proxy do rustup de verdade — o `rustup` do `CARGO_HOME` de quem roda
     /// o teste —, a que os proxies de um caso se ligam, como o rustup os
     /// instala.
@@ -4943,6 +5102,12 @@ mod testes {
         let do_kernel = ler("kernel/.cargo/config.toml");
         let limpa = rodar_a_acao(&base, "limpa", &[], &[], &[], None);
         assert!(limpa.passou, "{}", limpa.saida);
+        // A instalação do oficial vem antes da ação (desde o lote A17).
+        assert!(
+            limpa.saida.starts_with("[instalação de antes] rustc "),
+            "{}",
+            limpa.saida
+        );
         assert!(
             limpa.saida.contains("só o apelido oficial")
                 && limpa.saida.contains("o compilador oficial: ")
@@ -5047,6 +5212,79 @@ mod testes {
         }
         let _ = std::fs::remove_dir_all(&base);
         assert!(cegos.is_empty(), "{cegos:#?}");
+    }
+
+    /// A instalação do toolchain oficial antes da ação (desde o lote A17: os
+    /// testes que rodam a ação disputavam o rustup no canário, no run 5): o
+    /// ambiente dela é o dos passos, mais o proxy e o servidor da
+    /// distribuição de quem roda o teste, e nada que escolha o toolchain — o
+    /// `RUSTUP_TOOLCHAIN` do candidato e o `RUSTUP_AUTO_INSTALL=0` do
+    /// canário, o `LD_LIBRARY_PATH` e o `CARGO` que o cargo põe nos testes
+    /// ficam de fora —; e o toolchain que ela instala, ou acha instalado, é o
+    /// do canal oficial com o host.
+    #[test]
+    fn a_instalacao_de_antes_da_acao_e_a_do_oficial() {
+        let de_fora = [
+            ("RUSTUP_TOOLCHAIN", "nightly-2000-01-01"),
+            ("RUSTUP_AUTO_INSTALL", "0"),
+            ("LD_LIBRARY_PATH", "/x/lib"),
+            ("CARGO", "/x/bin/cargo"),
+            ("HTTPS_PROXY", "http://127.0.0.1:1"),
+            ("RUSTUP_DIST_SERVER", "http://127.0.0.1:2"),
+        ];
+        let ambiente = ambiente_da_instalacao(
+            Path::new("/casa"),
+            Path::new("/home"),
+            Path::new("/rustup"),
+            |nome| {
+                de_fora
+                    .iter()
+                    .find(|(n, _)| *n == nome)
+                    .map(|(_, valor)| std::ffi::OsString::from(valor))
+            },
+        );
+        let nomes: Vec<&str> = ambiente.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            nomes,
+            [
+                "PATH",
+                "HOME",
+                "CARGO_HOME",
+                "RUSTUP_HOME",
+                "HTTPS_PROXY",
+                "RUSTUP_DIST_SERVER"
+            ]
+        );
+        assert_eq!(ambiente[0].1.to_str(), Some("/casa/bin:/usr/bin:/bin"));
+        assert_eq!(ambiente[3].1.to_str(), Some("/rustup"));
+        let canal = canal_do_arquivo(include_str!("../../rust-toolchain.toml")).expect("o canal");
+        let instalado = o_oficial_instalado().as_ref().expect("a instalação");
+        assert!(
+            instalado.versao.starts_with("rustc "),
+            "{}",
+            instalado.versao
+        );
+        assert!(
+            instalado.versao.contains(&format!("o toolchain {canal}-")),
+            "{}",
+            instalado.versao
+        );
+        // O sysroot é o do toolchain oficial no `RUSTUP_HOME` dos passos.
+        assert_eq!(
+            instalado.sysroot.parent(),
+            Some(rustup_home_de_verdade().join("toolchains").as_path()),
+            "{}",
+            instalado.sysroot.display()
+        );
+        assert!(
+            instalado
+                .sysroot
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&format!("{canal}-"))),
+            "{}",
+            instalado.sysroot.display()
+        );
     }
 
     /// O diretório de saída por um link (no lote A12, o achado 3 do
@@ -5490,12 +5728,14 @@ mod testes {
             cegos.push(format!("cargo-que-nao-e-o-proxy: {}", r.saida));
             let _ = std::fs::remove_file(&rastro);
         }
-        // O do toolchain oficial, na frente do PATH, passa.
-        let oficial = Path::new(env!("CARGO"))
-            .parent()
-            .expect("o bin")
-            .display()
-            .to_string();
+        // O do toolchain oficial, na frente do PATH, passa: o `bin` do sysroot
+        // que a instalação de antes da ação achou no `RUSTUP_HOME` dos passos
+        // — e não o do cargo que compilou o teste (o `env!("CARGO")`), que no
+        // canário é o do candidato, de outro canal (desde o lote A17).
+        let oficial = match o_oficial_instalado() {
+            Ok(instalado) => instalado.sysroot.join("bin").display().to_string(),
+            Err(e) => panic!("a instalação do toolchain oficial, antes da ação: {e}"),
+        };
         let r = rodar_a_acao(&base, "o-do-toolchain", &[], &[], &[], Some(&oficial));
         if !r.passou {
             cegos.push(format!("o do toolchain oficial reprovou: {}", r.saida));
