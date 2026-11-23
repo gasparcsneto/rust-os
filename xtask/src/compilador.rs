@@ -2919,6 +2919,15 @@ fn o_que_o_job_escolhe(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
 /// A14). Os jobs da CI já começavam assim, e a regra tira do job todo passo
 /// antes da ação — a classe que o texto dava como da revisão —; um job sem
 /// código — sem o checkout — pede a regra revisada.
+///
+/// # A sequência compacta, desde o lote A16
+///
+/// Os itens do `steps:` na coluna da própria chave são o mesmo YAML, e a
+/// leitura não os toma por passos ([`passos_do_job`]): o job assim reprova
+/// aqui — e, no de lints, também pela regra das invariantes e pela paridade
+/// do canário —, sem defeito (o FP1 do adversário do lote A15). É um falso
+/// positivo de propósito, que falha fechado: nenhum workflow de hoje usa a
+/// forma, e lê-la pede mudar as leituras dos passos; a mensagem a diz.
 fn o_comeco_dos_jobs(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
     let Some(jobs) = linhas
         .iter()
@@ -2965,7 +2974,9 @@ fn o_comeco_dos_jobs(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
                  dois primeiros passos de um job oficial são o `actions/checkout` e a ação \
                  `./.github/actions/compilador`: um passo antes dela — um cache do `~/.rustup`, um \
                  `run:` — escolhe o programa que ela roda, o commit dela ou o que ela confere, e \
-                 um job sem o checkout roda sem ela",
+                 um job sem o checkout roda sem ela. Ou os passos do job numa forma que a leitura \
+                 não lê: os itens do `steps:` na coluna da própria chave (a sequência compacta do \
+                 YAML), que ela não toma por passos — recue-os",
                 chave_e_valor(linhas[comeco].texto).map_or(linhas[comeco].texto, |(c, _)| c)
             ));
         }
@@ -8991,5 +9002,61 @@ jobs:
                 "{nome}"
             );
         }
+    }
+
+    /// Os falsos positivos de propósito (o FP1 a FP3 do adversário do lote
+    /// A15): três formas legítimas que as regras reprovam, e que falham
+    /// fechadas — nenhum workflow de hoje as usa, e lê-las é uma decisão de
+    /// um lote. A sequência compacta do YAML — os itens do `steps:` na
+    /// coluna da chave — reprova uma vez, pelo começo dos jobs, e a mensagem
+    /// diz a forma; a referência `$/` ao próprio repositório, que o GitHub
+    /// recomenda no lugar do `./`, reprova pelo nome da ação; e o checkout
+    /// por um commit, o "pin" que a política do GitHub pode exigir, reprova
+    /// uma vez, pela versão — a lista ganha o commit, revisada.
+    #[test]
+    fn adversario_a15_os_falsos_positivos_de_proposito() {
+        let steps = "    steps:\n";
+        assert_eq!(OFICIAL.matches(steps).count(), 1);
+        let (antes, depois) = OFICIAL.split_at(OFICIAL.find(steps).expect("o steps") + steps.len());
+        let compacta = format!(
+            "{antes}{}",
+            depois
+                .split_inclusive('\n')
+                .map(|l| l
+                    .strip_prefix("  ")
+                    .filter(|_| l.starts_with("      "))
+                    .unwrap_or(l))
+                .collect::<String>()
+        );
+        assert!(compacta.contains("    steps:\n    - uses: actions/checkout@v4\n"));
+        let fora = um(CI, &compacta);
+        assert!(
+            fora.len() == 1
+                && fora[0].contains("não começa pelo checkout")
+                && fora[0].contains("a sequência compacta do YAML"),
+            "{fora:#?}"
+        );
+        let uso = "        uses: ./.github/actions/compilador\n";
+        assert_eq!(OFICIAL.matches(uso).count(), 1);
+        let dolar = OFICIAL.replacen(uso, "        uses: $/.github/actions/compilador\n", 1);
+        assert!(
+            um(CI, &dolar)
+                .iter()
+                .any(|f| f.contains("`$/.github/actions/compilador` não é uma ação permitida")),
+            "{:#?}",
+            um(CI, &dolar)
+        );
+        let checkout = "      - uses: actions/checkout@v4\n";
+        assert_eq!(OFICIAL.matches(checkout).count(), 1);
+        let pin = OFICIAL.replacen(
+            checkout,
+            "      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v4.2.2\n",
+            1,
+        );
+        let fora = um(CI, &pin);
+        assert!(
+            fora.len() == 1 && fora[0].contains("a versão de uma ação permitida fora da lista"),
+            "{fora:#?}"
+        );
     }
 }
