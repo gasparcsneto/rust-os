@@ -67,7 +67,8 @@
 //!   jobs numa lista fechada, nenhum `GITHUB_ENV`, e o checkout só do
 //!   commit ([`o_que_o_job_escolhe`]); e, desde o lote A15, nenhum
 //!   `services:`, nem os comandos do runner que escrevem nele
-//!   ([`COMANDOS_DO_RUNNER`]), e os dois primeiros passos de cada job são o
+//!   ([`COMANDOS_DO_RUNNER`]), as ações permitidas só nas versões da lista
+//!   ([`USOS_OFICIAIS`]), e os dois primeiros passos de cada job são o
 //!   checkout e a ação ([`o_comeco_dos_jobs`]) — e conferem o compilador
 //!   — a ação `.github/actions/compilador`, num passo sem `if:` nem
 //!   `continue-on-error:`, que, desde o lote A12, a leitura lê inteiro e
@@ -443,6 +444,30 @@ const ACOES_OFICIAIS: [&str; 4] = [
 
 /// As do canário: sem o cache da CI nem a conferência do oficial.
 const ACOES_DO_CANARIO: [&str; 2] = ["actions/checkout", "actions/upload-artifact"];
+
+/// O `uses:` inteiro — a ação com a versão — que os workflows oficiais e as
+/// ações locais usam, a lista fechada ([`conferir_os_workflows`]): as de
+/// [`ACOES_OFICIAIS`] nas versões de hoje. Uma versão nova entra aqui, de
+/// propósito, com a revisão.
+///
+/// # Por quê, desde o lote A15
+///
+/// A regra das ações permitidas lia o nome, sem a versão: o checkout por um
+/// commit (`actions/checkout@<sha>`) passava — e o GitHub resolve o commit
+/// em toda a rede de forks do repositório da ação, e não só nos ramos e nas
+/// etiquetas dele: um commit que só existe num fork roda como a ação (o
+/// "commit impostor", publicado em 2023). Um "pin" assim parece um reforço
+/// na revisão, e roda outro código antes da conferência do compilador — o
+/// checkout vem antes dela, e o `pre:` de uma ação JavaScript roda no
+/// começo do job, antes de todo passo (o M4 do adversário do lote A14; o
+/// efeito no GitHub não foi rodado aqui). A etiqueta da lista (`@v4`) é a do
+/// próprio repositório da ação, e quem a move é o dono dele.
+const USOS_OFICIAIS: [&str; 4] = [
+    "actions/checkout@v4",
+    "actions/cache@v4",
+    "actions/upload-artifact@v4",
+    "./.github/actions/compilador",
+];
 
 /// As chaves que o passo da conferência do compilador não tem, num workflow
 /// oficial ([`conferir_os_workflows`]): com o `if:`, a conferência pode não
@@ -2287,7 +2312,8 @@ fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str>
 /// ([`linhas_que_o_passo_nao_le`]); e toda chave de cache, a principal e as
 /// de restauração, leva o canal. Nenhum `uses:` em várias linhas. Desde o
 /// lote A14, nos oficiais, nenhum job roda num `container:` — nem, desde o
-/// lote A15, com `services:` —, o `env:` do
+/// lote A15, com `services:`, e as ações permitidas só nas versões de
+/// [`USOS_OFICIAIS`] —, o `env:` do
 /// workflow e o de cada job só têm os nomes de [`VARIAVEIS_DOS_JOBS`]
 /// ([`o_que_o_job_escolhe`]), nenhum passo escreve no `GITHUB_ENV`
 /// ([`SOBREPOSICOES`]), e o checkout só tem as chaves de
@@ -2379,6 +2405,16 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
                         "{nome}: `{}` não é uma ação permitida ({})",
                         nome_da_acao(valor),
                         permitidas.join(", ")
+                    ));
+                } else if !canario && !USOS_OFICIAIS.contains(&sem_aspas(valor)) {
+                    // A versão também, desde o lote A15.
+                    fora.push(format!(
+                        "{nome}: `{}` — a versão de uma ação permitida fora da lista ({}): um \
+                         commit (`@<sha>`) pode ser de um fork da rede do repositório da ação, e o \
+                         checkout, ou o `pre:` de uma ação JavaScript, roda antes da conferência do \
+                         compilador; uma versão nova entra na lista, revisada",
+                        sem_aspas(valor),
+                        USOS_OFICIAIS.join(", ")
                     ));
                 }
             }
@@ -7121,6 +7157,87 @@ jobs:
             assert_eq!(
                 o_que_o_job_escolhe(nome, &linhas_de_codigo(texto)),
                 Vec::<String>::new()
+            );
+        }
+    }
+
+    /// As versões das ações permitidas (o M4 do adversário do lote A14): o
+    /// checkout por um commit — que o GitHub resolve também num
+    /// fork da rede do repositório da ação —, o cache por um ramo e a
+    /// publicação por outra versão passavam, porque a regra lia só o nome;
+    /// cada um reprova, com o `uses:` inteiro, também numa ação local — e a
+    /// conferência com uma versão, que a da lista não tem. As versões da
+    /// lista, entre aspas ou não, e as do canário passam, e os workflows do
+    /// repositório também.
+    #[test]
+    fn adversario_a14_as_versoes_das_acoes() {
+        let checkout = "      - uses: actions/checkout@v4\n";
+        let cache = "        uses: actions/cache@v4\n";
+        assert_eq!(OFICIAL.matches(checkout).count(), 1);
+        assert_eq!(OFICIAL.matches(cache).count(), 1);
+        let versao = "a versão de uma ação permitida fora da lista";
+        for (rotulo, texto, esperado) in [
+            (
+                "o checkout por um commit",
+                OFICIAL.replacen(
+                    checkout,
+                    "      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567\n",
+                    1,
+                ),
+                "`actions/checkout@0123456789abcdef0123456789abcdef01234567` — ",
+            ),
+            (
+                "o cache por um ramo",
+                OFICIAL.replacen(cache, "        uses: actions/cache@main\n", 1),
+                "`actions/cache@main` — ",
+            ),
+            (
+                "a publicação por outra versão",
+                format!("{OFICIAL}      - uses: actions/upload-artifact@v3\n"),
+                "`actions/upload-artifact@v3` — ",
+            ),
+            // Na revisão do lote A15: a ação local, que não tem versão.
+            (
+                "a conferência com uma versão",
+                OFICIAL.replacen(
+                    "        uses: ./.github/actions/compilador\n",
+                    "        uses: ./.github/actions/compilador@v1\n",
+                    1,
+                ),
+                "`./.github/actions/compilador@v1` — ",
+            ),
+        ] {
+            assert_ne!(texto, OFICIAL, "{rotulo}");
+            let fora = um(CI, &texto);
+            assert_eq!(
+                fora.iter()
+                    .filter(|f| f.contains(esperado) && f.contains(versao))
+                    .count(),
+                1,
+                "{rotulo}: {fora:#?}"
+            );
+        }
+        let local = "runs:\n  using: composite\n  steps:\n    - uses: actions/checkout@main\n";
+        assert!(
+            um(".github/actions/outra/action.yml", local)
+                .iter()
+                .any(|f| f.contains("`actions/checkout@main` — ") && f.contains(versao)),
+        );
+        // Passam: a versão da lista entre aspas, e as do canário.
+        let aspas = OFICIAL.replacen(checkout, "      - uses: 'actions/checkout@v4'\n", 1);
+        assert_ne!(aspas, OFICIAL);
+        assert_eq!(um(CI, &aspas), Vec::<String>::new());
+        for (nome, texto) in [
+            (CI, include_str!("../../.github/workflows/ci.yml")),
+            (
+                ".github/workflows/rede-principal.yml",
+                include_str!("../../.github/workflows/rede-principal.yml"),
+            ),
+            (CANARIO, include_str!("../../.github/workflows/canario.yml")),
+        ] {
+            assert!(
+                !um(nome, texto).iter().any(|f| f.contains(versao)),
+                "{nome}"
             );
         }
     }
