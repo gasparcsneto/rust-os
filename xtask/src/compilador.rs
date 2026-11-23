@@ -2221,6 +2221,32 @@ fn marcadores_de_documento<'a, 'b>(linhas: &'b [Linha<'a>]) -> Vec<&'b Linha<'a>
         .collect()
 }
 
+/// A primeira linha de código de `linhas` — as de um workflow ou de uma
+/// ação —, depois do `---` sozinho do começo, se houver, quando ela não está
+/// na coluna zero: a raiz do documento recuada. Nenhuma, se a raiz está na
+/// coluna zero, ou se não há linha de código.
+///
+/// # Por quê, desde o lote A17
+///
+/// O YAML aceita a raiz de um documento em qualquer coluna — as chaves de
+/// cima todas na coluna dois são o mesmo mapa, e o PyYAML e o Psych o leem
+/// igual —, e as regras daqui leem as chaves de cima na coluna zero: o
+/// canário assim, com um `push:` no `on:`, não tinha gatilho nenhum para a
+/// regra dos gatilhos, e passava (a pista do revisor da rodada 9, o B1 do
+/// adversário do lote A16; se o GitHub aceita a raiz recuada, não se
+/// rodou). A leitura reprova a raiz fora da coluna zero, em todo workflow e
+/// ação.
+fn raiz_fora_da_coluna_zero<'a, 'b>(linhas: &'b [Linha<'a>]) -> Option<&'b Linha<'a>> {
+    let mut codigo = linhas.iter().filter(|l| !l.texto.is_empty());
+    let primeira = codigo.next()?;
+    let raiz = if primeira.recuo == 0 && sem_comentario(primeira.texto) == "---" {
+        codigo.next()?
+    } else {
+        primeira
+    };
+    (raiz.recuo != 0).then_some(raiz)
+}
+
 /// O valor de YAML sem as aspas que o fecham — `'compilador'` e
 /// `"compilador"` são o `compilador` do GitHub —, se ele está inteiro entre
 /// elas, sem escape nem outra aspa dentro; senão, o próprio valor. Desde o
@@ -2589,6 +2615,17 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
                 "{nome}: `{}` — um marcador de documento do YAML: a leitura por linhas do `xtask` \
                  lê um documento só, e o runner recusa um segundo; só o `---` sozinho, na \
                  primeira linha de código, passa",
+                l.texto
+            ));
+        }
+        // A raiz na coluna zero, também na ação do compilador (desde o lote
+        // A17): o YAML aceita a raiz recuada, e as regras leem as chaves de
+        // cima na coluna zero.
+        if let Some(l) = raiz_fora_da_coluna_zero(&linhas) {
+            fora.push(format!(
+                "{nome}: `{}` — a raiz do documento fora da coluna zero: o YAML a lê igual, \
+                 recuada, e as regras daqui leem as chaves de cima — o `on:`, o `jobs:`, o \
+                 `runs:` — na coluna zero; a raiz fica nela",
                 l.texto
             ));
         }
@@ -3863,8 +3900,20 @@ const GATILHOS_DO_CANARIO: [&str; 2] = ["schedule", "workflow_dispatch"];
 /// — passava (o B3 do adversário do lote A15). Agora, o que não é da lista
 /// reprova, em qualquer dessas formas; a lista em bloco na coluna do `on:`,
 /// o lote A16 a achou na revisão do patch do adversário.
+///
+/// # O `on:` na coluna zero, desde o lote A17
+///
+/// A regra acha o `on:` entre as chaves da raiz, na coluna zero, e o YAML
+/// aceita a raiz recuada — as chaves de cima todas na coluna dois, o mesmo
+/// mapa: com o canário assim, a regra não lia gatilho nenhum, e um `push:`
+/// passava (o B1 do adversário do lote A16, a pista do revisor da rodada 9:
+/// rc=0 com o `xtask` de `3991a87`, com o Python dos passos pelo caminho do
+/// sistema, que a paridade conta). A leitura reprova a raiz fora da coluna
+/// zero ([`raiz_fora_da_coluna_zero`]); e o canário sem um `on:` na coluna
+/// zero reprova aqui.
 fn gatilhos_fora_da_lista(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
     let mut gatilhos: Vec<(String, &str)> = Vec::new();
+    let mut achou_o_on = false;
     let mut no_on = false;
     let mut coluna: Option<usize> = None;
     for l in linhas.iter().filter(|l| !l.escalar && !l.texto.is_empty()) {
@@ -3877,6 +3926,7 @@ fn gatilhos_fora_da_lista(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
         if l.recuo == 0 && !(no_on && item.is_some()) {
             no_on = false;
             if let Some(("on", valor)) = chave_e_valor(l.texto) {
+                achou_o_on = true;
                 no_on = true;
                 coluna = None;
                 let dentro = valor
@@ -3902,7 +3952,7 @@ fn gatilhos_fora_da_lista(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
         };
         gatilhos.push((sem_aspas(gatilho).to_string(), l.texto));
     }
-    gatilhos
+    let mut fora: Vec<String> = gatilhos
         .into_iter()
         .filter(|(gatilho, _)| !GATILHOS_DO_CANARIO.contains(&gatilho.as_str()))
         .map(|(gatilho, linha)| {
@@ -3912,7 +3962,14 @@ fn gatilhos_fora_da_lista(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
                 GATILHOS_DO_CANARIO.join(", ")
             )
         })
-        .collect()
+        .collect();
+    if !achou_o_on {
+        fora.push(format!(
+            "{nome}: nenhum `on:` na coluna zero — a regra lê os gatilhos do canário no `on:` da \
+             raiz, na coluna zero; uma raiz recuada, que o YAML lê igual, os esconde dela"
+        ));
+    }
+    fora
 }
 
 /// O canário repete os comandos do job de lints da CI oficial: um comando
@@ -8793,6 +8850,7 @@ jobs:
     #[test]
     fn o_canario_sobrepoe_mas_sem_o_cache_da_ci_nem_a_proveniencia() {
         let canario = "\
+on: workflow_dispatch
 jobs:
   canario:
     env:
@@ -9336,6 +9394,112 @@ jobs:
                 .iter()
                 .any(|f| f.contains("o canário roda em"))
         );
+    }
+
+    /// O canário com a raiz recuada (o B1 do adversário do lote A16, a pista
+    /// do revisor da rodada 9): as chaves de cima na coluna dois são o mesmo
+    /// YAML, e a regra dos gatilhos não achava o `on:`, nem o `push:` dele.
+    /// Reprova agora duas vezes — pela leitura, a raiz fora da coluna zero, e
+    /// pela regra dos gatilhos, nenhum `on:` na coluna zero —, com o `push:`
+    /// ou sem ele, e também depois de um `---`; o canário do repositório
+    /// passa.
+    #[test]
+    fn adversario_a16_o_canario_com_a_raiz_recuada() {
+        let base = "on:\n  schedule:\n    - cron: '17 4 * * 1'\n  workflow_dispatch:\njobs:\n  canario:\n    steps:\n      - uses: actions/checkout@v4\n";
+        let recuar = |texto: &str| -> String {
+            texto
+                .lines()
+                .map(|l| format!("  {l}\n"))
+                .collect::<String>()
+        };
+        assert_eq!(um(CANARIO, base), Vec::<String>::new());
+        let com_push = base.replace("  workflow_dispatch:\n", "  push:\n  workflow_dispatch:\n");
+        for (rotulo, texto) in [
+            ("a raiz recuada, com o push", recuar(&com_push)),
+            ("a raiz recuada, sem gatilho novo", recuar(base)),
+            (
+                "o `---` e a raiz recuada",
+                format!("---\n{}", recuar(&com_push)),
+            ),
+        ] {
+            let fora = um(CANARIO, &texto);
+            assert_eq!(fora.len(), 2, "{rotulo}: {fora:#?}");
+            assert!(
+                fora[0].contains("a raiz do documento fora da coluna zero")
+                    && fora[1].contains("nenhum `on:` na coluna zero"),
+                "{rotulo}: {fora:#?}"
+            );
+        }
+        // Sem o `on:`, com a raiz na coluna zero: só a regra dos gatilhos.
+        let sem_on = base.replace(
+            "on:\n  schedule:\n    - cron: '17 4 * * 1'\n  workflow_dispatch:\n",
+            "",
+        );
+        let fora = um(CANARIO, &sem_on);
+        assert!(
+            fora.len() == 1 && fora[0].contains("nenhum `on:` na coluna zero"),
+            "{fora:#?}"
+        );
+        let canario = include_str!("../../.github/workflows/canario.yml");
+        assert!(
+            !um(CANARIO, canario)
+                .iter()
+                .any(|f| f.contains("coluna zero"))
+        );
+    }
+
+    /// A raiz na coluna zero, em todo workflow e ação (o lote A17, a forma
+    /// geral do B1 do adversário do lote A16): cada arquivo da definição da
+    /// CI do repositório, com a raiz dois espaços para dentro — o mesmo YAML
+    /// —, reprova uma vez pela leitura; o `---` sozinho antes da raiz na
+    /// coluna zero, e os arquivos como estão, passam.
+    #[test]
+    fn adversario_a16_a_raiz_na_coluna_zero() {
+        let recuar = |texto: &str| -> String {
+            texto
+                .lines()
+                .map(|l| {
+                    if l.trim().is_empty() {
+                        String::from("\n")
+                    } else {
+                        format!("  {l}\n")
+                    }
+                })
+                .collect::<String>()
+        };
+        let leitura = "a raiz do documento fora da coluna zero";
+        for (nome, texto) in [
+            (CI, include_str!("../../.github/workflows/ci.yml")),
+            (
+                ".github/workflows/rede-principal.yml",
+                include_str!("../../.github/workflows/rede-principal.yml"),
+            ),
+            (CANARIO, include_str!("../../.github/workflows/canario.yml")),
+            (
+                ACAO_DO_COMPILADOR,
+                include_str!("../../.github/actions/compilador/action.yml"),
+            ),
+            (
+                ".github/actions/outra/action.yml",
+                "name: Outra\nruns:\n  using: composite\n  steps:\n    - run: echo\n      shell: bash\n",
+            ),
+        ] {
+            assert!(
+                !um(nome, texto).iter().any(|f| f.contains(leitura)),
+                "{nome}"
+            );
+            let fora = um(nome, &recuar(texto));
+            assert_eq!(
+                fora.iter().filter(|f| f.contains(leitura)).count(),
+                1,
+                "{nome}: {fora:#?}"
+            );
+            let explicito = format!("---\n{texto}");
+            assert!(
+                !um(nome, &explicito).iter().any(|f| f.contains(leitura)),
+                "{nome}"
+            );
+        }
     }
 
     /// O canal na chave de cache pela expressão (o B2 do adversário do lote
