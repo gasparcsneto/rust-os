@@ -867,7 +867,7 @@ xtask/src/
 ├── bancada_sdk.rs   a bancada do SDK: duas máquinas, o modelo de fora do repositório instalado pelo gate no armazém das duas e falando entre elas, o eco-malha com clientes daqui e de lá e o teto da relação, os dois sentidos, a conversa pelo teclado, as medidas do aviso e da vazão, e a revogação no meio — nos quatro pares
 ├── canal_tcp.rs     o canal do agente por TCP do lado de fora: a porta encaminhada, e a ponte da suíte — `xtask/bancada/ponte.py`
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
-├── compilador.rs    o compilador oficial: o canal com data dos dois `rust-toolchain.toml`, a conferência do começo de todo comando — o arquivo do commit, o toolchain em cada diretório de build, o cargo e o rustc do próprio `xtask` (gravado pelo `xtask/build.rs`), o config do cargo lido pelo cargo, com o executor e o apelido do `cargo xtask` e, desde o lote A10, numa lista em cada diretório de build — na raiz, desde o lote A11, só o apelido —, e os dois `rust-toolchain.toml` só com as chaves do oficial; outro compilador só com `DUKE_OUTRO_COMPILADOR=1`, numa execução não oficial —, o `cargo xtask compilador` e a parte do `invariantes` que confere o canal, o config do cargo, o `xtask`, os workflows, a ação do compilador — com os passos de fora do cargo, o ambiente, o canal fixado — a exceção ao 4.1 do `CLAUDE.md` que espera o dono — e o executor, e o das invariantes, que o job de lints liga pelo `with:` do passo dela, um passo sem `if:` nem `continue-on-error:`, lido inteiro desde o lote A12, numa leitura que falha fechada no arquivo inteiro desde o lote A13 — desde o lote A14, também nos espaços que o YAML não toma por espaço e num segundo documento —, com os passos da própria ação só com as chaves que ela lê e, desde o lote A14, a forma dela, cada passo pelo item de `runs.steps`, o `git` dela sem o ambiente do job, e os jobs oficiais sem `container:`, com o `env:` numa lista fechada e o checkout só com o `uses:` e o `name:`, e, desde o lote A15, sem `services:`, sem o `ACTIONS_ALLOW_UNSECURE_COMMANDS` e os comandos `set-env` e `add-path` do runner, com as ações nas versões da lista, os dois primeiros passos de cada job o checkout e a ação, e o canal da ação só da linha que o lê — e o canário
+├── compilador.rs    o compilador oficial: o canal com data dos dois `rust-toolchain.toml`, a conferência do começo de todo comando — o arquivo do commit, o toolchain em cada diretório de build, o cargo e o rustc do próprio `xtask` (gravado pelo `xtask/build.rs`), o config do cargo lido pelo cargo, com o executor e o apelido do `cargo xtask` e, desde o lote A10, numa lista em cada diretório de build — na raiz, desde o lote A11, só o apelido —, e os dois `rust-toolchain.toml` só com as chaves do oficial; outro compilador só com `DUKE_OUTRO_COMPILADOR=1`, numa execução não oficial —, o `cargo xtask compilador` e a parte do `invariantes` que confere o canal, o config do cargo, o `xtask`, os workflows, a ação do compilador — com os passos de fora do cargo, o ambiente, o canal fixado — a exceção ao 4.1 do `CLAUDE.md` que espera o dono — e o executor, e o das invariantes, que o job de lints liga pelo `with:` do passo dela, um passo sem `if:` nem `continue-on-error:`, lido inteiro desde o lote A12, numa leitura que reprova no arquivo inteiro, desde o lote A13, as formas que ela não lê — desde o lote A14, também nos espaços que o YAML não toma por espaço e num segundo documento —, com os passos da própria ação só com as chaves que ela lê e, desde o lote A14, a forma dela, cada passo pelo item de `runs.steps`, o `git` dela sem o ambiente do job, e os jobs oficiais sem `container:`, com o `env:` numa lista fechada e o checkout só com o `uses:` e o `name:`, e, desde o lote A15, sem `services:`, sem o `ACTIONS_ALLOW_UNSECURE_COMMANDS` e os comandos `set-env` e `add-path` do runner, com as ações nas versões da lista, os dois primeiros passos de cada job o checkout e a ação, e o nome do canal da ação só em linhas iguais à que o lê e à que o escreve, e, desde o lote A16, cada workflow pelo caminho como o git o tem, a CI e o canário achados pelo nome, o canal na chave de cache pela expressão, do passo da ação, e o passo `conferir` lido em toda linha — e o canário, desde o lote A16 com as ações nas versões da lista e só no agendamento e no disparo manual
 ├── copia.rs         a bancada da cópia de segurança: a cópia e a restauração por um agente, como no `operar` — o corte, a autoridade que não volta, a reinstalação, a queda em cada fronteira, a produção e a outra máquina
 ├── digitacao.rs     a pessoa no teclado da máquina, pelo monitor do emulador, nas bancadas que digitam: a linha conferida antes do Enter — na tela, pela árvore semântica; a senha, pela conta das teclas do kernel; o Enter, contado — e o ritmo que se adapta à perda de teclas, um fator de respiro por máquina que dobra a cada perda, até 8×, e vale até o fim da rodada, também depois dos cortes de energia; cada texto, menos o apagar e o Enter, começa com o shift sozinho, apertado e solto, contra o shift preso de um soltar perdido
 ├── disco_hostil.rs  o disco hostil da bancada: um servidor NBD com cache volátil que o corte perde, inteiro ou em parte, sem devolver o disco à máquina cortada, erros de mídia por faixa e respostas retidas; o fim espera a conexão em curso
@@ -8689,7 +8689,9 @@ registro de cada uma no ponto em que nasceu.
   ação, e nele só nas linhas que o `str::lines` separa, e fora dos blocos
   com o `-` de um item.
   Reprovam agora, em todo workflow e em toda ação local — a do compilador
-  inclusive —, antes de toda regra: as quebras de linha que só o YAML vê —
+  inclusive; nos que a lista do git dava: o de um nome que o git cita, com
+  acento, ficava fora dela até o lote A16 —, antes de toda regra: as
+  quebras de linha que só o YAML vê —
   o CR sozinho, o NEL, o LS e o PS, que escondiam o `if: false` do passo
   da ação depois do `name:` ou de um comentário, e o BOM fora do começo do
   arquivo (`quebras_que_a_leitura_nao_ve`) —; e, fora do conteúdo dos
@@ -8708,7 +8710,9 @@ registro de cada uma no ponto em que nasceu.
   não imprime — `invariantes: true` com um NBSP no fim passava (o M4 e o
   B1 do adversário do lote A13) —; e o texto de um bloco, que ainda
   contava como um passo da própria ação e, no job de lints, como o passo
-  que liga as invariantes (o M1 e o M3 dele);
+  que liga as invariantes (o M1 e o M3 dele) — e a linha que começa por
+  `#`, que a leitura toma por comentário também no conteúdo de um bloco,
+  fica com a revisão (o "O que fica" do lote A15);
   (b) os passos da própria ação só com as chaves que a leitura lê neles (o
   M4, médio): o `name:`, o `id:`, o `shell:` e o `run: |`, e, no das
   invariantes, o `if:` da entrada e o `env:` só com o toolchain fixado
@@ -8808,8 +8812,9 @@ registro de cada uma no ponto em que nasceu.
   `outputs.canal` fixo passavam. A ação só tem as chaves de cima que o
   runner lê, a entrada, a saída `canal` com o valor do passo `conferir` —
   a linha do `echo` que a escreve, agora uma marca dele: a marca prova a
-  linha, e não o valor, que o lote A15 confere (o B1 do adversário do lote
-  A14) —, o `runs.using: composite` e os quatro passos, na ordem, e só
+  linha, e não o valor, que o lote A15 confere pela regra do canal, nas
+  formas que ela lê (o B1 do adversário do lote A14) —, o `runs.using:
+  composite` e os quatro passos, na ordem, e só
   eles (`forma_da_acao`);
   cada passo é o item de `runs.steps` com o `id` dele, e o `shell:`, o
   `run:`, o `if:` e o `env:` são as chaves dele;
@@ -8921,18 +8926,22 @@ registro de cada uma no ponto em que nasceu.
   rodado): a regra lia o nome sem a versão, e o checkout por um commit
   passava — o GitHub resolve o commit em toda a rede de forks da ação. O
   `uses:` inteiro fica numa lista fechada (`USOS_OFICIAIS`), as quatro
-  ações nas versões de hoje; o canário, com a lista dele, fica de fora;
+  ações nas versões de hoje; o canário, com a lista dele, ficava de fora,
+  e o lote A16 o pôs nela (o M2 do adversário do lote A15);
   (e) o canal do passo `conferir` (o B1, baixo): a marca do `echo` provava
   a linha, e não o valor — o canal fixo numa linha antes dela, ou um
   segundo `echo` depois, passavam. A regra do canal
   (`o_canal_do_passo_conferir`) confere, nas linhas de código do script,
   que as duas primeiras são o `set -euo pipefail` e a que lê o canal do
   `rust-toolchain.toml`, que o nome `canal`, fora da expansão (`$canal`),
-  só aparece nela e na que escreve a saída, e que só esta cita o
-  `GITHUB_OUTPUT`: o `read`, o `printf -v`, o `declare`, a aritmética, o
-  `::set-output`, o `tee` e uma função ou um `PATH` antes da leitura
-  reprovam. A mensagem de erro do passo que citava "o canal" passou a
-  dizer "o valor do channel";
+  só aparece em linhas iguais a ela ou à que escreve a saída, e que só
+  esta cita o `GITHUB_OUTPUT`: o `read`, o `printf -v`, o `declare`, a
+  aritmética, o `::set-output`, o `tee` e uma função ou um `PATH` antes da
+  leitura reprovam — e uma cópia da linha da leitura mais abaixo, e a
+  linha que começa por `#` num texto em várias linhas, passavam: o lote
+  A16 as recusa (o E1 do revisor e o B1 do adversário da rodada 8). A
+  mensagem de erro do passo que citava "o canal" passou a dizer "o valor
+  do channel";
   (f) os informativos: o `defaults:` do workflow e do job (o I1) não chega
   aos passos da ação — a fonte do runner o pula num passo de uma ação — e
   vale nos `run:` do job, depois dela, como o `env:` e o `shell:` de um
@@ -8952,7 +8961,8 @@ registro de cada uma no ponto em que nasceu.
   escreve no `GITHUB_ENV`, numa expressão do `env:` de um passo que liga os
   comandos do runner, num `eval` ou num `source` do script da ação — e o
   texto numa linha que a leitura toma por comentário — num bloco, a que
-  começa por `#`, que um heredoc do bash lê como texto —; um passo depois
+  começa por `#`, que um heredoc do bash lê como texto; no passo
+  `conferir` da ação, o lote A16 a lê —; um passo depois
   da ação; o `defaults:`; o script da ação; o runner e a imagem que o
   `runs-on:` escolhe — também a que o `snapshot:` de um job grava —; e a
   etiqueta da lista (`@v4`), que o dono da ação move. O efeito, no GitHub,
@@ -8967,6 +8977,109 @@ registro de cada uma no ponto em que nasceu.
   o controle de `adversario_a12_o_passo_da_acao_como_texto_de_um_bloco`,
   que punha um passo entre o checkout e a ação —; e as mutações (ver *As
   do lote A15*, em [As mutações do ponto sem volta e de quem
+  pede](#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
+  No lote A16, [B], os achados do adversário da rodada 8 sobre o lote A15
+  — a lista dos arquivos que a guarda lê, o canário, a CI pelo nome, a
+  chave de cache e o canal do passo `conferir` —, os itens do revisor da
+  rodada 8 sobre o texto dos lotes A14 e A15 e o que o lote achou na
+  revisão dos patches, sem autoridade, regra de acesso, registro,
+  identidade, persistência ou semântica de auditoria novos. O texto segue
+  o princípio do lote A15 — as regras, e o limite dito uma vez —; seis
+  frases do próprio lote A15, que os achados desmentem, foram corrigidas
+  no lugar. As regras:
+  (a) o nome que o git cita (o M1, médio; o efeito no GitHub não foi
+  rodado): a lista dos arquivos do repositório lia o `git ls-files` sem o
+  `-z`, e o git põe entre aspas, com os bytes em octal, o caminho com um
+  acento — um workflow `publicação.yml`, uma ação numa pasta
+  `preparação/` e a CI renomeada para `integração.yml` não passavam por
+  regra nenhuma. A lista é separada pelo NUL, um caminho que não é UTF-8
+  reprova, e a extensão do workflow vale em qualquer caixa
+  (`arquivos_do_repositorio`, `da_definicao_da_ci`);
+  (b) as versões das ações no canário (o M2, médio; o efeito no GitHub não
+  foi rodado): o lote A15 o deixou fora da lista, e o cache do GitHub é
+  do ramo, e não do workflow — o canário grava no do ramo padrão, que os
+  jobs da CI restauram depois da conferência, e toda ação JavaScript
+  recebe o token do job; o checkout dele por um commit de um fork gravaria
+  o `target/` de um job da CI. As versões de `USOS_OFICIAIS` valem também
+  nele, e o nome segue na lista dele, sem a ação do cache;
+  (c) a CI e o canário pelo nome (o M3, médio): a regra de que o job de
+  lints liga as invariantes e a da paridade do canário só rodavam com o
+  `ci.yml` e o `canario.yml` achados — a CI renomeada, sem a entrada das
+  invariantes, passava. A falta de cada um reprova
+  (`workflows_que_faltam`); e as regras que leem a definição da CI saíram
+  de `conferir_o_canal`, que lê o repositório e roda o cargo, para uma
+  função sem E/S (`conferir_a_definicao_da_ci`), que um teste chama com a
+  definição do repositório e com trocas: tirar dela a chamada da falta — a
+  mutação do adversário que sobrevivia aos testes de unidade, a MC7 — ou a
+  de qualquer outra regra reprova;
+  (d) os gatilhos do canário (o B3, baixo): a lista em bloco do `on:`
+  (`- push`) e um gatilho fora dos três que a regra procurava — o
+  `workflow_run` — passavam. Os gatilhos ficam numa lista fechada
+  (`GATILHOS_DO_CANARIO`: o agendamento e o disparo manual), nas formas do
+  `on:` — o valor na linha, a lista em bloco e as chaves do mapa —, e a
+  lista em bloco na coluna do próprio `on:`, a sequência compacta do YAML,
+  que o patch do adversário não lia, o lote a achou na revisão;
+  (e) o canal na chave de cache (o B2, baixo): a regra procurava o texto
+  `steps.compilador.outputs.canal`, e uma expressão que vale o próprio
+  texto passava. A chave leva a expressão (`CANAL_NA_CHAVE`); e o passo da
+  ação tem o `id: compilador` — a regra contava as conferências e os `id`,
+  sem os ligar, e a ação sem o `id`, com um passo depois dela com
+  `id: compilador` que escreve outro canal na saída dele, passava (o lote o
+  achou na revisão);
+  (f) o canal do passo `conferir` (o E1 do revisor e o B1 do adversário,
+  baixos): a regra do lote A15 conferia pela posição só as duas primeiras
+  linhas — uma cópia exata da linha da leitura, mais abaixo, depois de uma
+  função `python3`, passava — e tirava as que começam por `#`, que o bash
+  roda dentro de um texto em várias linhas: com a ação rodada como o
+  runner, o canal falso chegou à saída do passo. A linha da leitura
+  aparece uma vez; a da saída é a última do script; nenhuma linha define
+  uma função (os parênteses vazios, a palavra `function`) ou um apelido
+  (`alias`, `expand_aliases`, `BASH_ALIASES`), nem tem o `enable` — que
+  trocavam o `echo` da saída sem citar o nome —; e a regra lê toda linha
+  do script, as de comentário inclusive (`o_canal_do_passo_conferir`,
+  `troca_um_comando`). O comentário do passo cita o `$canal`, e não o
+  nome: o comentário com a palavra, que o lote A15 deixava passar,
+  reprova;
+  (g) os falsos positivos e os informativos: a sequência compacta do
+  `steps:` (o FP1), a referência `$/` ao próprio repositório (o FP2) e o
+  checkout por um commit, o "pin" que a política do GitHub pode exigir (o
+  FP3), reprovam de propósito — falham fechados, e nenhum workflow de hoje
+  os usa —, num teste, e a mensagem do começo dos jobs diz a primeira; o
+  conteúdo do cache (o I1) e as formas novas do GitHub — o `cache-mode`,
+  o lockfile `.github/workflows/actions.lock` e o `$/` (o I2) — a guarda
+  não lê: lê-los pede uma decisão de um lote, com um run da CI; e a regra
+  das variáveis do cargo na CI, do `main.rs`, que lê a extensão com a
+  caixa (o I3), fica fora deste lote, que não toca o `main.rs`;
+  (h) o texto: as seis frases do lote A15 que os achados desmentem — "a
+  leitura de todo workflow", "o canário não usa o cache da CI", "o job de
+  lints liga as invariantes", o limite da regra do canal, "o canal em toda
+  chave de cache" e "o canário não roda nos pushes" —, no lugar; os itens
+  do revisor da rodada 8 — o E1 e o E2, acima, no inventário, no
+  `docs/DECISOES.md`, no `docs/SEGURANCA.md`, no cabeçalho da ação e nos
+  docs do `xtask`; o E3, na CI 544; e os P1 a P7 —; e as notas de
+  correção, na mensagem do commit deste.
+  O que fica, com a revisão: o que fica do lote A15 — o nome montado em
+  pedaços, o texto numa linha que a leitura toma por comentário num
+  workflow, um passo depois da ação, o `defaults:`, o script da ação, o
+  runner e a imagem, a etiqueta da lista —; no passo `conferir`, o que a
+  regra do canal não segue pelo texto — o nome montado em pedaços, o texto
+  executado (o `eval`, o `source`, outro `bash`) e o caminho do script: um
+  `exit`, um `exec`, um heredoc ou um `trap` antes da linha da saída, que
+  a pulariam e deixariam a saída vazia —; o conteúdo do cache, que os jobs
+  restauram depois da ação, de outra execução do ramo ou do ramo padrão; e
+  as formas novas do GitHub, acima. O efeito, no GitHub, do M1 e do M2 vem
+  da documentação e da fonte do runner, e não de um run da CI. Os casos do
+  lote A16: no `xtask`, sete novos —
+  `adversario_a15_o_nome_que_o_git_cita`,
+  `adversario_a15_as_versoes_do_canario`,
+  `adversario_a15_a_ci_e_o_canario_pelo_nome`,
+  `adversario_a15_os_gatilhos_do_canario`,
+  `adversario_a15_o_canal_na_chave_pela_expressao`,
+  `adversario_a15_o_canal_do_passo_conferir_em_toda_linha` e
+  `adversario_a15_os_falsos_positivos_de_proposito` — e um ajustado —
+  `adversario_a14_o_canal_que_o_passo_conferir_escreve`, cujos
+  comentários com a palavra reprovam agora —; e as mutações (ver *As do
+  lote A16*, em [As mutações do ponto sem volta e de quem
   pede](#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
 - **A margem de memória da compressão concorrente** (de fora da 14.1 e da
   correção da vaga do morto; investigada em 8 de novembro de 2026, sem mudar
@@ -10849,7 +10962,10 @@ o texto, e não o que o compilador faz dele. O modelo de ameaça delas é este:
   própria ação, no `git` dela e no que o job escolhe para ela; e o lote
   A15, o que o adversário da rodada 7 achou nos workflows — os comandos do
   runner, o começo dos jobs, os serviços, as versões das ações — e no canal
-  da ação; o inventário abaixo é o de depois deles.
+  da ação; e o lote A16, o que o adversário da rodada 8 achou — o nome que
+  o git cita, as versões e os gatilhos do canário, a CI pelo nome, a chave
+  de cache e, de novo, o canal da ação —; o inventário abaixo é o de
+  depois deles.
 
 **Onde a confiança começa.** A definição da CI — os workflows e as ações
 de `.github/` — é a raiz da confiança, e quem a protege é a revisão. As
@@ -10861,12 +10977,14 @@ pedaços, uma linha que a leitura toma por comentário, um passo depois da
 ação, o script da ação — é da revisão, e não da guarda. Três rodadas
 seguidas do adversário — a 5, a 6 e a 7 — acharam formas assim, e o texto
 de cada lote prometia mais do que o código fazia; desde o lote A15, o
-texto daqui diz as regras, e não o que elas garantiriam. Abaixo da
+texto daqui diz as regras, e não o que elas garantiriam — e a rodada 8
+achou seis frases do próprio lote A15 que ainda prometiam mais, que o
+lote A16 corrigiu. Abaixo da
 definição da CI, desde o lote A10, a ação do compilador confere o que
 escolhe o primeiro `cargo` que roda o código do repositório — o `cargo
 xtask invariantes`, no job de lints —: o toolchain e o ambiente; e, desde
 o lote A15, os dois primeiros passos de cada job oficial são o checkout e
-ela — nenhum outro passo do job roda antes dela. Antes de qualquer
+ela — nenhum passo do job, além do checkout, roda antes dela. Antes de qualquer
 programa do toolchain, com o `python3` do sistema, ela confere o ambiente
 do job por uma lista fechada, as casas do cargo e do rustup e o PATH fora
 do repositório, o `cargo`, o `rustc`, o `rustdoc` e o `rustfmt` do PATH —
@@ -10883,8 +11001,11 @@ dele: se ele preferir a letra, a fixação sai, e a guarda fica nos
 `rust-toolchain` que o passo do ambiente confere, só os dois oficiais e só
 com as chaves do oficial —;
 devolve o canal, que toda chave de cache leva — desde o lote A15, o nome
-`canal` do passo, fora da expansão, só aparece na linha que o lê do
-arquivo e na que escreve a saída, e só esta cita o `GITHUB_OUTPUT` —;
+`canal` do passo, fora da expansão, só aparece em linhas iguais à que o
+lê do arquivo ou à que escreve a saída, e só esta cita o
+`GITHUB_OUTPUT`; desde o lote A16, a da leitura aparece uma vez, a da
+saída é a última, e a regra lê toda linha do passo, as de comentário
+inclusive —;
 confere o config do cargo de cada diretório de build pela consulta do
 próprio cargo; e roda as invariantes, no job de lints, antes do cache e
 de todo outro `cargo`. A partir daí, o `xtask` que confere é o compilado
@@ -10907,9 +11028,9 @@ ninguém ver.
 | as macros procedurais | desde o lote A8, as dependências diretas do kernel numa lista fechada, de onde cada uma vem, e nenhuma de macros procedurais; e os pacotes de macros procedurais do grafo numa lista fechada, com quem usa cada um — pelo grafo que o `cargo metadata` resolve (`dependencias_fora`); e, desde o lote A9, nenhuma direta renomeada | os da lista, que o kernel não alcança pelo nome: o `const_fn` e o `rustversion`, que o `x86_64` usa por dentro; o resto não compila para o kernel — o `defmt` e o `thiserror`, que reexportam os deles, também não |
 | o `build.rs` | desde o lote A8, o pacote do kernel só com o binário, e os pacotes do repositório sem `build.rs`, pelo grafo | os `build.rs` dos pacotes do crates.io, que valem para o pacote deles — menos uma biblioteca nativa ou um caminho do ligador, que chegariam ao do kernel: só o do `defmt` pede um, e ele não compila para o kernel —, travados pelo `Cargo.lock` |
 | o config do cargo, efetivo | desde o lote A8, o valor que o cargo lê de dentro de `kernel/` (`config get`) — o config do kernel, o da raiz e o do `CARGO_HOME` —, em todo arquivo e forma: os rustflags de cada alvo, exatamente os da lista (`RUSTFLAGS_DO_KERNEL`); nenhum ligador, `build.rustflags`, `[unstable]` nem `[env]` (`config_do_kernel_fora`); e nenhum config sem a extensão (`recursos_do_kernel_fora`). Desde o lote A9, a tabela `target` só com as dos dois alvos do kernel — nem a de um `cfg(…)`, nem a do hospedeiro, cujos ligadores rodam na compilação do kernel —, e nenhuma `[source]`, `[patch]`, `[host]` nem `[profile]`; e, desde o lote A10, nenhum `paths`, a terceira forma de trocar um pacote do grafo com o `Cargo.lock` igual. E o config de todo diretório de build — os programas, o iniciador, o modelo do SDK, o kernel —, desde o lote A10, numa lista, na ação e no começo de todo comando (`desvios_da_configuracao`): o apelido, o `build.target`, um dos alvos do projeto, e os `rustflags` de cada tabela `target` nas formas de hoje (`FORMAS_DOS_RUSTFLAGS`) — nenhum `[env]`, `[host]`, `[unstable]`, `[profile]`, `paths`, `[source]` nem `[patch]`, e nenhum rustflag que escolha o ligador, por qualquer opção —; e, desde o lote A11, na raiz, onde o `xtask` se compila e roda, só o apelido, no `xtask` como na ação (`TABELAS_DA_RAIZ`): o `-C link-arg=-T…` da lista, cujo script pode trazer objetos à ligação, não passa ali | o config da máquina de quem compila, que a consulta lê onde o `xtask` roda, e que um `[build] jobs` ou um `[net]` pessoal tornam desvio — quem o tem o tira, ou declara a execução não oficial |
-| o executor e o apelido do `cargo xtask` | desde o lote A9, fora do cargo: o passo do executor da ação do compilador, antes de todo `cargo` da CI que compila ou roda — em todo diretório de build, o `[alias]` só o oficial, nenhuma tabela `target` com executor nem ligador, a `[build]` sem trocar o compilador, e a raiz só com o apelido —; dentro do `xtask`, a conferência do começo de todo comando e o `cargo xtask compilador`, que veem o executor e o apelido que ainda chamam o `xtask`; e o `invariantes`, que confere que a ação tem os passos (`conferir_a_acao`). Desde o lote A10, a consulta roda no toolchain fixado pelo canal (a exceção ao 4.1 do `CLAUDE.md`, acima), o config fora da raiz fica na lista (acima), e as invariantes rodam na própria ação, no job de lints, antes do cache e de todo outro `cargo` (`as_invariantes_na_acao`): nada do repositório roda entre a conferência e elas. Desde o lote A11, a entrada que as liga é uma chave do `with:` do passo da ação — num `env:`, não vale —, e o passo da ação não tem `if:` nem `continue-on-error:` (`CHAVES_FORA_DO_PASSO_DA_ACAO`), que a deixariam sem rodar ou o job seguir com ela reprovada. Desde o lote A12, a leitura desse passo falha fechada: ele só tem o `name:`, o `id:`, o `uses:` da ação e o `with:` com as entradas (`CHAVES_DO_PASSO_DA_ACAO`), na forma simples — a chave sem aspas nem escape, o valor numa linha, sem âncora, apelido, etiqueta nem estilo de fluxo —, e uma linha dele que ela não lê reprova (`linhas_que_o_passo_nao_le`): o `"i\x66": false`, que o YAML lê como `if: false`, a chave complexa, a fusão, o `uses:` da ação no `with:` de outra ou num bloco `run:` — sem o `-` de um item; com ele, desde o lote A13 —; e o comentário do fim de uma linha sai do valor que as regras dos workflows comparam (`sem_comentario`). Desde o lote A13, a leitura falha fechada no arquivo inteiro, em todo workflow e ação — a do compilador inclusive —: as quebras de linha que só o YAML vê (`quebras_que_a_leitura_nao_ve`) e, fora do conteúdo dos escalares em bloco, que fica marcado (`abre_um_bloco`), as formas que ela não lê (`forma_que_a_leitura_nao_le`) reprovam, e um checkout escrito numa delas não escapa da ordem; e os passos da própria ação só têm as chaves que ela lê neles (`linhas_que_o_passo_da_acao_nao_le`) — nenhum `if:`, `continue-on-error:` ou `env:` a mais. Desde o lote A14, também os espaços que o YAML não toma por espaço, os caracteres que ele não imprime e um segundo documento reprovam (`marcadores_de_documento`); o `:` de uma chave é o seguido de um espaço, de uma tabulação ou do fim, e o passo que liga as invariantes é um item do `steps:` do job (`passos_do_job`); e a ação tem a forma que o runner lê — as chaves de cima, a entrada, o `outputs.canal` do passo `conferir`, o `runs.using: composite` e só os quatro passos (`forma_da_acao`) —, e cada passo dela é o item de `runs.steps` com o `id` dele, e não uma cópia dele como o texto de um bloco. Desde o lote A15, os dois primeiros passos de cada job oficial são o checkout e a ação (`o_comeco_dos_jobs`) — um passo antes do checkout, ou entre ele e a ação, reprova —; e, no passo `conferir` da ação, as duas primeiras linhas de código são o `set -euo pipefail` e a que lê o canal do `rust-toolchain.toml`, o nome `canal`, fora da expansão, só aparece nela e na que escreve a saída, e só esta cita o `GITHUB_OUTPUT` (`o_canal_do_passo_conferir`) | fora da CI, o executor que nunca chama o `xtask`, na máquina de quem o põe; e a definição da CI — o script da ação, que as marcas e a regra do canal leem pelo texto (um nome montado em pedaços, um `eval`, um `source` elas não seguem), a pasta da ação como link, o `if:` e o `continue-on-error:` de um job inteiro e um passo depois da ação —, a raiz da confiança, com a revisão; um passo entre o checkout e a ação ficava aqui até o lote A15 |
-| o toolchain que roda: os `rust-toolchain`, o PATH, as casas do cargo e do rustup | desde o lote A10, na ação, antes de qualquer programa do toolchain, com o `python3` do sistema: nenhum `rust-toolchain` nem `rust-toolchain.toml` na árvore fora dos dois oficiais, os dois só com as chaves do oficial — nada de `path` — e o mesmo canal; o `CARGO_HOME` e o `RUSTUP_HOME` fora do repositório; o PATH sem entrada relativa nem pasta do repositório, e o `cargo`, o `rustc`, o `rustdoc` e o `rustfmt` dele os proxies do rustup, ou os binários do toolchain oficial; nenhum arquivo do commit num diretório de saída do cargo, e, desde o lote A12, nenhum link no commit, pelo modo do índice, nem no caminho de um diretório de saída, no disco — um `target` que é link para uma pasta do commit escapava da regra dos arquivos, que casa o caminho —, e, desde o lote A13, nenhum submódulo no commit — o modo 160000 — nem, nesse caminho, o que não é pasta — desde o lote A14, pelo `git` só com o PATH conferido e sem a configuração global e a do sistema, que o `HOME` do job escolhia, e com ela um programa (o `core.fsmonitor`) —; e, depois da instalação pelo arquivo da raiz, todo `cargo` da ação no toolchain fixado pelo canal — a exceção ao 4.1 do `CLAUDE.md` que espera o dono do projeto (acima). No `xtask`, os dois arquivos com as mesmas chaves, no começo de todo comando e no `invariantes` (`desvios_dos_toolchains`). Desde o lote A15, nenhum passo do job antes da ação, que mudaria o que ela confere — um cache do `~/.rustup`, um toolchain com o nome do oficial, o `core.fsmonitor` no `.git/config` que o `git` dela lê (`o_comeco_dos_jobs`) | o runner e a imagem que o `runs-on:` escolhe, com os programas do sistema que a ação usa — o `python3`, o `git`, o `bash` —: a definição da CI, com a revisão; um passo entre o checkout e a ação ficava aqui até o lote A15 |
-| o que o job escolhe para a ação: a imagem, o ambiente e o commit | desde o lote A14, no `invariantes`, nos workflows oficiais (`o_que_o_job_escolhe`): nenhum job tem `container:`, que daria à ação o `python3`, o `git` e o `rustup` de uma imagem; o `env:` do workflow e o de cada job só têm os nomes de uma lista fechada (`VARIAVEIS_DOS_JOBS`) — eles chegam aos passos da ação, que só confere os nomes do cargo e do rustup, e o `LD_PRELOAD`, o `CC` do `build.rs` do `ring`, o `HOME` da configuração do `git` e o `BASH_ENV` escolhem o programa que roda neles —; nenhuma linha cita o `GITHUB_ENV` (`SOBREPOSICOES`); e o checkout só tem o `uses:` e o `name:` (`CHAVES_DO_CHECKOUT`) — um `with:` escolhe outro commit ou outro repositório, e a ação, que é local, viria dele. O lote A14 dizia "nenhum passo escreve no `GITHUB_ENV`, e o checkout só do commit"; desde o lote A15, as regras são também: nenhum job tem `services:`, que sobem antes do primeiro passo com as pastas do runner montadas; nenhuma linha cita o `ACTIONS_ALLOW_UNSECURE_COMMANDS` (`SOBREPOSICOES`) nem os comandos `set-env` e `add-path` do runner, nas formas que ele lê (`COMANDOS_DO_RUNNER`) — o `GITHUB_ENV` e o `GITHUB_PATH` por outro nome —; os dois primeiros passos de cada job são o checkout e a ação (`o_comeco_dos_jobs`) — o `git clone` de outro ramo e o `git checkout` da pasta da ação antes dela, e o job sem o checkout, reprovam —; e as ações permitidas só nas versões da lista (`USOS_OFICIAIS`) — um commit (`@<sha>`) pode ser de um fork da rede do repositório da ação | o ambiente que a imagem do runner traz fora dos nomes do cargo e do rustup — o carregador roda antes de qualquer conferência, e uma lista na ação pediria um run da CI —, e o runner e a imagem que o `runs-on:` escolhe — um auto-hospedado, que um administrador registra, ou a imagem que o `snapshot:` de um job grava —; num job com o carregador ou o `BASH_ENV` no ambiente, a ação pode não acusar nada, e quem acusa a linha é o `invariantes` de fora dele — o local e o do canário; o `defaults:` do workflow e do job, que vale nos `run:` do job, depois da ação, e não chega aos passos dela (a fonte do runner); e a etiqueta da lista (`@v4`), que o dono da ação move |
+| o executor e o apelido do `cargo xtask` | desde o lote A9, fora do cargo: o passo do executor da ação do compilador, antes de todo `cargo` da CI que compila ou roda — em todo diretório de build, o `[alias]` só o oficial, nenhuma tabela `target` com executor nem ligador, a `[build]` sem trocar o compilador, e a raiz só com o apelido —; dentro do `xtask`, a conferência do começo de todo comando e o `cargo xtask compilador`, que veem o executor e o apelido que ainda chamam o `xtask`; e o `invariantes`, que confere que a ação tem os passos (`conferir_a_acao`). Desde o lote A10, a consulta roda no toolchain fixado pelo canal (a exceção ao 4.1 do `CLAUDE.md`, acima), o config fora da raiz fica na lista (acima), e as invariantes rodam na própria ação, no job de lints, antes do cache e de todo outro `cargo` (`as_invariantes_na_acao`): nada do repositório roda entre a conferência e elas. Desde o lote A11, a entrada que as liga é uma chave do `with:` do passo da ação — num `env:`, não vale —, e o passo da ação não tem `if:` nem `continue-on-error:` (`CHAVES_FORA_DO_PASSO_DA_ACAO`), que a deixariam sem rodar ou o job seguir com ela reprovada. Desde o lote A12, a leitura desse passo falha fechada: ele só tem o `name:`, o `id:`, o `uses:` da ação e o `with:` com as entradas (`CHAVES_DO_PASSO_DA_ACAO`), na forma simples — a chave sem aspas nem escape, o valor numa linha, sem âncora, apelido, etiqueta nem estilo de fluxo —, e uma linha dele que ela não lê reprova (`linhas_que_o_passo_nao_le`): o `"i\x66": false`, que o YAML lê como `if: false`, a chave complexa, a fusão, o `uses:` da ação no `with:` de outra ou num bloco `run:` — sem o `-` de um item; com ele, desde o lote A13 —; e o comentário do fim de uma linha sai do valor que as regras dos workflows comparam (`sem_comentario`). Desde o lote A13, a leitura reprova, em todo workflow e ação — a do compilador inclusive —, antes das outras regras, as quebras de linha que só o YAML vê (`quebras_que_a_leitura_nao_ve`) e, fora do conteúdo dos escalares em bloco, que fica marcado (`abre_um_bloco`), as formas que ela não lê (`forma_que_a_leitura_nao_le`), e um checkout escrito numa delas não escapa da ordem; a linha que começa por `#`, ela a toma por comentário, também no conteúdo de um bloco; e os passos da própria ação só têm as chaves que ela lê neles (`linhas_que_o_passo_da_acao_nao_le`) — nenhum `if:`, `continue-on-error:` ou `env:` a mais. Desde o lote A14, também os espaços que o YAML não toma por espaço, os caracteres que ele não imprime e um segundo documento reprovam (`marcadores_de_documento`); o `:` de uma chave é o seguido de um espaço, de uma tabulação ou do fim, e o passo que liga as invariantes é um item do `steps:` do job (`passos_do_job`); e a ação tem a forma que o runner lê — as chaves de cima, a entrada, o `outputs.canal` do passo `conferir`, o `runs.using: composite` e só os quatro passos (`forma_da_acao`) —, e cada passo dela é o item de `runs.steps` com o `id` dele, e não uma cópia dele como o texto de um bloco. Desde o lote A15, os dois primeiros passos de cada job oficial são o checkout e a ação (`o_comeco_dos_jobs`) — um passo antes do checkout, ou entre ele e a ação, reprova —; e, no passo `conferir` da ação, as duas primeiras linhas de código são o `set -euo pipefail` e a que lê o canal do `rust-toolchain.toml`, o nome `canal`, fora da expansão, só aparece em linhas iguais a ela ou à que escreve a saída, e só esta cita o `GITHUB_OUTPUT` (`o_canal_do_passo_conferir`). Desde o lote A16, a leitura é a de cada `.yml` e `.yaml` de `.github/` pelo caminho como o git o tem (`arquivos_do_repositorio`, `da_definicao_da_ci`) — com o nome citado pelo git, um workflow com acento ficava de fora —; a CI e o canário, que a regra das invariantes e a da paridade acham pelo nome, existem (`workflows_que_faltam`), e as regras que leem a definição da CI ficam numa função sem E/S, que um teste chama (`conferir_a_definicao_da_ci`); e, no passo `conferir`, a linha da leitura aparece uma vez, a da saída é a última do script, nenhuma linha define uma função ou um apelido, nem tem o `enable` (`troca_um_comando`), e a regra lê toda linha, as de comentário inclusive — uma cópia da linha da leitura mais abaixo, e a linha que começa por `#` num texto em várias linhas, que o bash roda, passavam | fora da CI, o executor que nunca chama o `xtask`, na máquina de quem o põe; e a definição da CI — o script da ação, que as marcas e a regra do canal leem pelo texto (um nome montado em pedaços, um `eval`, um `source`, outro `bash`, e o caminho do script — um `exit`, um `exec`, um heredoc ou um `trap` antes da linha da saída, que a deixariam vazia — elas não seguem), a pasta da ação como link, o `if:` e o `continue-on-error:` de um job inteiro e um passo depois da ação —, a raiz da confiança, com a revisão; um passo entre o checkout e a ação ficava aqui até o lote A15 |
+| o toolchain que roda: os `rust-toolchain`, o PATH, as casas do cargo e do rustup | desde o lote A10, na ação, antes de qualquer programa do toolchain, com o `python3` do sistema: nenhum `rust-toolchain` nem `rust-toolchain.toml` na árvore fora dos dois oficiais, os dois só com as chaves do oficial — nada de `path` — e o mesmo canal; o `CARGO_HOME` e o `RUSTUP_HOME` fora do repositório; o PATH sem entrada relativa nem pasta do repositório, e o `cargo`, o `rustc`, o `rustdoc` e o `rustfmt` dele os proxies do rustup, ou os binários do toolchain oficial; nenhum arquivo do commit num diretório de saída do cargo, e, desde o lote A12, nenhum link no commit, pelo modo do índice, nem no caminho de um diretório de saída, no disco — um `target` que é link para uma pasta do commit escapava da regra dos arquivos, que casa o caminho —, e, desde o lote A13, nenhum submódulo no commit — o modo 160000 — nem, nesse caminho, o que não é pasta — desde o lote A14, pelo `git` só com o PATH conferido e sem a configuração global e a do sistema, que o `HOME` do job escolhia, e com ela um programa (o `core.fsmonitor`) —; e, depois da instalação pelo arquivo da raiz, todo `cargo` da ação no toolchain fixado pelo canal — a exceção ao 4.1 do `CLAUDE.md` que espera o dono do projeto (acima). No `xtask`, os dois arquivos com as mesmas chaves, no começo de todo comando e no `invariantes` (`desvios_dos_toolchains`). Desde o lote A15, nenhum passo do job antes da ação além do checkout, que mudaria o que ela confere — um cache do `~/.rustup`, um toolchain com o nome do oficial, o `core.fsmonitor` no `.git/config` que o `git` dela lê (`o_comeco_dos_jobs`) | o runner e a imagem que o `runs-on:` escolhe, com os programas do sistema que a ação usa — o `python3`, o `git`, o `bash` —: a definição da CI, com a revisão; um passo entre o checkout e a ação ficava aqui até o lote A15 |
+| o que o job escolhe para a ação: a imagem, o ambiente e o commit | desde o lote A14, no `invariantes`, nos workflows oficiais (`o_que_o_job_escolhe`): nenhum job tem `container:`, que daria à ação o `python3`, o `git` e o `rustup` de uma imagem; o `env:` do workflow e o de cada job só têm os nomes de uma lista fechada (`VARIAVEIS_DOS_JOBS`) — eles chegam aos passos da ação, que só confere os nomes do cargo e do rustup, e o `LD_PRELOAD`, o `CC` do `build.rs` do `ring`, o `HOME` da configuração do `git` e o `BASH_ENV` escolhem o programa que roda neles —; nenhuma linha cita o `GITHUB_ENV` (`SOBREPOSICOES`); e o checkout só tem o `uses:` e o `name:` (`CHAVES_DO_CHECKOUT`) — um `with:` escolhe outro commit ou outro repositório, e a ação, que é local, viria dele. O lote A14 dizia "nenhum passo escreve no `GITHUB_ENV`, e o checkout é só o do commit"; desde o lote A15, as regras são também: nenhum job tem `services:`, que sobem antes do primeiro passo com as pastas do runner montadas; nenhuma linha cita o `ACTIONS_ALLOW_UNSECURE_COMMANDS` (`SOBREPOSICOES`) nem os comandos `set-env` e `add-path` do runner, nas formas que ele lê (`COMANDOS_DO_RUNNER`) — o `GITHUB_ENV` e o `GITHUB_PATH` por outro nome —; os dois primeiros passos de cada job são o checkout e a ação (`o_comeco_dos_jobs`) — o `git clone` de outro ramo e o `git checkout` da pasta da ação antes dela, e o job sem o checkout, reprovam —; e as ações permitidas só nas versões da lista (`USOS_OFICIAIS`) — um commit (`@<sha>`) pode ser de um fork da rede do repositório da ação. Desde o lote A16, as versões valem também no canário — ele grava no cache do ramo, que os jobs da CI restauram —, e a chave de todo cache leva o canal pela expressão (`CANAL_NA_CHAVE`), e não pelo texto, lida do passo da ação, que tem o `id: compilador` | o ambiente que a imagem do runner traz fora dos nomes do cargo e do rustup — o carregador roda antes de qualquer conferência, e uma lista na ação pediria um run da CI —, e o runner e a imagem que o `runs-on:` escolhe — um auto-hospedado, que um administrador registra, ou a imagem que o `snapshot:` de um job grava —; num job com o carregador ou o `BASH_ENV` no ambiente, a ação pode não acusar nada, e quem acusa a linha é o `invariantes` de fora dele — o local e o do canário; o `defaults:` do workflow e do job, que vale nos `run:` do job, depois da ação, e não chega aos passos dela (a fonte do runner); a etiqueta da lista (`@v4`), que o dono da ação move — o lockfile das dependências do GitHub (`.github/workflows/actions.lock`) a fecharia, e pede uma decisão de um lote, com um run da CI —; o conteúdo do cache, que os jobs restauram depois da ação, de outra execução do ramo ou do ramo padrão — o `cache-mode` do GitHub o restringiria, com um run da CI —; e os falsos positivos de propósito, que reprovam: a sequência compacta do `steps:`, a referência `$/` ao próprio repositório e o checkout por um commit |
 | o `Cargo.toml` do kernel, com os perfis | desde o lote A8, sem `cargo-features`, `rustflags` nem barra invertida (`manifesto_do_kernel_fora`); as dependências e o `build.rs`, pelo grafo; e, desde o lote A9, as features numa lista fechada, sem uma padrão (`FEATURES_DO_KERNEL`); e, desde o lote A10, na ação, nenhum manifesto da árvore com `cargo-features`, e nenhum perfil com `rustflags` nem `codegen-backend` | o resto dos perfis — o `opt-level`, o `overflow-checks` —, que muda o binário e não o que o código pode dizer |
 | o ambiente | o `xtask` tira do build do kernel o `RUSTFLAGS` e o `CARGO_ENCODED_RUSTFLAGS`; o `compilador.rs` recusa o `RUSTC`, os embrulhos e, desde o lote A9, as `CARGO_BUILD_RUSTC*`, o `CARGO_TARGET_*_RUNNER` e o `CARGO_ALIAS_*`; a parte da suíte só vem do `xtask`; desde o lote A8, nenhum `RUSTFLAGS` na CI, e os `CARGO_TARGET_<alvo>_RUSTFLAGS` do ambiente do `invariantes` entram na consulta do config; e, desde o lote A9, a CI só põe as variáveis do cargo da lista — a cor, a compilação incremental, o diretório de saída (`variaveis_do_cargo_na_ci`). Desde o lote A10, o ambiente do job, na ação, antes de qualquer programa do toolchain, por uma lista fechada: dos nomes que o cargo, o rustc, o rustdoc, o rustfmt e o rustup leem — os que começam por `CARGO`, `RUST` ou `__CARGO` —, só a cor, o `RUST_BACKTRACE`, o `CARGO_HOME` e o `RUSTUP_HOME`; nos workflows, nenhum `RUSTDOC`, `RUSTFMT` nem `PATH` (`SOBREPOSICOES`), nenhum `__CARGO*`, e o `RUSTDOCFLAGS` só no passo da documentação, com o valor dele; e o `RUSTDOC`, o `CARGO_BUILD_RUSTDOC` e o `build.rustdoc`, desvios do compilador — o `rustdoc` compila e roda os doctests. Desde o lote A11, a regra das variáveis na CI pula as linhas de comentário, como as irmãs dela; fora delas, a menção — o nome de um passo, um `echo` ou um `grep` num `run:` — reprova como a definição, porque a regra não lê o shell | o nome montado em pedaços num `run:`, que uma regra por texto não vê; um `CARGO_*` do shell de quem compila, só na hora do build: o repositório não o diz, e a CI não o põe; as `DUKE_*` das bancadas, que não mudam o que se compila; e as variáveis genéricas do processo — o `LD_PRELOAD`, o `CC` dos `build.rs` —, que mudam qualquer programa, o `python3` da ação também: desde o lote A14, o `env:` do workflow e o dos jobs oficiais não as põem (*o que o job escolhe para a ação*, acima); e ficam o `env:` de um passo, que vale nele — o lote A14 dizia "só nele", e os comandos do runner que ele ligava o levavam aos passos seguintes; desde o lote A15, eles reprovam nas formas que o runner lê —, o nome montado em pedaços depois da ação — num `run:` que escreve no `GITHUB_ENV`, numa expressão do `env:` de um passo — ou escrito numa linha que a leitura toma por comentário, e o ambiente da imagem do runner — a raiz da confiança, com a revisão |
 | a linha de comando do `xtask` | desde o lote A9, o ambiente que ele põe num processo filho numa lista fechada (`AMBIENTE_DOS_FILHOS`), e nenhum `--config`, `-Z`, `cargo rustc` nem `cargo rustdoc` nos argumentos de um (`linha_de_comando_do_xtask_fora`); e, desde o lote A10, nenhum `set_var` nem `remove_var` do ambiente do próprio `xtask`, que todo filho herda, o `--config` e o `-Z` em qualquer lugar de um literal, com os escapes resolvidos, e nenhuma linha de comando com o cargo num literal — um `sh -c` | o nome montado em pedaços, ou lido de uma variável, que o texto não diz; e o `compilador.rs`, que consulta o config pelo `-Zunstable-options` e cita as variáveis que recusa: a revisão do `xtask` |
@@ -14417,6 +14538,69 @@ positivo, um comentário com a palavra `canal` no passo `conferir`. A
 
 A ação rodada como o runner, na árvore do lote, com as invariantes, passou
 nos quatro passos, e com o `CARGO_HTTP_CAINFO` reprova no passo do
+ambiente, como deve. O lote não toca o kernel: nenhuma suíte no emulador,
+nenhuma fumaça.
+
+#### As do lote A16
+
+Vinte e nove mutações contra o lote A16 — os achados do adversário da
+rodada 8, no item *A soma das cotas de processos e a cota por sessão*, em
+[Decisões pendentes](#decisões-pendentes) —: as doze que o adversário
+propôs com os patches dele, MC1 a MC12, que entram na série como XT233 a
+XT239, XT244 a XT247 e XT249, e dezessete do lote. Uma de cada vez, no
+repositório, e restauradas byte a byte, com o resumo SHA-256 conferido e
+a hora do arquivo renovada para o cargo recompilar, cada uma contra os
+testes do `xtask` inteiros. As vinte e nove reprovaram.
+
+| Mutação | Reprovada por |
+|---|---|
+| a lista do repositório sem o `-z` (XT233, a MC1 do adversário), o caminho que não é UTF-8 lido com perda (XT234, a MC2) e a extensão do workflow comparada com a caixa (XT235, a MC3) | `adversario_a15_o_nome_que_o_git_cita` |
+| o canário de volta fora da lista das versões (XT236, a MC4) | `adversario_a15_as_versoes_do_canario` |
+| a falta da CI e do canário que não reprova (XT237, a MC5), e só a da CI (XT238, a MC6); e, em `conferir_a_definicao_da_ci`, a falta (XT239, a MC7), a regra das invariantes no job de lints (XT240), a paridade do canário (XT241), as regras dos workflows (XT242) e a da ação (XT243) não chamadas | `adversario_a15_a_ci_e_o_canario_pelo_nome` |
+| os gatilhos do canário fora da lista aceitos (XT244, a MC8), e o valor da linha do `on:` não lido (XT246, a MC10) | `adversario_a15_os_gatilhos_do_canario` e `o_canario_nao_roda_nos_pushes` |
+| a lista em bloco do `on:` lida como chave (XT245, a MC9), toda linha de dentro do `on:` como gatilho (XT247, a MC11), e a lista em bloco na coluna do `on:` lida como chave da raiz (XT248) | `adversario_a15_os_gatilhos_do_canario` |
+| o canal na chave de cache pelo texto (XT249, a MC12), e o passo da ação sem o `id: compilador` aceito (XT250) | `adversario_a15_o_canal_na_chave_pela_expressao` |
+| na regra do canal, a linha da leitura sem a contagem (XT251), o nome (XT252) e o `GITHUB_OUTPUT` (XT253) só nas linhas de código, a saída em qualquer lugar do script (XT254), a função pelos parênteses (XT255) e pela palavra `function` (XT256), o apelido só pela palavra `alias ` (XT257), o `enable` (XT258), a linha continuada do bash (XT259) e os parênteses só juntos (XT260) | `adversario_a15_o_canal_do_passo_conferir_em_toda_linha` |
+| a mensagem do começo dos jobs sem a sequência compacta (XT261) | `adversario_a15_os_falsos_positivos_de_proposito` |
+
+A XT239 é a MC7 do adversário: com a chamada em `conferir_o_canal`, que lê
+o repositório e roda o cargo, ela sobrevivia aos testes de unidade, e só o
+`xtask invariantes` rodado numa árvore com o caso a pegava; com a chamada
+na função sem E/S, o teste a pega — e as quatro irmãs dela, XT240 a XT243,
+também.
+
+Os ataques, de novo, todos — duzentos e onze, e a árvore sem troca —, um
+de cada vez, restaurados como as mutações, pela trava da máquina, com o
+`xtask` da árvore do lote. Os vinte e três do adversário da rodada 8: os
+catorze que passavam reprovam (rc=1), cada um pela regra dele — o
+workflow e a ação com acento no nome, a CI renomeada com acento e o
+workflow com a extensão em maiúsculas; o checkout e a publicação do
+canário por um commit e o checkout dele por um ramo; a CI renomeada sem a
+entrada das invariantes e o canário apagado; as duas linhas que começam
+por `#` num texto em várias linhas, no passo `conferir`; a lista em bloco
+com o `push` e o `workflow_run` no canário; e a chave de cache com o
+texto do canal —; os quatro controles e os três falsos positivos de
+propósito continuam a reprovar — o workflow sem acento, o checkout da
+rede principal por um commit, a CI sem a entrada, a lista em fluxo com o
+`push` no canário; a sequência compacta na rede principal e no job de
+lints, e o `$/` —; e passam (rc=0) o `cache-mode: none` no canário, a
+recomendação do M2, que a guarda aceita, e o lockfile, que ela não lê. Os
+treze do lote: o `id: compilador` noutro passo, a lista em bloco na
+coluna do `on:` do canário e, no passo `conferir`, a função `python3` e a
+cópia da leitura, o `cd` e a cópia, a função `echo`, a palavra
+`function`, o `alias`, o `enable`, a saída antes da última linha e o
+comentário com o `GITHUB_OUTPUT` reprovam (rc=1), cada um pela regra
+dele; e passam (rc=0) o comentário com o `$canal` e os dois que ficam com
+a revisão — o `exit 0` e o heredoc sem fim antes da linha da saída, que a
+deixariam vazia. Os vinte e cinco do lote A15 dão o que davam, menos o
+comentário com a palavra `canal` no passo `conferir`, que passa a
+reprovar (rc=1): a regra lê as linhas de comentário. Os trinta e três da
+rodada 7, os setenta e quatro da rodada 6, os vinte e oito da rodada 5 e
+os quinze do lote A14 dão o que davam no lote A15. A árvore sem troca
+passa. Os 212, cada um como devia.
+
+A ação rodada como o runner, na árvore do lote, com as invariantes,
+passou nos quatro passos, e com o `CARGO_HTTP_CAINFO` reprova no passo do
 ambiente, como deve. O lote não toca o kernel: nenhuma suíte no emulador,
 nenhuma fumaça.
 
@@ -18792,8 +18976,9 @@ dispositivos (x86_64 e aarch64), que esperou 41,7 minutos na fila e rodou
 A CI 543 (`01dcbe8`, o lote ICACHE-5 e a AUD-CAMPO no dossiê) passou verde,
 48 de 48, na primeira tentativa, em 76,6 minutos e 1121 de máquina. A
 suíte inteira passou com a conferência dos segredos mais estrita — a
-palavra inteira das senhas, o log do caso inteiro pela marca, a auditoria
-no anel inteiro e o journal —, em todas as partes e em release — o ARM em
+palavra inteira das senhas, também na auditoria, no anel inteiro, e no
+journal, nos dois casos que o leem, e o log do caso inteiro, pela marca
+—, em todas as partes e em release — o ARM em
 release, 1068 de 1068: os 1067 da CI 541, mais o controle novo do laço —,
 e o caso da remoção, com a anotação da ordem, passou na parte em que cai,
 nas duas arquiteturas. O holdover da bancada de tempo, na parte 3/3: o x86
@@ -18812,7 +18997,7 @@ invariantes e as regras novas do lote contra os workflows de verdade. O
 holdover da bancada de tempo, na parte 3/3: o x86 a -92 ppm (2056 s em
 2056) e o ARM a -8 ppm (2056 s em 2056), os dois dentro da guarda. O
 último job foi o dos fluxos entre dispositivos (mesma arquitetura), que
-esperou 39,5 minutos na fila e rodou 26,1; o maior, a tela da virtio-gpu
+esperou 39,5 minutos na fila e rodou 26,2; o maior, a tela da virtio-gpu
 do x86, parte 2/2, com 48,5.
 
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI

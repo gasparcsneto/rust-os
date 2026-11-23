@@ -2578,7 +2578,9 @@ pendência #298.
   do compilador, na fumaça e no texto, sem autoridade, regra de acesso,
   registro, identidade, persistência ou semântica de auditoria novos:
   - a leitura dos workflows falha fechada no arquivo inteiro, em todo
-    workflow e ação — a do compilador inclusive —: as quebras de linha que
+    workflow e ação — a do compilador inclusive; nos que a lista do git
+    dava: o de um nome que o git cita, com acento, ficava fora dela até o
+    lote A16 —: as quebras de linha que
     só o YAML vê — o CR sozinho, o NEL, o LS, o PS, e o BOM fora do começo
     —, que escondiam o `if: false` do passo da ação, reprovam; o conteúdo
     de um escalar em bloco fica marcado, e um passo da ação escrito como
@@ -2589,7 +2591,9 @@ pendência #298.
     escrito assim, a lacuna que o lote A12 deixou, não escapa mais da
     ordem — e ficavam de fora, e o lote A14 os fecha, os espaços que o
     YAML não toma por espaço e os caracteres que ele não imprime, e o
-    texto de um bloco na própria ação e no job de lints;
+    texto de um bloco na própria ação e no job de lints; e a linha que
+    começa por `#`, que a leitura toma por comentário também no conteúdo
+    de um bloco, fica com a revisão (o "Fica" do lote A15);
   - os passos da própria ação só com as chaves que a leitura lê neles: um
     `if: false` no do ambiente, um `continue-on-error: true` ou um
     embrulho do compilador no `env:` do das invariantes passavam — e cada
@@ -2717,8 +2721,9 @@ pendência #298.
   carregador ou o `BASH_ENV` no ambiente, a ação pode não acusar nada, e
   quem acusa a linha do `env:` é o `cargo xtask invariantes` de fora dele.
   Ficavam também, sem que o texto os dissesse, e o lote A15 os recusa: um
-  passo antes do checkout, um job sem ele, os `services:` de um job e a
-  versão das ações permitidas; e a marca do `echo` do canal provava a
+  passo antes do checkout e um job sem ele — e o passo entre o checkout e
+  a ação, que este "Fica" dava como da revisão —, os `services:` de um job
+  e a versão das ações permitidas; e a marca do `echo` do canal provava a
   linha, e não o valor.
   Seis testes novos no hospedeiro, e as mutações do lote (*As do lote
   A14*, no
@@ -2800,12 +2805,14 @@ pendência #298.
   - as ações permitidas só nas versões de uma lista — o `uses:` inteiro —:
     um commit (`@<sha>`) pode ser de um fork da rede do repositório da
     ação;
-  - na ação, no passo que confere o canal, o nome `canal`, fora da
-    expansão, só aparece na linha que o lê do `rust-toolchain.toml` — a
-    segunda linha de código do script, depois do `set -euo pipefail` — e na
-    que escreve a saída, e só esta cita o `GITHUB_OUTPUT`: o canal fixo
-    antes dela, ou um segundo `echo`, punham na chave de todo cache um
-    canal que não é o do compilador;
+  - na ação, no passo que confere o canal, as duas primeiras linhas de
+    código são o `set -euo pipefail` e a que lê o canal do
+    `rust-toolchain.toml`; o nome `canal`, fora da expansão, só aparece em
+    linhas iguais a ela ou à que escreve a saída, e só esta cita o
+    `GITHUB_OUTPUT`: o canal fixo antes dela, ou um segundo `echo`, punham
+    na chave de todo cache um canal que não é o do compilador — e uma
+    cópia da linha da leitura mais abaixo, e a linha que começa por `#`
+    num texto em várias linhas, passavam: o lote A16 as recusa;
   - o texto: o que os achados desmentem no do lote A14, aqui, no
     `docs/SEGURANCA.md`, no cabeçalho da ação e no README
     ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)).
@@ -2816,7 +2823,8 @@ pendência #298.
   variável nos passos seguintes; o `defaults:` do workflow e do job, que
   vale nos `run:` do job, depois da ação, e não chega aos passos dela; o
   script da ação, que a regra do canal lê pelo texto — o `eval` e o
-  `source` ela não segue —; a etiqueta de uma versão da lista (`@v4`),
+  `source` ela não segue, nem, até o lote A16, uma cópia da linha que lê o
+  canal mais abaixo —; a etiqueta de uma versão da lista (`@v4`),
   que o dono da ação move; e o runner e a imagem que o `runs-on:` escolhe
   — também a que o `snapshot:` de um job grava. Cinco testes novos no
   hospedeiro, e as mutações do lote (*As do lote A15*, no
@@ -2858,6 +2866,62 @@ pendência #298.
   senha que não é da suíte —; e a ordem dos `tlbi` num processador de
   verdade, que só ele mostra. Três testes novos no hospedeiro, e as
   mutações do lote ([README](../README.md#testes)).
+
+  Depois do lote ICACHE-7, o lote A16, [B], fez os achados do adversário da
+  rodada 8 sobre o lote A15 — a lista dos arquivos que a guarda lê, o
+  canário, a CI pelo nome, a chave de cache e o canal da ação —, os itens
+  do revisor da rodada 8 sobre o texto dos lotes A14 e A15 e o que o lote
+  achou na revisão dos patches, na guarda do compilador e no texto, sem
+  autoridade, regra de acesso, registro, identidade, persistência ou
+  semântica de auditoria novos. O texto segue o princípio do lote A15 — as
+  regras, e o limite dito uma vez —, e seis frases dele, que os achados
+  desmentem, foram corrigidas no lugar. As regras novas:
+  - a lista dos arquivos do repositório é a do `git ls-files -z`: sem o
+    `-z`, o git punha entre aspas o caminho com um acento, e um workflow
+    `publicação.yml`, uma ação em `preparação/` ou a CI renomeada para
+    `integração.yml` não passavam por regra nenhuma; um caminho que não é
+    UTF-8 reprova, e a extensão do workflow vale em qualquer caixa;
+  - as ações do canário só nas versões da lista dos workflows oficiais: o
+    cache do GitHub é do ramo, e não do workflow — o canário grava no do
+    ramo padrão, que os jobs da CI restauram —, e toda ação JavaScript
+    recebe o token do job;
+  - a CI e o canário, que a regra das invariantes no job de lints e a da
+    paridade acham pelo nome, existem — a CI renomeada sem a entrada das
+    invariantes passava —, e as regras que leem a definição da CI ficam
+    numa função sem E/S, que um teste chama;
+  - os gatilhos do canário numa lista fechada — o agendamento e o disparo
+    manual —, em toda forma do `on:`: a lista em bloco (`- push`), também
+    na coluna do `on:`, e o `workflow_run` passavam;
+  - o canal na chave de cache pela expressão, e não pelo texto — `${{
+    'steps.compilador.outputs.canal' }}` passava —, lida do passo da ação,
+    que tem o `id: compilador`: o `id` noutro passo, que escreve outro
+    canal na saída dele, passava;
+  - no passo `conferir` da ação, a linha da leitura aparece uma vez, a da
+    saída é a última, nenhuma linha define uma função ou um apelido, nem
+    tem o `enable`, e a regra lê toda linha, as de comentário inclusive: a
+    cópia da linha da leitura depois de uma função `python3`, a linha que
+    começa por `#` num texto em várias linhas — que o bash roda — e uma
+    função `echo` passavam;
+  - os falsos positivos de propósito — a sequência compacta do `steps:`,
+    a referência `$/` ao próprio repositório e o checkout por um commit —
+    reprovam, num teste, e a mensagem do começo dos jobs diz a primeira;
+  - o texto: as frases do lote A15 que os achados desmentem, e os itens do
+    revisor da rodada 8 sobre os lotes A14 e A15, aqui, no
+    `docs/SEGURANCA.md`, no cabeçalho da ação e no README
+    ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)).
+
+  Fica, com a revisão: o que ficava do lote A15 — o nome montado em
+  pedaços, o texto numa linha que a leitura toma por comentário num
+  workflow, o `defaults:`, a etiqueta da lista, o runner e a imagem —; no
+  passo `conferir`, o que a regra do canal não segue pelo texto — o nome
+  montado em pedaços, o texto executado (o `eval`, o `source`, outro
+  `bash`) e o caminho do script: um `exit`, um `exec`, um heredoc ou um
+  `trap` antes da linha da saída, que a deixariam vazia —; o conteúdo do
+  cache, que os jobs restauram de outra execução; e as formas novas do
+  GitHub — o `cache-mode`, o lockfile das dependências, o `$/` —, que
+  pedem uma decisão de um lote com um run da CI. Sete testes novos no
+  hospedeiro e um ajustado, e as mutações do lote (*As do lote A16*, no
+  [README](../README.md#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
 
 ### I7
 

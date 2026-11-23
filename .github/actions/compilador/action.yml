@@ -18,8 +18,11 @@
 # forma que o runner lê: as chaves de cima, a entrada, o `outputs.canal` do
 # passo `conferir`, o `runs.using: composite` e só estes quatro passos; e,
 # desde o lote A15, no passo `conferir`, o nome `canal`, fora da expansão,
-# só aparece na linha que o lê do `rust-toolchain.toml` e na que escreve a
-# saída, e só esta cita o `GITHUB_OUTPUT`. Abaixo da definição da CI, esta
+# só aparece em linhas iguais à que o lê do `rust-toolchain.toml` ou à que
+# escreve a saída, e só esta cita o `GITHUB_OUTPUT` — desde o lote A16, a
+# da leitura aparece uma vez, a da saída é a última, nenhuma linha define
+# uma função ou um apelido, nem tem o `enable`, e as linhas de comentário
+# do passo também contam. Abaixo da definição da CI, esta
 # ação confere o que
 # escolhe o primeiro `cargo` que roda o código do repositório — o `cargo
 # xtask invariantes`, no job de lints —: o toolchain oficial e o ambiente;
@@ -32,19 +35,23 @@
 # sem rodar ou o job seguir com ela reprovada — desde o lote A12, numa
 # leitura que falha fechada: o passo só tem o `name:`, o `id:`, o `uses:` e
 # o `with:` com as entradas, e uma linha dele que ela não lê reprova; e,
-# desde o lote A13, a leitura falha fechada no arquivo inteiro — as quebras
-# de linha que só o YAML vê e, fora do conteúdo dos blocos, as formas que
-# ela não lê reprovam, em todo workflow e nesta ação: um checkout escrito
-# numa delas não escapa da ordem; desde o lote A14, também os espaços que o
-# YAML não toma por espaço, os caracteres que ele não imprime e um segundo
-# documento; e, nos workflows oficiais, nenhum job tem `container:` nem,
-# desde o lote A15, `services:`; o `env:` do workflow e o dos jobs só têm
-# os nomes de uma lista fechada; nenhuma linha cita o `GITHUB_ENV` nem,
-# desde o lote A15, o `ACTIONS_ALLOW_UNSECURE_COMMANDS` e os comandos
-# `set-env` e `add-path` do runner; o checkout só tem o `uses:` e o
-# `name:`; e, desde o lote A15, as ações permitidas só nas versões de uma
-# lista, e os dois primeiros passos de cada job são o checkout e esta
-# ação), em quatro passos:
+# desde o lote A13, a leitura reprova no arquivo inteiro as quebras de
+# linha que só o YAML vê e, fora do conteúdo dos blocos, as formas que ela
+# não lê, em todo workflow e nesta ação — desde o lote A16, cada `.yml` e
+# `.yaml` de `.github/` que o git lista, pelo caminho como ele é —: um
+# checkout escrito numa delas não escapa da ordem; desde o lote A14, também
+# os espaços que o YAML não toma por espaço, os caracteres que ele não
+# imprime e um segundo documento; e, nos workflows oficiais, nenhum job tem
+# `container:` nem, desde o lote A15, `services:`; o `env:` do workflow e o
+# dos jobs só têm os nomes de uma lista fechada; nenhuma linha cita o
+# `GITHUB_ENV` nem, desde o lote A15, o `ACTIONS_ALLOW_UNSECURE_COMMANDS` e
+# os comandos `set-env` e `add-path` do runner, nas formas que ele lê
+# (depois do `::` ou do `##[`, em qualquer caixa); o checkout só tem o
+# `uses:` e o `name:`; desde o lote A15, as ações permitidas só nas versões
+# de uma lista — desde o lote A16, também no canário —, e os dois primeiros
+# passos de cada job são o checkout e esta ação; e, desde o lote A16, o
+# passo desta ação tem o `id: compilador`, e a chave de todo cache, a
+# expressão com a saída dele), em quatro passos:
 #
 # 1. `ambiente`, em Python — o do sistema, `/usr/bin/python3`, e não o do
 #    PATH, que é o que ele confere —, antes de qualquer programa do
@@ -99,9 +106,16 @@
 #    compilador anterior. Desde o lote A15, o `cargo xtask invariantes`
 #    confere que as duas primeiras linhas de código do script são o
 #    `set -euo pipefail` e a que lê o canal, que o nome `canal`, fora da
-#    expansão, só aparece nela e na última, e que só a última cita o
-#    `GITHUB_OUTPUT`; o nome montado em pedaços, ou executado de um texto
-#    (o `eval`, o `source`), ele não segue.
+#    expansão, só aparece em linhas iguais a ela ou à última, e que só a
+#    última cita o `GITHUB_OUTPUT`; e, desde o lote A16, que a da leitura
+#    aparece uma vez, que a da saída é a última do script, e que nenhuma
+#    linha define uma função ou um apelido, nem tem o `enable` — que
+#    trocariam o `echo` da saída —; e ele lê também as linhas de
+#    comentário, que, num texto em várias linhas, o bash roda. O que ele
+#    não segue, pelo texto: o nome montado em pedaços, o texto executado (o
+#    `eval`, o `source`, outro `bash`) e o caminho do script — um `exit`,
+#    um `exec`, um heredoc ou um `trap` antes da linha da saída, que a
+#    pulariam e deixariam a saída vazia.
 # 3. `executor`, em Python, com o toolchain fixado: o que o config do cargo
 #    faz rodar no lugar do que o toolchain rodaria, lido pela consulta do
 #    próprio cargo (`config get`), que lê todo arquivo de config que vale em
@@ -143,8 +157,9 @@
 # binário dela: ela mora aqui, antes de todo `cargo`. O `xtask` vê o que
 # ainda o chama, no começo de todo comando, e o `cargo xtask invariantes`
 # confere que estes passos estão aqui (`xtask/src/compilador.rs`), e que
-# nenhuma linha desta ação cita o `GITHUB_ENV`, o `GITHUB_PATH` nem os
-# comandos `set-env` e `add-path` do runner, que escrevem no ambiente dos
+# nenhuma linha de código desta ação — fora as de comentário, como esta —
+# cita o `GITHUB_ENV`, o `GITHUB_PATH` nem os comandos `set-env` e
+# `add-path` do runner, nas formas que ele lê, que escrevem no ambiente dos
 # passos seguintes.
 name: O compilador oficial
 description: Confere o ambiente, o PATH, os rust-toolchain e os manifestos antes de todo cargo, instala e confere o compilador do rust-toolchain.toml com o toolchain fixado, recusa o executor, o ligador e o apelido do config do cargo e o config fora da lista, roda as invariantes no job de lints e devolve o canal para a chave do cache.

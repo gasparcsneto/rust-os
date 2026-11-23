@@ -63,7 +63,8 @@
 //!   comentário, um passo depois da ação, o script da ação — é da revisão,
 //!   e não da guarda. Desde o lote A15, o texto daqui diz as regras, e não
 //!   o que elas garantiriam: três rodadas seguidas do adversário acharam o
-//!   texto dizendo mais do que o código fazia.
+//!   texto dizendo mais do que o código fazia — e a rodada 8, seis frases
+//!   assim no texto do próprio lote A15, que o lote A16 corrigiu.
 //!   - o canal tem data, é o mesmo nos dois arquivos, com as chaves do
 //!     oficial, e o `CLAUDE.md` o cita; não há outro `rust-toolchain` no
 //!     repositório;
@@ -82,7 +83,11 @@
 //!     ([`quebras_que_a_leitura_nao_ve`]); fora do conteúdo dos blocos, as
 //!     formas que ela não lê ([`forma_que_a_leitura_nao_le`]), desde o lote
 //!     A13; e, desde o lote A14, um segundo documento
-//!     ([`marcadores_de_documento`]);
+//!     ([`marcadores_de_documento`]). A linha que começa por `#`, a leitura
+//!     a toma por comentário — também no conteúdo de um bloco, onde o YAML a
+//!     lê como texto e um heredoc do bash a roda —, e o que está nela fica
+//!     com a revisão; no passo `conferir` da ação, a regra do canal a lê,
+//!     desde o lote A16;
 //!   - nos workflows oficiais: só as ações de [`ACOES_OFICIAIS`] e, desde o
 //!     lote A15, só nas versões de [`USOS_OFICIAIS`]; nenhuma linha com uma
 //!     das [`SOBREPOSICOES`] — o `GITHUB_ENV` desde o lote A14, e o
@@ -115,10 +120,10 @@
 //!     e só esta cita o `GITHUB_OUTPUT` — e, desde o lote A16, a da leitura
 //!     aparece uma vez, a da saída é a última, nenhuma linha define uma
 //!     função ou um apelido, nem tem o `enable`, e as linhas de comentário
-//!     também contam ([`o_canal_do_passo_conferir`]); e nenhuma linha dela
-//!     cita o
-//!     `GITHUB_ENV`, o `GITHUB_PATH` nem, desde o lote A15, os
-//!     [`COMANDOS_DO_RUNNER`];
+//!     também contam ([`o_canal_do_passo_conferir`]); e nenhuma linha de
+//!     código dela — fora as de comentário — cita o `GITHUB_ENV`, o
+//!     `GITHUB_PATH` nem, desde o lote A15, os [`COMANDOS_DO_RUNNER`], nas
+//!     formas que o runner lê;
 //!   - o job de lints liga as invariantes pela entrada `invariantes: true`
 //!     no `with:` do primeiro passo do `steps:` dele que usa a ação
 //!     ([`as_invariantes_na_acao`]); e, desde o lote A16, a CI e o canário,
@@ -2495,8 +2500,8 @@ fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str>
 /// revisão. O canário
 /// sobrepõe, mas não roda nos pushes, não usa a ação do cache nem publica a
 /// proveniência, e, desde o lote A16, só usa as ações dele nas versões de
-/// [`USOS_OFICIAIS`]. As ações locais seguem a leitura que falha
-/// fechada, abaixo,
+/// [`USOS_OFICIAIS`]. As ações locais seguem a leitura do arquivo
+/// inteiro, abaixo,
 /// e as regras dos workflows oficiais que leem o texto de cada linha — as
 /// ações permitidas, as sobreposições, a escrita num `rust-toolchain` e a
 /// leitura do passo que usa a ação —, e não as de um workflow: a ordem, a
@@ -2504,7 +2509,7 @@ fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str>
 /// o compilador, que cita o que recusa, segue só a leitura, e o resto é de
 /// [`conferir_a_acao`].
 ///
-/// # A leitura falha fechada no arquivo inteiro, desde o lote A13
+/// # A leitura do arquivo inteiro, desde o lote A13
 ///
 /// As regras leem o YAML linha a linha. Em todo arquivo — a ação do
 /// compilador inclusive —, antes delas, reprova o que essa leitura não lê
@@ -2521,6 +2526,12 @@ fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str>
 /// ela, e não escapa mais da ordem nem da lista: antes, um checkout em
 /// estilo de fluxo ou com um escape na chave não pedia a conferência depois
 /// dele (o M3 do adversário do lote A12, e o E1 do revisor da rodada 5).
+/// A linha que começa por `#`, a leitura a toma por comentário, também no
+/// conteúdo de um bloco, onde o YAML a lê como texto: o que está nela fica
+/// com a revisão (o "O que fica" do lote A15) — no passo `conferir` da ação,
+/// a regra do canal lê toda linha, desde o lote A16. E os arquivos lidos
+/// são os `.yml` e os `.yaml` de `.github/` que o git lista
+/// ([`da_definicao_da_ci`]): desde o lote A16, pelo caminho como ele é.
 fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
     let mut fora = Vec::new();
     for (nome, texto) in workflows {
@@ -3198,10 +3209,11 @@ fn forma_da_acao(linhas: &[Linha<'_>]) -> (Vec<String>, Vec<(String, usize)>) {
 /// ([`DIRETORIOS_DOS_BUILDS`]); no do executor, as formas dos rustflags de
 /// [`FORMAS_DOS_RUSTFLAGS`] e as tabelas de [`TABELAS_DO_CONFIG`]; a entrada
 /// `invariantes`, e o passo das invariantes só com ela, no toolchain fixado
-/// pelo canal; e nenhuma linha dela cita o `GITHUB_ENV` nem o `GITHUB_PATH`
-/// — nem, desde o lote A15, os comandos de [`COMANDOS_DO_RUNNER`], nas
-/// formas que o runner lê ([`comando_do_runner`]) —, que escrevem no
-/// ambiente dos passos seguintes, e que nenhuma regra dos workflows lê nela.
+/// pelo canal; e nenhuma linha de código dela — fora as de comentário, que
+/// os citam — cita o `GITHUB_ENV` nem o `GITHUB_PATH` — nem, desde o lote
+/// A15, os comandos de [`COMANDOS_DO_RUNNER`], nas formas que o runner lê
+/// ([`comando_do_runner`]) —, que escrevem no ambiente dos passos
+/// seguintes, e que nenhuma regra dos workflows lê nela.
 ///
 /// # Por quê, desde o lote A9
 ///

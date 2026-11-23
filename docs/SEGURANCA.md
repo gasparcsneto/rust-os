@@ -193,11 +193,12 @@ pontos onde acontece — não num canal paralelo:
   apelido, como ela. Desde o lote A12, a leitura desse passo falha
   fechada — uma linha dele que ela não lê, como um escape na chave que o
   YAML lê como `if:`, reprova —, e o comentário do fim de uma linha sai do
-  valor que ela compara; e, desde o lote A13 — com as lacunas que o lote
-  A14 fechou, abaixo —, a leitura falha fechada no arquivo inteiro, em
-  todo workflow e ação — as quebras de linha que só o YAML vê e, fora do
-  conteúdo dos blocos, as formas que ela não lê reprovam —, e os passos
-  da própria ação só têm as chaves que ela lê neles, sem `if:`,
+  valor que ela compara; e, desde o lote A13 — com o que o lote A14
+  acrescentou, abaixo —, a leitura reprova, no arquivo inteiro, em todo
+  workflow e ação — desde o lote A16, cada `.yml` e `.yaml` de `.github/`
+  que o git lista, pelo caminho como ele é —, as quebras de linha que só
+  o YAML vê e, fora do conteúdo dos blocos, as formas que ela não lê, e os
+  passos da própria ação só têm as chaves que ela lê neles, sem `if:`,
   `continue-on-error:` nem `env:` a mais. Desde o lote A14, a leitura
   reprova também os espaços que o YAML não toma por espaço,
   os caracteres que ele não imprime e um segundo documento; o passo que
@@ -215,9 +216,20 @@ pontos onde acontece — não num canal paralelo:
   nem os dois comandos, nas formas que o runner lê; nenhum job tem
   `services:`; as ações permitidas só nas versões de uma lista; os dois
   primeiros passos de cada job são o checkout e a ação; e, na ação, o nome
-  `canal`, fora da expansão, só aparece na linha que o lê do
-  `rust-toolchain.toml` e na que escreve a saída, e só esta cita o
-  `GITHUB_OUTPUT`. Essas são as regras da guarda, uma a
+  `canal`, fora da expansão, só aparece em linhas iguais à que o lê do
+  `rust-toolchain.toml` ou à que escreve a saída, e só esta cita o
+  `GITHUB_OUTPUT`. A rodada 8 do adversário achou o que essas regras não
+  viam, e o lote A16 as estendeu: a leitura de cada workflow e ação pelo
+  caminho como o git o tem — um nome com acento, que o git cita, ficava
+  fora dela —; as versões das ações também no canário, que grava no cache
+  do ramo, que os jobs da CI restauram; a CI e o canário achados pelo
+  nome — a falta de cada um reprova —; os gatilhos do canário numa lista
+  fechada, o agendamento e o disparo manual; o canal na chave de cache
+  pela expressão, lida do passo da ação, que tem o `id: compilador`; e, no
+  passo `conferir`, a linha da leitura uma vez, a da saída por último,
+  nenhuma função, apelido nem `enable`, e as linhas de comentário lidas
+  também — num texto em várias linhas, o bash as roda. Essas são as
+  regras da guarda, uma a
   uma no inventário do README; a definição da CI é a raiz da confiança, e
   uma mudança que escapa delas — um nome montado em pedaços, um passo
   depois da ação, o script da ação — é da revisão, e não da guarda. O que
