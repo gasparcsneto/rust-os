@@ -64861,14 +64861,24 @@ fn anotar_as_pessoas(quando: &str) {
 /// taxa por segundo, as mensagens por remetente, os bytes do armazém,
 /// quantos apertos e o grupo de um quórum —, e um recurso, um editor, um
 /// domínio e uma inclusão trocados por outros, com a conta igual. São a
-/// guarda de uma comparação que visse de cada par só o último número, e das
-/// listas de um papel só quantas: ela passava nas dezesseis de antes (o
-/// adversário da rodada 8). O
-/// nome de um papel que já existe fica sem mudança própria: ele está em
-/// todas as linhas do papel e nas que o citam, e trocá-lo é reescrever a
-/// política inteira; a comparação de hoje é a `PartialEq` da política, que
-/// o vê. No fim, o controle põe a do começo ele mesmo: uma comparação que
-/// não visse a última mudança a deixaria em vigor para os casos seguintes.
+/// guarda de uma comparação que visse de cada par só o número que as
+/// mudanças de antes moviam — o último, e o M do quórum —, e das listas de
+/// um papel — os prefixos de uma linha `recurso`, os editores, os domínios
+/// e as inclusões — só quantas: ela passava nas dezesseis de antes (o
+/// adversário da rodada 8). E as duas últimas trocam uma permissão
+/// escrita de um papel por outra, com a conta igual — a lista das
+/// permissões só crescia —, e o papel do `remoto` por outro — ele só
+/// saía —: uma comparação que visse das permissões escritas de cada papel
+/// só quantas, e do `remoto` só se há a linha, passava nas vinte e cinco
+/// de antes (o adversário da rodada 9). O nome de um papel que já existe
+/// fica sem mudança própria: ele está em todas as linhas do papel e nas que
+/// o citam, e trocá-lo é reescrever a política inteira; a comparação de
+/// hoje é a `PartialEq` da política, que o vê. Ficam também sem mudança
+/// própria a permissão de uma linha `recurso` — trocada sozinha, a do papel
+/// fica sem o alcance, e a leitura recusa a política —, o serviço de uma
+/// linha `servico` e a operação de um `quorum`. No fim, o controle põe a do
+/// começo ele mesmo: uma comparação que não visse a última mudança a
+/// deixaria em vigor para os casos seguintes.
 ///
 /// O controle chama a conferência ele mesmo: prova a função, e não que o
 /// laço do executor a chama depois de cada caso — isso é
@@ -65115,6 +65125,31 @@ fn suite_o_executor_ve_e_devolve_a_politica_em_vigor() -> Resultado {
                 &|l| l.starts_with("papel ") && l.contains(" @"),
                 &outra_inclusao,
             )?,
+        ),
+        // E uma permissão escrita de um papel trocada por outra, com a
+        // conta igual, e o papel do `remoto` trocado, e não só tirado (o
+        // adversário da rodada 9). A linha da permissão termina numa
+        // permissão escrita, e não no nome do papel nem numa inclusão:
+        // trocar uma inclusão mudaria as inclusões, e não as permissões.
+        (
+            "uma permissao de um papel, trocada por outra",
+            com_a_linha(
+                &|l| {
+                    let palavras: alloc::vec::Vec<&str> = l.split(' ').collect();
+                    sem_random(l)
+                        && palavras.len() > 2
+                        && palavras
+                            .last()
+                            .is_some_and(|w| !w.is_empty() && !w.starts_with('@'))
+                },
+                &trocar_o_ultimo("random.read"),
+            )?,
+        ),
+        (
+            "o papel do remoto, trocado por outro",
+            com_a_linha(&|l| l.starts_with("remoto "), &|_| {
+                alloc::string::String::from("remoto dispositivo")
+            })?,
         ),
     ];
     let esperado: Resultado = Err("o caso deixou a politica em vigor mudada");
@@ -65411,21 +65446,27 @@ fn suite_o_executor_confere_depois_de_cada_caso() -> Resultado {
 /// administradores, e o nome, o papel, a revogação e a assinatura de um
 /// deles; as fontes de hora e os editores; e, um nível abaixo, a chave de um
 /// administrador, a chave e o nome de um editor, o conteúdo das fontes de
-/// hora e o de uma lápide — cada um mudado e devolvido antes
-/// do seguinte. O controle de antes só registra um administrador — a conta
-/// deles muda —, e uma impressão reduzida às contas passaria nele (o achado
-/// 4 do adversário do lote ICACHE-3). As cinco mudanças do lote ICACHE-4 —
-/// o papel de um agente, a lápide, a ordem, as fontes e os editores —
-/// deixavam passar uma impressão reduzida aos campos que elas mudam; as
-/// sete seguintes são a guarda dela (o achado 5 do adversário da rodada 5).
+/// hora e o de uma lápide; e, dentro das fontes de hora, a chave, o destino
+/// e o nome de uma delas, o quórum e o salto — cada um mudado e devolvido
+/// antes do seguinte. O controle de antes só registra um administrador — a
+/// conta deles muda —, e uma impressão reduzida às contas passaria nele (o
+/// achado 4 do adversário do lote ICACHE-3). As cinco mudanças do lote
+/// ICACHE-4 — o papel de um agente, a lápide, a ordem, as fontes e os
+/// editores — deixavam passar uma impressão reduzida aos campos que elas
+/// mudam; as sete seguintes são a guarda dela (o achado 5 do adversário da
+/// rodada 5).
 /// E essas doze deixavam passar uma impressão sem a chave dos
 /// administradores — a ordem também muda os nomes —, com só a conta dos
 /// editores e das lápides e só o "tem ou não tem" das fontes; as cinco
 /// seguintes são a guarda dela (o achado 4 do adversário da rodada 6). E o
 /// conteúdo das fontes de hora mudava só pela incerteza: uma impressão que
 /// visse das fontes o quórum, os tetos e quantas são, e não cada uma,
-/// passava; a última troca as chaves das duas primeiras fontes, com os
+/// passava; a seguinte troca as chaves das duas primeiras fontes, com os
 /// nomes, os destinos e os parâmetros iguais (o adversário da rodada 8).
+/// E a chave e a incerteza deixavam passar uma impressão que visse das
+/// fontes só a incerteza e as chaves, na ordem: as quatro seguintes mudam o
+/// quórum, o salto, e os destinos e os nomes das duas primeiras trocados
+/// entre si, cada um com o resto igual (o adversário da rodada 9).
 ///
 /// Cada mudança mexe só no campo dela: a de um agente troca o registro de
 /// agentes por um igual com só aquele campo mudado
@@ -65437,12 +65478,15 @@ fn suite_o_executor_confere_depois_de_cada_caso() -> Resultado {
 /// (`identidade::trocar_editores_de_teste`); a das fontes, o registro da
 /// imagem por um refeito pelo texto com as mesmas fontes e outra incerteza
 /// — e refeito com a de antes ele sai igual ao da imagem, o que confere o
-/// texto —; a revogação põe a lápide do primeiro e a esquece logo depois: a
-/// marca dele fica, e a lista das lápides volta a ser a do começo, vazia —
-/// o controle também o confere —; e o conteúdo de uma lápide troca uma pela
-/// outra, e confere contra o registro com a primeira. A lápide anula as
-/// mensagens vivas da credencial, como em `persistencia: a lapide vence a
-/// imagem`; a suíte não tem nenhuma de um administrador da imagem.
+/// texto —, e as de dentro delas, por um refeito com o resto igual: a chave,
+/// o destino ou o nome das duas primeiras trocados entre si, ou o quórum ou
+/// o salto, um a mais, ou um a menos no limite; a revogação põe a lápide do
+/// primeiro e a esquece logo depois: a marca dele fica, e a lista das
+/// lápides volta a ser a do começo, vazia — o controle também o
+/// confere —; e o conteúdo de uma lápide troca uma pela outra, e confere
+/// contra o registro com a primeira. A lápide anula as mensagens vivas da
+/// credencial, como em `persistencia: a lapide vence a imagem`; a suíte não
+/// tem nenhuma de um administrador da imagem.
 ///
 /// O controle chama a conferência ele mesmo: prova a função, e não que o
 /// laço do executor a chama depois de cada caso — isso é
@@ -65521,42 +65565,81 @@ fn suite_a_impressao_do_registro_ve_cada_campo() -> Resultado {
     // registro: o que o refaz igual é o dele — e refazê-lo igual confere o
     // texto. A outra incerteza muda o conteúdo, e não as fontes.
     let fontes = crate::identidade::fontes_de_hora().ok_or("a imagem nao tem fontes de hora")?;
-    // Com `trocadas`, as chaves das duas primeiras fontes trocadas entre si.
-    let refeito = |q: u64, incerteza_s: u64, trocadas: bool| -> Option<hora::registro::Registro> {
+    // O que se troca entre as duas primeiras fontes: nada, as chaves, os
+    // destinos ou os nomes — o resto igual.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Trocar {
+        Nada,
+        Chaves,
+        Destinos,
+        Nomes,
+    }
+    let refeito = |q: u64,
+                   salto_s: u64,
+                   incerteza_s: u64,
+                   trocar: Trocar|
+     -> Option<hora::registro::Registro> {
         let lista = fontes.fontes();
         let mut texto = alloc::string::String::new();
         for (i, f) in lista.iter().enumerate() {
-            let chave = match i {
-                0 | 1 if trocadas => lista.get(1 - i)?.chave(),
-                _ => f.chave(),
+            let par = if trocar != Trocar::Nada && i < 2 {
+                lista.get(1 - i)?
+            } else {
+                f
+            };
+            let (nome, destino, chave) = match trocar {
+                Trocar::Chaves => (f.nome(), f.destino(), par.chave()),
+                Trocar::Destinos => (f.nome(), par.destino(), f.chave()),
+                Trocar::Nomes => (par.nome(), f.destino(), f.chave()),
+                Trocar::Nada => (f.nome(), f.destino(), f.chave()),
             };
             texto.push_str(&alloc::format!(
                 "fonte {} {} {}{}\n",
-                f.nome(),
-                f.destino(),
+                nome,
+                destino,
                 hora::registro::PREFIXO_DA_CHAVE,
                 sigilo::hex(chave)
             ));
         }
-        let salto_s = fontes.parametros().salto_maximo_ms / 1000;
         texto.push_str(&alloc::format!(
             "quorum {q}\nsalto {salto_s}\nincerteza {incerteza_s}\n"
         ));
         hora::registro::Registro::ler(&texto).ok()
     };
+    let salto_s = fontes.parametros().salto_maximo_ms / 1000;
     let incerteza_s = fontes.parametros().teto_da_incerteza_ms / 1000;
     let quorum = (hora::registro::MENOR_QUORUM..=hora::registro::MAIS_FONTES as u64)
-        .find(|&q| refeito(q, incerteza_s, false) == Some(*fontes))
+        .find(|&q| refeito(q, salto_s, incerteza_s, Trocar::Nada) == Some(*fontes))
         .ok_or("o registro de fontes de hora da imagem nao se refaz pelo texto")?;
     let outra_incerteza = if incerteza_s < hora::registro::MAIOR_INCERTEZA_S {
         incerteza_s + 1
     } else {
         incerteza_s - 1
     };
-    let outras_fontes = refeito(quorum, outra_incerteza, false)
+    let outras_fontes = refeito(quorum, salto_s, outra_incerteza, Trocar::Nada)
         .ok_or("as fontes de hora mudadas pelo controle nao se leem")?;
-    let fontes_trocadas = refeito(quorum, incerteza_s, true)
+    let fontes_trocadas = refeito(quorum, salto_s, incerteza_s, Trocar::Chaves)
         .ok_or("as fontes de hora com as chaves trocadas pelo controle nao se leem")?;
+    // O resto de uma fonte e dos parâmetros: o quórum e o salto, um a mais
+    // ou a menos, no limite; e os destinos e os nomes trocados.
+    let outro_quorum = if quorum < hora::registro::MAIS_FONTES as u64 {
+        quorum + 1
+    } else {
+        quorum - 1
+    };
+    let outro_salto = if salto_s < hora::registro::MAIOR_SALTO_S {
+        salto_s + 1
+    } else {
+        salto_s - 1
+    };
+    let fontes_com_outro_quorum = refeito(outro_quorum, salto_s, incerteza_s, Trocar::Nada)
+        .ok_or("as fontes de hora com outro quorum nao se leem")?;
+    let fontes_com_outro_salto = refeito(quorum, outro_salto, incerteza_s, Trocar::Nada)
+        .ok_or("as fontes de hora com outro salto nao se leem")?;
+    let destinos_trocados = refeito(quorum, salto_s, incerteza_s, Trocar::Destinos)
+        .ok_or("as fontes de hora com os destinos trocados nao se leem")?;
+    let nomes_trocados = refeito(quorum, salto_s, incerteza_s, Trocar::Nomes)
+        .ok_or("as fontes de hora com os nomes trocados nao se leem")?;
     let esperado: Resultado = Err("o caso deixou o registro de identidade mudado");
     let mut falhas: alloc::vec::Vec<&'static str> = alloc::vec::Vec::new();
     let mut conferir = |qual: &'static str, mudar: &dyn Fn()| {
@@ -65669,6 +65752,20 @@ fn suite_a_impressao_do_registro_ve_cada_campo() -> Resultado {
     // parâmetros iguais (o adversário da rodada 8).
     conferir("a chave de uma fonte de hora", &|| {
         let _ = crate::identidade::trocar_fontes_de_hora_de_teste(Some(fontes_trocadas));
+    });
+    // E o resto: o quórum, o salto, um destino e um nome (o adversário da
+    // rodada 9).
+    conferir("o quorum das fontes de hora", &|| {
+        let _ = crate::identidade::trocar_fontes_de_hora_de_teste(Some(fontes_com_outro_quorum));
+    });
+    conferir("o salto das fontes de hora", &|| {
+        let _ = crate::identidade::trocar_fontes_de_hora_de_teste(Some(fontes_com_outro_salto));
+    });
+    conferir("o destino de uma fonte de hora", &|| {
+        let _ = crate::identidade::trocar_fontes_de_hora_de_teste(Some(destinos_trocados));
+    });
+    conferir("o nome de uma fonte de hora", &|| {
+        let _ = crate::identidade::trocar_fontes_de_hora_de_teste(Some(nomes_trocados));
     });
     // O conteúdo de uma lápide: uma trocada por outra, com a conta igual. A
     // referência é o registro com a primeira, e não o do começo, sem lápide
