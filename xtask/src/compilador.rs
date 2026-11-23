@@ -1651,7 +1651,8 @@ pub(crate) fn conferir_o_canal() -> Result<ExitCode, String> {
              rust-toolchain, o canal fixado, o executor — e o das invariantes, que o job de lints \
              liga antes de todo outro `cargo`; e o canário, o único que sobrepõe, só no \
              agendamento e no disparo manual, sem a ação do cache e com o `cache-mode: none`, com \
-             as versões da lista e com os comandos do job de lints",
+             as versões da lista, publicando só a pasta dos registros, e com os comandos do job de \
+             lints",
             canal.as_deref().unwrap_or("")
         );
         Ok(ExitCode::SUCCESS)
@@ -2714,6 +2715,8 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
             fora.extend(gatilhos_fora_da_lista(nome, &linhas));
             // Sem cache nenhum, pelo token do job (desde o lote A17).
             fora.extend(o_modo_do_cache_do_canario(nome, &linhas));
+            // A publicação, só a pasta dos registros (desde o lote A17).
+            fora.extend(a_publicacao_do_canario(nome, &linhas));
             continue;
         }
 
@@ -4183,6 +4186,54 @@ fn o_modo_do_cache_do_canario(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
                  restaura nem grava"
             ),
         );
+    }
+    fora
+}
+
+/// A pasta dos registros do canário, a única que ele publica
+/// ([`a_publicacao_do_canario`]): o diretório temporário do runner, fora da
+/// árvore do projeto. Desde o lote A17.
+const REGISTROS_DO_CANARIO: &str = "${{ runner.temp }}/registros/";
+
+/// A publicação do canário — `linhas`, as de código dele —: todo passo que
+/// usa o `actions/upload-artifact` tem, no `with:`, um `path:` só, igual à
+/// pasta dos registros ([`REGISTROS_DO_CANARIO`]), numa linha.
+///
+/// # Por quê, desde o lote A17
+///
+/// A regra da proveniência do canário é o texto `target/proveniencia` numa
+/// linha de código dele: um `path: target/` na publicação levaria os
+/// registros que o `xtask` grava ali sem citar o caminho deles (o E4 do
+/// revisor da rodada 9 e o I2 do adversário do lote A16). Aqui, o `path:` é
+/// só a pasta dos registros. A cópia de um registro para ela — por um glob
+/// (`cp -r target/proven* …`) ou por um nome montado em pedaços — a regra
+/// não segue: fica com a revisão, e o registro do canário diz
+/// `"oficial": false`.
+fn a_publicacao_do_canario(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
+    let mut fora = Vec::new();
+    for (i, l) in linhas.iter().enumerate() {
+        let publica = !l.escalar
+            && chave_e_valor(l.texto).is_some_and(|(chave, valor)| {
+                chave == "uses" && nome_da_acao(valor) == "actions/upload-artifact"
+            });
+        if !publica {
+            continue;
+        }
+        let caminhos: Vec<&str> = chaves_do_item(linhas, i)
+            .iter()
+            .filter(|c| c.chave == "with")
+            .flat_map(|c| chaves_de_dentro(linhas, c))
+            .filter(|c| c.chave == "path")
+            .map(|c| sem_aspas(c.valor))
+            .collect();
+        if caminhos != [REGISTROS_DO_CANARIO] {
+            fora.push(format!(
+                "{nome}: a publicação de `{}` com o `path:` {caminhos:?} — o canário publica só a \
+                 pasta dos registros (`path: {REGISTROS_DO_CANARIO}`), numa linha: a \
+                 proveniência e o resto de `target/` não são artefato dele",
+                l.texto
+            ));
+        }
     }
     fora
 }
@@ -9730,6 +9781,49 @@ jobs:
                 .iter()
                 .any(|f| f.contains("coluna zero"))
         );
+    }
+
+    /// A publicação do canário só com a pasta dos registros (o I2 do
+    /// adversário do lote A16 e o E4 do revisor da rodada 9): a regra da
+    /// proveniência é o texto `target/proveniencia`, e um `path:` mais largo
+    /// levaria os registros do `xtask` sem citá-lo. O canário do repositório
+    /// passa — também com o caminho entre aspas —; o `path:` do `target/`, o
+    /// da pasta de cima e o de um bloco com a pasta dos registros e mais uma
+    /// reprovam uma vez cada, pela regra da publicação.
+    #[test]
+    fn adversario_a16_a_publicacao_do_canario() {
+        let canario = include_str!("../../.github/workflows/canario.yml");
+        let caminho = "          path: ${{ runner.temp }}/registros/\n";
+        assert_eq!(canario.matches(caminho).count(), 1);
+        assert!(
+            !um(CANARIO, canario)
+                .iter()
+                .any(|f| f.contains("a publicação de")),
+            "{:#?}",
+            um(CANARIO, canario)
+        );
+        for (rotulo, novo) in [
+            ("o target", "          path: target/\n"),
+            ("a pasta de cima", "          path: ${{ runner.temp }}/\n"),
+            (
+                "um bloco com mais uma pasta",
+                "          path: |\n            ${{ runner.temp }}/registros/\n            target/\n",
+            ),
+        ] {
+            let texto = canario.replacen(caminho, novo, 1);
+            assert_ne!(texto, canario, "{rotulo}");
+            let fora = um(CANARIO, &texto);
+            assert!(
+                fora.len() == 1 && fora[0].contains("a publicação de"),
+                "{rotulo}: {fora:#?}"
+            );
+        }
+        let entre_aspas = canario.replacen(
+            caminho,
+            "          path: '${{ runner.temp }}/registros/'\n",
+            1,
+        );
+        assert_eq!(um(CANARIO, &entre_aspas), Vec::<String>::new());
     }
 
     /// O canário sem cache nenhum (o lote A17, a recomendação do M2 do
