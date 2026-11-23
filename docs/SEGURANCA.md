@@ -205,10 +205,11 @@ pontos onde acontece — não num canal paralelo:
   workflow e ação — desde o lote A16, cada `.yml` e `.yaml` de
   `.github/workflows/` e de `.github/actions/` que o git lista, pelo
   caminho como ele é —, as quebras de linha que só o YAML vê — pelos
-  caracteres: o escape que o YAML lê num texto entre aspas duplas, o `\n`,
-  ela não via, e o lote A17 o recusa — e, fora do conteúdo dos blocos, as
-  formas que ela não lê — a linha que começa por `#`, ela a toma por
-  comentário, também no conteúdo de um bloco —, e os
+  caracteres — e, fora do conteúdo dos blocos, as formas que ela não lê —
+  desde o lote A17, também o texto entre aspas duplas com uma `\`: o `\n`
+  que o YAML lê nele é uma quebra de linha, que ela não via; e a linha que
+  começa por `#`, ela a toma por comentário, também no conteúdo de um
+  bloco —, e os
   passos da própria ação só têm as chaves que ela lê neles, sem `if:`,
   `continue-on-error:` nem `env:` a mais. Desde o lote A14, a leitura
   reprova também os espaços que o YAML não toma por espaço,
@@ -244,11 +245,12 @@ pontos onde acontece — não num canal paralelo:
   da ação recusa o arquivo do commit em toda pasta `target`, em qualquer
   nível, e o `workspace` de um pacote; a leitura reprova a raiz do
   documento fora da coluna zero e o texto entre aspas duplas com uma `\`;
-  a chave de todo cache tem a expressão do canal entre as que o leitor de
-  modelos do GitHub acha no valor que o YAML lê — o texto dela num literal
-  de outra expressão não conta —; o `on:` da CI tem o `push`, sem filtro; e
-  o canário tem o `cache-mode: none` na raiz, sem outro num job, e publica
-  só a pasta dos registros. Essas são as
+  a chave de todo cache tem a expressão do canal, na forma canônica, entre
+  as que o leitor de modelos do GitHub acha no valor que o YAML lê — o
+  texto dela num literal de outra expressão não conta —; o `on:` da CI tem
+  o `push`, sem filtro; e o canário tem o `cache-mode: none` na raiz, sem
+  outro num job, e o `path:` da publicação dele é só a pasta dos registros,
+  na forma canônica. Essas são as
   regras da guarda, uma a
   uma no inventário do README; a definição da CI é a raiz da confiança, e
   uma mudança que escapa delas — um nome montado em pedaços, uma linha que

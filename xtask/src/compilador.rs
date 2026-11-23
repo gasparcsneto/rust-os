@@ -107,12 +107,14 @@
 //!     e de qualquer `cargo`, num passo sem `if:` nem `continue-on-error:`,
 //!     que a leitura lê inteiro ([`linhas_que_o_passo_nao_le`], desde o lote
 //!     A12); e o canal em toda chave de cache — desde o lote A16, a
-//!     expressão com a saída da ação ([`CANAL_NA_CHAVE`]), e não o texto, e
-//!     o `id: compilador` no passo da ação; desde o lote A17, uma das
-//!     expressões que o leitor de modelos do GitHub acha no valor que o YAML
-//!     lê ([`o_canal_numa_expressao`]) — o texto dela num literal de outra
-//!     expressão, ou na linha crua de um texto entre aspas simples, não
-//!     conta —;
+//!     expressão com a saída da ação ([`CANAL_NA_CHAVE`]), que até o lote
+//!     A17 se procurava pelo texto na linha, e o `id: compilador` no passo
+//!     da ação; desde o lote A17, uma das expressões que o leitor de modelos
+//!     do GitHub acha no valor que o YAML lê ([`o_canal_numa_expressao`]) —
+//!     o texto dela num literal de outra expressão, ou na linha crua de um
+//!     texto entre aspas simples, não conta —, comparada pelo texto, na
+//!     forma canônica (outra grafia que o GitHub avalia igual, sem um espaço
+//!     ou com a indexação, `outputs['canal']`, reprova, de propósito);
 //!   - a ação do compilador ([`conferir_a_acao`]): desde o lote A14, a
 //!     forma que o runner lê, sem chave nem passo a mais, e o canal da saída
 //!     do passo que o confere ([`forma_da_acao`]); os passos que conferem,
@@ -150,9 +152,10 @@
 //!     usa a ação do cache e, desde o lote A17, tem o `cache-mode: none` na
 //!     raiz, sem outro num job ([`o_modo_do_cache_do_canario`]); só usa as
 //!     ações dele nas versões de [`USOS_OFICIAIS`] (desde o lote A16);
-//!     nenhuma linha dele cita o caminho da proveniência
+//!     nenhuma linha de código dele cita o caminho da proveniência
 //!     (`target/proveniencia`), e, desde o lote A17, a publicação dele é só
-//!     a pasta dos registros ([`a_publicacao_do_canario`]); e repete os
+//!     a pasta dos registros ([`a_publicacao_do_canario`]), comparada pelo
+//!     texto, na forma canônica ([`REGISTROS_DO_CANARIO`]); e repete os
 //!     comandos do job de lints;
 //! - **no `cargo xtask compilador`** ([`relatar`]): o canal, o toolchain
 //!   ativo, o `rustc -Vv` completo, o `cargo -V` e os desvios — o que todo
@@ -2601,11 +2604,11 @@ fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str>
 /// Cada regra pega as formas que ela lê; o resto da definição da CI é da
 /// revisão. O canário
 /// sobrepõe, mas só nos gatilhos da lista dele, não usa a ação do cache —
-/// e, desde o lote A17, tem o `cache-mode: none` —, nenhuma linha dele cita
-/// o caminho da proveniência — e, desde o lote A17, a publicação dele é só a
-/// pasta dos registros —, e, desde o lote A16, só usa as ações dele nas
-/// versões de [`USOS_OFICIAIS`]. As ações locais seguem a leitura do arquivo
-/// inteiro, abaixo,
+/// e, desde o lote A17, tem o `cache-mode: none` —, nenhuma linha de código
+/// dele cita o caminho da proveniência — e, desde o lote A17, a publicação
+/// dele é só a pasta dos registros —, e, desde o lote A16, só usa as ações
+/// dele nas versões de [`USOS_OFICIAIS`]. As ações locais seguem a leitura
+/// do arquivo inteiro, abaixo,
 /// e as regras dos workflows oficiais que leem o texto de cada linha — as
 /// ações permitidas, as sobreposições, a escrita num `rust-toolchain` e a
 /// leitura do passo que usa a ação —, e não as de um workflow: a ordem, a
@@ -2635,7 +2638,8 @@ fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str>
 /// com a revisão (o "O que fica" do lote A15) — no passo `conferir` da ação,
 /// a regra do canal lê toda linha, desde o lote A16. Desde o lote A17,
 /// também a raiz do documento fora da coluna zero
-/// ([`raiz_fora_da_coluna_zero`]) e o texto entre aspas duplas com uma `\`
+/// ([`raiz_fora_da_coluna_zero`]) e, fora do conteúdo dos blocos — onde o
+/// YAML não lê escape —, o texto entre aspas duplas com uma `\`
 /// ([`escape_entre_aspas_duplas`]): a leitura confere os caracteres, e não
 /// os escapes que o YAML lê. E os arquivos lidos são os `.yml` e os `.yaml`
 /// de `.github/workflows/` e de `.github/actions/` que o git lista
@@ -2901,11 +2905,12 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
                  cache lê o canal de `steps.compilador`"
             ));
         }
-        // O canal na chave pela expressão, e não pelo texto (desde o lote
-        // A16): `${{ 'steps.compilador.outputs.canal' }}` é um texto fixo — e,
-        // desde o lote A17, a expressão como o leitor de modelos do GitHub a
-        // acha no valor que o YAML lê, e não o texto contido na linha
-        // ([`o_canal_numa_expressao`]).
+        // A expressão do canal na chave (desde o lote A16:
+        // `${{ 'steps.compilador.outputs.canal' }}` é um texto fixo) — até o
+        // lote A17, pelo texto contido na linha; desde ele, entre as
+        // expressões que o leitor de modelos do GitHub acha no valor que o
+        // YAML lê ([`o_canal_numa_expressao`]), comparada pelo texto, na
+        // forma canônica.
         for chave in chaves_de_cache(&linhas) {
             if !o_canal_numa_expressao(&chave) {
                 fora.push(format!(
@@ -3131,8 +3136,10 @@ fn o_comeco_dos_jobs(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
 /// próprio texto — passava: a chave levava um texto fixo, e não o canal, e
 /// um cache de outro compilador se restaurava pelo prefixo (o B2 do
 /// adversário do lote A15). O comentário com o texto já não valia (o lote
-/// A12). Outra grafia da mesma expressão — sem os espaços, com um padrão
-/// (`|| 'x'`) — reprova, com a forma na mensagem.
+/// A12). Outra grafia da mesma expressão — sem um espaço, com a indexação
+/// (`outputs['canal']`), com um padrão (`|| 'x'`) — reprova, com a forma na
+/// mensagem: a comparação é a do texto, na forma canônica
+/// ([`o_canal_numa_expressao`]).
 ///
 /// # O `id` no passo da ação, desde o lote A16
 ///
@@ -3163,6 +3170,16 @@ const CANAL_NA_CHAVE: &str = "${{ steps.compilador.outputs.canal }}";
 /// crua, duas — `'${{ ''}}${{ steps.compilador.outputs.canal }}'' }}'` tinha
 /// a expressão do canal para a leitura da linha, e um literal para o leitor
 /// (o lote A17 o achou na revisão do patch do adversário).
+///
+/// # A forma canônica, de propósito
+///
+/// A expressão achada se compara com [`CANAL_NA_CHAVE`] pelo texto, letra a
+/// letra. Outra grafia que o GitHub avalia igual — a sem o espaço antes do
+/// `}}`, a da indexação (`steps.compilador.outputs['canal']`) — reprova, e
+/// falha fechada: a mensagem mostra a forma exigida, os workflows a usam em
+/// toda chave, e normalizar a expressão alargaria um comparador da guarda
+/// pelo ganho de conveniência (o F1 do adversário da rodada 10, dito desde o
+/// lote A18; a regra não mudou).
 fn o_canal_numa_expressao(chave: &str) -> bool {
     let mut resto = chave;
     while let Some(i) = resto.find("${{") {
@@ -4218,12 +4235,21 @@ fn o_modo_do_cache_do_canario(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
 
 /// A pasta dos registros do canário, a única que ele publica
 /// ([`a_publicacao_do_canario`]): o diretório temporário do runner, fora da
-/// árvore do projeto. Desde o lote A17.
+/// árvore do projeto, na forma canônica — a regra compara o texto. Desde o
+/// lote A17.
 const REGISTROS_DO_CANARIO: &str = "${{ runner.temp }}/registros/";
 
 /// A publicação do canário — `linhas`, as de código dele —: todo passo que
 /// usa o `actions/upload-artifact` tem, no `with:`, um `path:` só, igual à
 /// pasta dos registros ([`REGISTROS_DO_CANARIO`]), numa linha.
+///
+/// # A forma canônica, de propósito
+///
+/// O `path:` se compara pelo texto, sem as aspas: o caminho sem a `/` do fim,
+/// ou com a expressão sem os espaços (`${{runner.temp}}`), que o GitHub
+/// resolve para a mesma pasta, reprova, e falha fechado — a mensagem mostra
+/// a forma exigida (o F1 do adversário da rodada 10, dito desde o lote A18;
+/// a regra não mudou).
 ///
 /// # Por quê, desde o lote A17
 ///
@@ -5389,7 +5415,9 @@ mod testes {
     /// instalavam ao mesmo tempo, no mesmo `RUSTUP_HOME`: os oito reprovaram,
     /// com os erros do rustup ("could not remove 'component' file", no run 5
     /// do canário). Oito `rustc -V` assim, ao mesmo tempo, num `RUSTUP_HOME`
-    /// novo, reprovaram sete vezes em oito, com o mesmo erro; um só passou.
+    /// novo, reprovaram sete vezes em oito, em cada uma de duas rodadas, com
+    /// os erros do rustup — numa delas, um com o do run 5, noutro componente
+    /// —; um só passou.
     /// Aqui, a instalação vem antes, uma vez — o `OnceLock` faz os outros
     /// testes esperarem por ela —, e os passos dos testes acham o toolchain
     /// instalado.

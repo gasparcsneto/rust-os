@@ -37,10 +37,10 @@
 # leitura que falha fechada: o passo só tem o `name:`, o `id:`, o `uses:` e
 # o `with:` com as entradas, e uma linha dele que ela não lê reprova; e,
 # desde o lote A13, a leitura reprova no arquivo inteiro as quebras de
-# linha que só o YAML vê — pelos caracteres; desde o lote A17, também o
-# texto entre aspas duplas com uma `\`, cujo escape (o `\n`) o YAML lê — e,
-# fora do conteúdo dos blocos, as formas que ela não lê, em todo workflow e
-# nesta ação — desde o lote A16, cada `.yml` e `.yaml` de
+# linha que só o YAML vê — pelos caracteres — e, fora do conteúdo dos
+# blocos, as formas que ela não lê — desde o lote A17, também o texto entre
+# aspas duplas com uma `\`, cujo escape (o `\n`) o YAML lê —, em todo
+# workflow e nesta ação — desde o lote A16, cada `.yml` e `.yaml` de
 # `.github/workflows/` e de `.github/actions/` que o git lista, pelo caminho
 # como ele é —: um checkout escrito numa delas não escapa da ordem; a linha
 # que começa por `#`, ela a toma por comentário, também no conteúdo de um
@@ -57,9 +57,10 @@
 # de uma lista — desde o lote A16, também no canário —, e os dois primeiros
 # passos de cada job são o checkout e esta ação; e, desde o lote A16, o
 # passo desta ação tem o `id: compilador`, e a chave de todo cache tem a
-# expressão com a saída dele — desde o lote A17, entre as expressões que o
-# leitor de modelos do GitHub acha no valor que o YAML lê —; e, desde o
-# lote A17, o `on:` da CI tem o `push`, sem filtro), em quatro passos:
+# expressão com a saída dele, na forma canônica — desde o lote A17, entre as
+# expressões que o leitor de modelos do GitHub acha no valor que o YAML lê
+# —; e, desde o lote A17, o `on:` da CI tem o `push`, sem filtro), em quatro
+# passos:
 #
 # 1. `ambiente`, em Python — o do sistema, `/usr/bin/python3`, e não o do
 #    PATH, que é o que ele confere —, antes de qualquer programa do

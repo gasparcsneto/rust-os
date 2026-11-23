@@ -3038,8 +3038,10 @@ pendência #298.
     antes da primeira ação: no canário, os oito o instalavam ao mesmo tempo
     no mesmo `RUSTUP_HOME`, e reprovavam com os erros do rustup — o mesmo
     pedido, em oito processos num `RUSTUP_HOME` novo, reprovou sete vezes em
-    oito, em cada uma de duas rodadas; e o caso do toolchain oficial no PATH
-    tomava o `bin` do cargo que compilou o teste, o do candidato no canário;
+    oito, em cada uma de duas rodadas — na segunda, três pelo 404 de um
+    componente que só a corrida pediu e o espelho da reprodução não servia
+    —; e o caso do toolchain oficial no PATH tomava o `bin` do cargo que
+    compilou o teste, o do candidato no canário;
   - os falsos positivos das regras do lote A16 reprovam de propósito, nos
     testes, e a mensagem diz a linha ou o caminho;
   - o texto: as frases do lote A16 que os achados desmentem, e os itens do
@@ -3060,6 +3062,44 @@ pendência #298.
   testes novos no hospedeiro e oito ajustados, e as mutações do lote (*As do
   lote A17*, no
   [README](../README.md#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
+
+  Depois do lote A17, o lote A18, [B], fez os itens do revisor da rodada 10
+  sobre o texto do lote A17 e os informativos do adversário da rodada 10 —
+  que não quebrou nada do lote A17: os achados dele falham fechados —, no
+  texto, nos testes e na mensagem de sucesso do `cargo xtask invariantes`,
+  sem regra nova nem mudada, e sem autoridade, regra de acesso, registro,
+  identidade, persistência ou semântica de auditoria novos. Uma frase do
+  lote A17, que prometia uma recusa que o código não faz — o texto entre
+  aspas duplas com uma `\` reprovado "no arquivo inteiro", no cabeçalho da
+  ação e no `docs/SEGURANCA.md`; a recusa é a de uma forma que a leitura não
+  lê, fora do conteúdo dos blocos —, foi corrigida no lugar. E:
+  - a mensagem de sucesso do `cargo xtask invariantes` diz a regra — o
+    canário só com os gatilhos da lista no `on:` da raiz, e a expressão do
+    canal na chave de todo cache —, e não o efeito;
+  - a expressão do canal na chave e o `path:` da publicação do canário se
+    comparam pelo texto, na forma canônica, e o texto o diz: outra grafia
+    que o GitHub avalia igual reprova, e a regra fica assim de propósito —
+    normalizar a forma alargaria um comparador da guarda pelo ganho de
+    conveniência;
+  - os erros de fato do revisor — a linha da XT273 nas mutações do lote
+    A17, o doc de `o_oficial_instalado` e o E4, acima — e as melhorias de
+    precisão dele — os quatro arquivos do `zeroize` da vítima, a chave do
+    lote A16 pelo texto da expressão na linha, os nomes da rede do rustup
+    da instalação de antes, a linha de código do canário na regra da
+    proveniência e o 404 da reprodução da corrida —, aqui, no
+    `docs/SEGURANCA.md`, no cabeçalho da ação, nos docs do `xtask` e no
+    README ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)).
+
+  Fica: o que ficava do lote A17; e, de propósito, falhando fechados, os
+  falsos positivos que a rodada 10 confirmou — a expressão do canal na
+  chave e o caminho da publicação do canário fora da forma canônica (sem
+  um espaço, com a indexação, sem a `/` do fim), e um filtro legítimo no
+  `push` da CI, como o `paths-ignore:` que pularia a CI numa mudança só de
+  documentação e tiraria as invariantes de uma parte dos pushes. Nenhum
+  teste novo no hospedeiro: casos em quatro, que confirmam a forma
+  canônica, o `paths-ignore:` e os certificados da instalação de antes (o
+  lote, no item *A soma das cotas de processos e a cota por sessão*, em
+  [Decisões pendentes](../README.md#decisões-pendentes)).
 
 ### I7
 
