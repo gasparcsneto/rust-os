@@ -65,10 +65,10 @@
 //!   [`ACOES_OFICIAIS`], não sobrepõem o toolchain — nem, desde o lote A14,
 //!   o escolhem pelo job: nenhum `container:`, o `env:` do workflow e o dos
 //!   jobs numa lista fechada, nenhum `GITHUB_ENV`, e o checkout só do
-//!   commit ([`o_que_o_job_escolhe`]); e, desde o lote A15, nem os comandos
-//!   do runner que escrevem nele ([`COMANDOS_DO_RUNNER`]), e os dois
-//!   primeiros passos de cada job são o checkout e a ação
-//!   ([`o_comeco_dos_jobs`]) — e conferem o compilador
+//!   commit ([`o_que_o_job_escolhe`]); e, desde o lote A15, nenhum
+//!   `services:`, nem os comandos do runner que escrevem nele
+//!   ([`COMANDOS_DO_RUNNER`]), e os dois primeiros passos de cada job são o
+//!   checkout e a ação ([`o_comeco_dos_jobs`]) — e conferem o compilador
 //!   — a ação `.github/actions/compilador`, num passo sem `if:` nem
 //!   `continue-on-error:`, que, desde o lote A12, a leitura lê inteiro e
 //!   falha fechada ([`linhas_que_o_passo_nao_le`]) — depois de cada
@@ -2286,7 +2286,8 @@ fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str>
 /// [`CHAVES_DO_PASSO_DA_ACAO`], na forma simples
 /// ([`linhas_que_o_passo_nao_le`]); e toda chave de cache, a principal e as
 /// de restauração, leva o canal. Nenhum `uses:` em várias linhas. Desde o
-/// lote A14, nos oficiais, nenhum job roda num `container:`, o `env:` do
+/// lote A14, nos oficiais, nenhum job roda num `container:` — nem, desde o
+/// lote A15, com `services:` —, o `env:` do
 /// workflow e o de cada job só têm os nomes de [`VARIAVEIS_DOS_JOBS`]
 /// ([`o_que_o_job_escolhe`]), nenhum passo escreve no `GITHUB_ENV`
 /// ([`SOBREPOSICOES`]), e o checkout só tem as chaves de
@@ -2573,6 +2574,19 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
 /// revisão). Num job assim a ação pode não acusar nada — o carregador e o
 /// `bash` mentem para ela —, e quem acusa é o `cargo xtask invariantes` de
 /// fora dele: o local e o do canário.
+///
+/// # Os serviços, desde o lote A15
+///
+/// Os `services:` de um job ficavam de fora — "um serviço roda ao lado, e
+/// não os passos do job" —, e o runner os sobe no "Initialize containers",
+/// antes do primeiro passo, cada um numa imagem que o workflow escolhe, com
+/// o `volumes:` montado do runner e o `options:` passado cru ao `docker
+/// create` (o `ContainerOperationProvider` e o `DockerCommandManager` do
+/// runner): um serviço com o `/usr/bin` ou o `~/.cargo` montado escreve no
+/// `python3`, no `git` ou nos proxies do rustup antes de a ação rodar, e
+/// passava (o M3 do adversário do lote A14). Reprova como o `container:`,
+/// também sem nada montado — a regra não lê o `volumes:` nem o `options:`,
+/// que mudam de forma —; o repositório não tem nenhum.
 fn o_que_o_job_escolhe(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
     let mut fora = Vec::new();
     for (i, l) in linhas.iter().enumerate() {
@@ -2587,6 +2601,15 @@ fn o_que_o_job_escolhe(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
                 "{nome}: `{}` — o `container:` de um job roda os passos dele numa imagem que o \
                  workflow escolhe: a ação do compilador rodaria com o `python3`, o `git` e o \
                  `rustup` dela",
+                l.texto
+            ));
+        }
+        if chave == "services" {
+            fora.push(format!(
+                "{nome}: `{}` — os `services:` de um job sobem antes do primeiro passo dele, cada \
+                 um numa imagem que o workflow escolhe, e o `volumes:` e o `options:` montam nela \
+                 as pastas do runner: o serviço escreveria no `python3`, no `git` e no `rustup` da \
+                 ação antes de ela rodar",
                 l.texto
             ));
         }
@@ -7040,6 +7063,63 @@ jobs:
         ] {
             assert_eq!(
                 o_comeco_dos_jobs(nome, &linhas_de_codigo(texto)),
+                Vec::<String>::new()
+            );
+        }
+    }
+
+    /// Os serviços de um job (o M3 do adversário do lote A14): o runner sobe
+    /// os `services:` antes do primeiro passo, com o `volumes:` montado do
+    /// runner e o `options:` cru no `docker create`, e eles passavam — o
+    /// `container:` reprovava, e o serviço escreve nas mesmas pastas. Cada
+    /// forma reprova, uma vez, com a linha — também o serviço sem nada
+    /// montado —; e os workflows do repositório passam.
+    #[test]
+    fn adversario_a14_os_servicos_dos_jobs() {
+        let job = "  testes:\n    steps:\n";
+        assert_eq!(OFICIAL.matches(job).count(), 1);
+        let no_job =
+            |linhas: &str| OFICIAL.replacen(job, &format!("  testes:\n{linhas}    steps:\n"), 1);
+        let servico = "`services:` — os `services:` de um job sobem antes do primeiro passo dele";
+        for (rotulo, texto) in [
+            (
+                "o /usr/bin montado",
+                no_job(
+                    "    services:\n      banco:\n        image: docker.io/library/busybox:1.36\n        \
+                     volumes:\n          - /usr/bin:/hospedeiro\n",
+                ),
+            ),
+            (
+                "o ~/.cargo pelo options",
+                no_job(
+                    "    services:\n      banco:\n        image: docker.io/library/busybox:1.36\n        \
+                     options: --entrypoint /bin/sh -v /home/runner/.cargo:/casa\n",
+                ),
+            ),
+            (
+                "um serviço sem nada montado",
+                no_job(
+                    "    services:\n      banco:\n        image: docker.io/library/postgres:16\n",
+                ),
+            ),
+        ] {
+            assert_ne!(texto, OFICIAL, "{rotulo}");
+            let fora = um(CI, &texto);
+            assert_eq!(
+                fora.iter().filter(|f| f.contains(servico)).count(),
+                1,
+                "{rotulo}: {fora:#?}"
+            );
+        }
+        for (nome, texto) in [
+            (CI, include_str!("../../.github/workflows/ci.yml")),
+            (
+                ".github/workflows/rede-principal.yml",
+                include_str!("../../.github/workflows/rede-principal.yml"),
+            ),
+        ] {
+            assert_eq!(
+                o_que_o_job_escolhe(nome, &linhas_de_codigo(texto)),
                 Vec::<String>::new()
             );
         }
