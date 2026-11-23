@@ -55,52 +55,66 @@
 //!   `+nightly` de costume, um `rustup override` esquecido, o
 //!   `RUSTUP_TOOLCHAIN` de outra sessão, um `sccache` configurado para a
 //!   máquina inteira;
-//! - **no `cargo xtask invariantes`** ([`conferir_o_canal`]): o canal tem
-//!   data, é o mesmo nos dois arquivos, com as chaves do oficial, e o
-//!   `CLAUDE.md` o cita; não há outro `rust-toolchain` no repositório; o
-//!   config do cargo dos diretórios com `.cargo/` não troca o compilador,
-//!   nem o executor, nem o apelido, e fica na lista — na raiz, só o
-//!   apelido, como na ação —; o `xtask` não chama o cargo nem o rustc com
-//!   outro toolchain; os workflows oficiais só usam as ações de
-//!   [`ACOES_OFICIAIS`], não sobrepõem o toolchain — nem, desde o lote A14,
-//!   o escolhem pelo job: nenhum `container:`, o `env:` do workflow e o dos
-//!   jobs numa lista fechada, nenhum `GITHUB_ENV`, e o checkout só do
-//!   commit ([`o_que_o_job_escolhe`]); e, desde o lote A15, nenhum
-//!   `services:`, nem os comandos do runner que escrevem nele
-//!   ([`COMANDOS_DO_RUNNER`]), as ações permitidas só nas versões da lista
-//!   ([`USOS_OFICIAIS`]), e os dois primeiros passos de cada job são o
-//!   checkout e a ação ([`o_comeco_dos_jobs`]) — e conferem o compilador
-//!   — a ação `.github/actions/compilador`, num passo sem `if:` nem
-//!   `continue-on-error:`, que, desde o lote A12, a leitura lê inteiro e
-//!   falha fechada ([`linhas_que_o_passo_nao_le`]) — depois de cada
-//!   checkout, antes do cache e de qualquer `cargo`, com o canal em toda
-//!   chave de cache — desde o lote A13, numa leitura que falha fechada no
-//!   arquivo inteiro: as quebras de linha que só o YAML vê — e, desde o
-//!   lote A14, os espaços que ele não toma por espaço e os caracteres que
-//!   ele não imprime — e, fora do
-//!   conteúdo dos blocos, as formas que ela não lê reprovam
-//!   ([`quebras_que_a_leitura_nao_ve`], [`forma_que_a_leitura_nao_le`]) —
-//!   e, desde o lote A14, um segundo documento
-//!   ([`marcadores_de_documento`]) —, e
-//!   um checkout escrito numa delas não escapa da ordem —; a ação tem —
-//!   desde o lote A14, na forma que o runner lê, sem chave nem passo a mais,
-//!   e com o canal do passo que o confere ([`forma_da_acao`]) — os passos
-//!   que conferem, fora do cargo, o
-//!   ambiente, o PATH, os `rust-toolchain`, os artefatos, os links — desde
-//!   o lote A12, no commit e no caminho dos diretórios de saída — e os
-//!   submódulos do commit e o que não é pasta nesse caminho — desde o lote
-//!   A13; desde o lote A14, pelo `git` sem o ambiente do job —, e o config
-//!   do cargo — o do executor desde o
-//!   lote A9, os outros desde o lote A10 —, e o das invariantes, que o job
-//!   de lints liga pela entrada `invariantes: true` no `with:` do passo dela
-//!   ([`conferir_a_acao`], [`as_invariantes_na_acao`]) — desde o lote A13,
-//!   cada passo dela só com as chaves que a leitura lê nele, sem `if:`,
-//!   `continue-on-error:` nem `env:` a mais
-//!   ([`linhas_que_o_passo_da_acao_nao_le`]), e, desde o lote A14, cada um
-//!   o item de `runs.steps` com o `id` dele, e não o texto de um bloco —; e o canário, o
-//!   único que sobrepõe — ele
-//!   testa o candidato —, não roda nos pushes, não usa o cache da CI, não
-//!   publica proveniência e repete os comandos do job de lints;
+//! - **no `cargo xtask invariantes`** ([`conferir_o_canal`]), as regras
+//!   abaixo, cada uma pelo que ela lê. A definição da CI — os workflows e
+//!   as ações — é a raiz da confiança, e fica com a revisão: as regras pegam
+//!   as formas que elas listam, e uma mudança de workflow que escapa delas
+//!   — um nome montado em pedaços, uma linha que a leitura toma por
+//!   comentário, um passo depois da ação, o script da ação — é da revisão,
+//!   e não da guarda. Desde o lote A15, o texto daqui diz as regras, e não
+//!   o que elas garantiriam: três rodadas seguidas do adversário acharam o
+//!   texto dizendo mais do que o código fazia.
+//!   - o canal tem data, é o mesmo nos dois arquivos, com as chaves do
+//!     oficial, e o `CLAUDE.md` o cita; não há outro `rust-toolchain` no
+//!     repositório;
+//!   - o config do cargo dos diretórios com `.cargo/` não troca o
+//!     compilador, nem o executor, nem o apelido, e fica na lista — na
+//!     raiz, só o apelido, como na ação —; o `xtask` não chama o cargo nem
+//!     o rustc com outro toolchain;
+//!   - a leitura de todo workflow e ação — a do compilador inclusive —,
+//!     linha a linha, antes das outras regras: reprovam as quebras de linha
+//!     que só o YAML vê e, desde o lote A14, os espaços que ele não toma por
+//!     espaço e os caracteres que ele não imprime
+//!     ([`quebras_que_a_leitura_nao_ve`]); fora do conteúdo dos blocos, as
+//!     formas que ela não lê ([`forma_que_a_leitura_nao_le`]), desde o lote
+//!     A13; e, desde o lote A14, um segundo documento
+//!     ([`marcadores_de_documento`]);
+//!   - nos workflows oficiais: só as ações de [`ACOES_OFICIAIS`] e, desde o
+//!     lote A15, só nas versões de [`USOS_OFICIAIS`]; nenhuma linha com uma
+//!     das [`SOBREPOSICOES`] — o `GITHUB_ENV` desde o lote A14, e o
+//!     `ACTIONS_ALLOW_UNSECURE_COMMANDS` desde o lote A15 — nem, desde o
+//!     lote A15, com os [`COMANDOS_DO_RUNNER`]; nenhum `container:`, desde o
+//!     lote A14, nem `services:`, desde o lote A15, e o `env:` do workflow e
+//!     o dos jobs só com os nomes de [`VARIAVEIS_DOS_JOBS`]
+//!     ([`o_que_o_job_escolhe`]); o checkout só com as chaves de
+//!     [`CHAVES_DO_CHECKOUT`]; desde o lote A15, os dois primeiros passos de
+//!     cada job são o checkout e a ação ([`o_comeco_dos_jobs`]); a ação
+//!     `.github/actions/compilador` depois de cada checkout, antes do cache
+//!     e de qualquer `cargo`, num passo sem `if:` nem `continue-on-error:`,
+//!     que a leitura lê inteiro ([`linhas_que_o_passo_nao_le`], desde o lote
+//!     A12); e o canal em toda chave de cache;
+//!   - a ação do compilador ([`conferir_a_acao`]): desde o lote A14, a
+//!     forma que o runner lê, sem chave nem passo a mais, e o canal da saída
+//!     do passo que o confere ([`forma_da_acao`]); os passos que conferem,
+//!     fora do cargo, o ambiente, o PATH, os `rust-toolchain`, os
+//!     artefatos, os links e os submódulos do commit e o que não é pasta no
+//!     caminho dos diretórios de saída — pelo `git` sem o ambiente do job,
+//!     desde o lote A14 —, o config do cargo e o das invariantes, cada um
+//!     com as marcas dele no script, só com as chaves que a leitura lê nele
+//!     ([`linhas_que_o_passo_da_acao_nao_le`]) e, desde o lote A14, o item
+//!     de `runs.steps` com o `id` dele; desde o lote A15, no passo que
+//!     confere o canal, o nome `canal`, fora da expansão, só aparece na
+//!     linha que o lê do arquivo e na que escreve a saída, e só esta cita o
+//!     `GITHUB_OUTPUT` ([`o_canal_do_passo_conferir`]); e nenhuma linha dela
+//!     cita o
+//!     `GITHUB_ENV`, o `GITHUB_PATH` nem, desde o lote A15, os
+//!     [`COMANDOS_DO_RUNNER`];
+//!   - o job de lints liga as invariantes pela entrada `invariantes: true`
+//!     no `with:` do primeiro passo do `steps:` dele que usa a ação
+//!     ([`as_invariantes_na_acao`]);
+//!   - o canário, o único que sobrepõe — ele testa o candidato —, não roda
+//!     nos pushes, não usa o cache da CI, não publica proveniência e repete
+//!     os comandos do job de lints;
 //! - **no `cargo xtask compilador`** ([`relatar`]): o canal, o toolchain
 //!   ativo, o `rustc -Vv` completo, o `cargo -V` e os desvios — o que todo
 //!   relatório de validação cita.
@@ -315,8 +329,8 @@ const SAIDA_DO_CANAL: &str = "echo \"canal=$canal\" >> \"$GITHUB_OUTPUT\"";
 /// `git diff` rodarem um programa, o `core.fsmonitor` (o lote A14 o achou
 /// na revisão, num brinquedo). Os dois rodam o `git` só com o PATH, que o
 /// passo do ambiente confere, e sem a configuração global e a do sistema
-/// (`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM`): a do repositório é a que
-/// o checkout escreveu, e o commit não a traz.
+/// (`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM`): a do repositório, desde o
+/// lote A15, é a do checkout — nenhum passo entre eles ([`o_comeco_dos_jobs`]).
 const PASSOS_DA_ACAO: [(&str, &str, &[&str]); 4] = [
     (
         "ambiente",
@@ -2326,14 +2340,20 @@ fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str>
 /// [`CHAVES_DO_PASSO_DA_ACAO`], na forma simples
 /// ([`linhas_que_o_passo_nao_le`]); e toda chave de cache, a principal e as
 /// de restauração, leva o canal. Nenhum `uses:` em várias linhas. Desde o
-/// lote A14, nos oficiais, nenhum job roda num `container:` — nem, desde o
-/// lote A15, com `services:`, e as ações permitidas só nas versões de
-/// [`USOS_OFICIAIS`] —, o `env:` do
-/// workflow e o de cada job só têm os nomes de [`VARIAVEIS_DOS_JOBS`]
-/// ([`o_que_o_job_escolhe`]), nenhum passo escreve no `GITHUB_ENV`
-/// ([`SOBREPOSICOES`]), e o checkout só tem as chaves de
-/// [`CHAVES_DO_CHECKOUT`]; e, desde o lote A15, os dois primeiros passos de
-/// cada job são o checkout e a ação ([`o_comeco_dos_jobs`]). O canário
+/// lote A14, nos oficiais, nenhum job tem `container:` — nem, desde o lote
+/// A15, `services:`, e as ações permitidas só nas versões de
+/// [`USOS_OFICIAIS`] —, o `env:` do workflow e o de cada job só têm os
+/// nomes de [`VARIAVEIS_DOS_JOBS`] ([`o_que_o_job_escolhe`]), nenhuma linha
+/// cita o `GITHUB_ENV` ([`SOBREPOSICOES`]) — nem, desde o lote A15, o
+/// `ACTIONS_ALLOW_UNSECURE_COMMANDS` e os [`COMANDOS_DO_RUNNER`] —, e o
+/// checkout só tem as chaves de [`CHAVES_DO_CHECKOUT`]; e, desde o lote A15,
+/// os dois primeiros passos de cada job são o checkout e a ação
+/// ([`o_comeco_dos_jobs`]). O lote A14 dizia que "nenhum passo escreve no
+/// `GITHUB_ENV`" e que o checkout era "só o do commit": as regras liam
+/// essas formas, e os comandos do runner e um passo que clona ou troca a
+/// pasta da ação escapavam delas (o M1 e o M2 do adversário do lote A14).
+/// Cada regra pega as formas que ela lê; o resto da definição da CI é da
+/// revisão. O canário
 /// sobrepõe, mas não roda nos pushes, não usa o cache nem publica a
 /// proveniência. As ações locais seguem a leitura que falha fechada, abaixo,
 /// e as regras dos workflows oficiais que leem o texto de cada linha — as
@@ -2508,10 +2528,9 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
             continue;
         }
 
-        // Os jobs rodam no runner, com o ambiente numa lista fechada, e o
-        // checkout é o do commit (desde o lote A14): o que a ação do
-        // compilador confere não depende de um programa nem de um commit que
-        // o workflow escolhe.
+        // O que o job escolhe para os passos da ação (desde o lote A14): o
+        // `container:`, os `services:` (desde o lote A15) e o `env:` do
+        // workflow e o dos jobs fora da lista fechada reprovam.
         fora.extend(o_que_o_job_escolhe(nome, &linhas));
         // Os dois primeiros passos de cada job são o checkout e a ação (desde
         // o lote A15): nenhum outro passo do job roda antes dela.
@@ -2600,11 +2619,17 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
 /// O que um workflow oficial — `nome`, e `linhas`, as de código dele —
 /// escolhe para os passos de um job, e que a ação do compilador não
 /// confere: o `container:` de um job, que roda os passos dele numa imagem
-/// que o workflow escolhe, e o `env:` do workflow e o de cada job, que só
-/// têm os nomes de uma lista fechada ([`VARIAVEIS_DOS_JOBS`]) — os dois
-/// chegam aos passos da ação, que roda com o ambiente do job. O `env:` de
-/// um passo — de um item de lista — só vale nele, e o do passo da ação, a
-/// leitura dele já recusa ([`linhas_que_o_passo_nao_le`]).
+/// que o workflow escolhe, os `services:` (desde o lote A15), e o `env:` do
+/// workflow e o de cada job, que só têm os nomes de uma lista fechada
+/// ([`VARIAVEIS_DOS_JOBS`]) — os três chegam aos passos da ação, que roda
+/// com o ambiente do job. O `env:` de um passo — de um item de lista — a
+/// regra não lê: ele vale no passo, e o do passo da ação, a leitura dele já
+/// recusa ([`linhas_que_o_passo_nao_le`]). O lote A14 dizia que ele "só
+/// vale nele", e os comandos do runner que o `ACTIONS_ALLOW_UNSECURE_COMMANDS`
+/// dele ligava o levavam aos passos seguintes; desde o lote A15, as
+/// sobreposições recusam esse nome e os comandos ([`COMANDOS_DO_RUNNER`]),
+/// e o nome montado em pedaços — numa expressão do `env:` de um passo, num
+/// `run:` que escreve no `GITHUB_ENV` — fica com a revisão.
 ///
 /// # Por quê, desde o lote A14
 ///

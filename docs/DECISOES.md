@@ -2688,11 +2688,16 @@ pendência #298.
     `GIT_INDEX_FILE` no `env:` do job escondia o arquivo do commit num
     `target/` e o submódulo, e o `HOME` escolhia uma configuração que roda
     um programa no `git`;
-  - nos workflows oficiais, nenhum job roda num `container:`, o `env:` do
+  - nos workflows oficiais, nenhum job tem `container:`, o `env:` do
     workflow e o de cada job só têm os nomes de uma lista fechada — o
     `LD_PRELOAD`, o `CC` do `build.rs` do `ring`, o `HOME` e o `BASH_ENV`
-    escolhiam o programa que roda nos passos da ação —, nenhum passo
-    escreve no `GITHUB_ENV`, e o checkout só tem o `uses:` e o `name:`;
+    escolhiam o programa que roda nos passos da ação —, nenhuma linha cita
+    o `GITHUB_ENV`, e o checkout só tem o `uses:` e o `name:`. O lote
+    dizia "nenhum passo escreve no `GITHUB_ENV`", e os comandos `set-env` e
+    `add-path` do runner, ligados pelo `env:` de um passo, escreviam; e um
+    passo que clona ou troca a pasta da ação antes dela, ou um job sem o
+    checkout, escolhiam o commit dela como o `with:` do checkout — o lote
+    A15 os recusa;
   - um documento só: um segundo documento, que o runner recusa, reprova;
   - o texto: o que os achados desmentem no do lote A13, e os itens do
     revisor da rodada 6 sobre ele
@@ -2705,6 +2710,10 @@ pendência #298.
   não confere; e o runner que o `runs-on:` escolhe. Num job com o
   carregador ou o `BASH_ENV` no ambiente, a ação pode não acusar nada, e
   quem acusa a linha do `env:` é o `cargo xtask invariantes` de fora dele.
+  Ficavam também, sem que o texto os dissesse, e o lote A15 os recusa: um
+  passo antes do checkout, um job sem ele, os `services:` de um job e a
+  versão das ações permitidas; e a marca do `echo` do canal provava a
+  linha, e não o valor.
   Seis testes novos no hospedeiro, e as mutações do lote (*As do lote
   A14*, no
   [README](../README.md#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
@@ -2750,6 +2759,53 @@ pendência #298.
   o controle da política não troca; e um registro de mais de 160 bytes de
   outro fio, no meio de um caso que confere segredos, que o reprovaria — a
   regra falha fechada, e a varredura não achou nenhum.
+
+  Depois do lote ICACHE-6, o lote A15, [B], fez os achados do adversário da
+  rodada 7 sobre o lote A14 — os workflows oficiais e o canal da ação do
+  compilador —, na guarda do compilador e no texto, sem autoridade, regra
+  de acesso, registro, identidade, persistência ou semântica de auditoria
+  novos. A partir dele, o texto descreve a guarda pelas regras que ela
+  confere, e diz o limite uma vez: a definição da CI — os workflows e as
+  ações — é a raiz da confiança e fica com a revisão; a guarda pega as
+  formas que as regras listam, e uma mudança de workflow que escapa delas
+  é da revisão, e não da guarda. As regras novas, nos workflows oficiais:
+  - nenhuma linha cita o `ACTIONS_ALLOW_UNSECURE_COMMANDS`, que liga os
+    comandos `set-env` e `add-path` do runner — o `GITHUB_ENV` e o
+    `GITHUB_PATH` por outro nome, de um passo para os seguintes —, nem os
+    dois comandos, nas duas formas que o runner lê (`::set-env`,
+    `##[set-env`) e em qualquer caixa; na ação do compilador, os comandos
+    também;
+  - os dois primeiros passos de cada job são o checkout e a ação: um passo
+    antes do checkout — o cache do `~/.rustup`, o `sudo` que troca o
+    `python3` —, um entre ele e a ação — o `git checkout` da pasta dela, o
+    `core.fsmonitor` no `.git/config`, um script do repositório — e um job
+    sem o checkout, que clona outro ramo, reprovam;
+  - nenhum job tem `services:`, que sobem antes do primeiro passo, com as
+    pastas do runner montadas;
+  - as ações permitidas só nas versões de uma lista — o `uses:` inteiro —:
+    um commit (`@<sha>`) pode ser de um fork da rede do repositório da
+    ação;
+  - na ação, no passo que confere o canal, o nome `canal`, fora da
+    expansão, só aparece na linha que o lê do `rust-toolchain.toml` — a
+    segunda linha de código do script, depois do `set -euo pipefail` — e na
+    que escreve a saída, e só esta cita o `GITHUB_OUTPUT`: o canal fixo
+    antes dela, ou um segundo `echo`, punham na chave de todo cache um
+    canal que não é o do compilador;
+  - o texto: o que os achados desmentem no do lote A14, aqui, no
+    `docs/SEGURANCA.md`, no cabeçalho da ação e no README
+    ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)).
+
+  Fica, com a revisão: o nome montado em pedaços, ou escrito numa linha que
+  a leitura toma por comentário — num `run:` que escreve no `GITHUB_ENV`,
+  numa expressão do `env:` de um passo —, que depois da ação põe uma
+  variável nos passos seguintes; o `defaults:` do workflow e do job, que
+  vale nos `run:` do job, depois da ação, e não chega aos passos dela; o
+  script da ação, que a regra do canal lê pelo texto — o `eval` e o
+  `source` ela não segue —; a etiqueta de uma versão da lista (`@v4`),
+  que o dono da ação move; e o runner e a imagem que o `runs-on:` escolhe
+  — também a que o `snapshot:` de um job grava. Cinco testes novos no
+  hospedeiro, e as mutações do lote (*As do lote A15*, no
+  [README](../README.md#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
 
 ### I7
 

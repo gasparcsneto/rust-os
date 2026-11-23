@@ -4,19 +4,27 @@
 #
 # Onde a confiança começa, desde o lote A10: a definição da CI — os
 # workflows e esta ação — é a raiz da confiança, e quem a protege é a
-# revisão. Um passo novo num workflow, o `env:` ou o `run:` de um passo
-# dele, ou o script daqui, mudam o que a CI faz, e nada abaixo deles os
-# confere. Desde o lote A13, os passos daqui só têm as chaves que o `cargo
-# xtask invariantes` lê neles — o `name:`, o `id:`, o `shell:` e o `run:`, e,
-# no das invariantes, o `if:` da entrada e o `env:` com o toolchain fixado
-# —, e um `if:`, um `continue-on-error:` ou um `env:` a mais reprovam; e,
-# desde o lote A14, cada passo é o item de `runs.steps` com o `id` dele —
-# uma cópia dele como o texto de um bloco não conta mais —, e a ação tem a
+# revisão. O `cargo xtask invariantes` confere, nos workflows e aqui, as
+# formas que as regras dele listam (`xtask/src/compilador.rs`, e o
+# inventário das guardas de texto, no README); uma mudança que escapa
+# delas — o script de um passo daqui, um passo de um workflow depois desta
+# ação, um nome montado em pedaços — é da revisão, e não da guarda. Desde
+# o lote A13, os passos daqui só têm as chaves que o `cargo xtask
+# invariantes` lê neles — o `name:`, o `id:`, o `shell:` e o `run:`, e, no
+# das invariantes, o `if:` da entrada e o `env:` com o toolchain fixado —,
+# e um `if:`, um `continue-on-error:` ou um `env:` a mais reprovam; desde
+# o lote A14, cada passo é o item de `runs.steps` com o `id` dele — uma
+# cópia dele como o texto de um bloco não conta mais —, e a ação tem a
 # forma que o runner lê: as chaves de cima, a entrada, o `outputs.canal` do
-# passo `conferir`, o `runs.using: composite` e só estes quatro passos.
-# Abaixo dela, esta ação garante que o primeiro `cargo` que roda o código
-# do repositório — o `cargo xtask invariantes`, no job de lints — é o do
-# toolchain oficial, no ambiente conferido, sem nada do repositório antes.
+# passo `conferir`, o `runs.using: composite` e só estes quatro passos; e,
+# desde o lote A15, no passo `conferir`, o nome `canal`, fora da expansão,
+# só aparece na linha que o lê do `rust-toolchain.toml` e na que escreve a
+# saída, e só esta cita o `GITHUB_OUTPUT`. Abaixo da definição da CI, esta
+# ação confere o que
+# escolhe o primeiro `cargo` que roda o código do repositório — o `cargo
+# xtask invariantes`, no job de lints —: o toolchain oficial e o ambiente;
+# e, desde o lote A15, os dois primeiros passos de cada job oficial são o
+# checkout e esta ação: nenhum outro passo do job roda antes dela.
 #
 # Roda logo depois do checkout, antes do cache e de qualquer `cargo` (o
 # `cargo xtask invariantes` confere a ordem, e, desde o lote A11, que o
@@ -29,10 +37,14 @@
 # ela não lê reprovam, em todo workflow e nesta ação: um checkout escrito
 # numa delas não escapa da ordem; desde o lote A14, também os espaços que o
 # YAML não toma por espaço, os caracteres que ele não imprime e um segundo
-# documento; e, nos workflows oficiais, nenhum job roda num `container:`, o
-# `env:` do workflow e o dos jobs só têm os nomes de uma lista fechada,
-# nenhum passo escreve no `GITHUB_ENV`, e o checkout é só o do commit), em
-# quatro passos:
+# documento; e, nos workflows oficiais, nenhum job tem `container:` nem,
+# desde o lote A15, `services:`; o `env:` do workflow e o dos jobs só têm
+# os nomes de uma lista fechada; nenhuma linha cita o `GITHUB_ENV` nem,
+# desde o lote A15, o `ACTIONS_ALLOW_UNSECURE_COMMANDS` e os comandos
+# `set-env` e `add-path` do runner; o checkout só tem o `uses:` e o
+# `name:`; e, desde o lote A15, as ações permitidas só nas versões de uma
+# lista, e os dois primeiros passos de cada job são o checkout e esta
+# ação), em quatro passos:
 #
 # 1. `ambiente`, em Python — o do sistema, `/usr/bin/python3`, e não o do
 #    PATH, que é o que ele confere —, antes de qualquer programa do
@@ -84,7 +96,12 @@
 #    o host, pelo sysroot dele, e o `cargo` o do mesmo sysroot. Devolve o
 #    canal, que entra na chave de todo cache: um cache é do compilador que
 #    o encheu, uma promoção começa caches novos, e nenhum se restaura do
-#    compilador anterior.
+#    compilador anterior. Desde o lote A15, o `cargo xtask invariantes`
+#    confere que as duas primeiras linhas de código do script são o
+#    `set -euo pipefail` e a que lê o canal, que o nome `canal`, fora da
+#    expansão, só aparece nela e na última, e que só a última cita o
+#    `GITHUB_OUTPUT`; o nome montado em pedaços, ou executado de um texto
+#    (o `eval`, o `source`), ele não segue.
 # 3. `executor`, em Python, com o toolchain fixado: o que o config do cargo
 #    faz rodar no lugar do que o toolchain rodaria, lido pela consulta do
 #    próprio cargo (`config get`), que lê todo arquivo de config que vale em
@@ -125,8 +142,10 @@
 # guarda de dentro do `xtask` não vê o que nunca o chama, nem o que monta o
 # binário dela: ela mora aqui, antes de todo `cargo`. O `xtask` vê o que
 # ainda o chama, no começo de todo comando, e o `cargo xtask invariantes`
-# confere que estes passos estão aqui (`xtask/src/compilador.rs`). A ação
-# não escreve no ambiente dos passos seguintes.
+# confere que estes passos estão aqui (`xtask/src/compilador.rs`), e que
+# nenhuma linha desta ação cita o `GITHUB_ENV`, o `GITHUB_PATH` nem os
+# comandos `set-env` e `add-path` do runner, que escrevem no ambiente dos
+# passos seguintes.
 name: O compilador oficial
 description: Confere o ambiente, o PATH, os rust-toolchain e os manifestos antes de todo cargo, instala e confere o compilador do rust-toolchain.toml com o toolchain fixado, recusa o executor, o ligador e o apelido do config do cargo e o config fora da lista, roda as invariantes no job de lints e devolve o canal para a chave do cache.
 inputs:

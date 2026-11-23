@@ -183,7 +183,9 @@ pontos onde acontece — não num canal paralelo:
   proposta ao dono do projeto: se ele preferir a letra, a fixação sai, e a
   guarda fica nos `rust-toolchain` que o passo do ambiente confere —; e
   roda as invariantes, no job de lints, antes do cache e de todo outro
-  `cargo`, sem nada do repositório antes. Desde o lote A11, o `cargo xtask
+  `cargo` — e, desde o lote A15, os dois primeiros passos de cada job
+  oficial são o checkout e ela: nenhum outro passo do job roda antes. Desde
+  o lote A11, o `cargo xtask
   invariantes` confere também que o passo dela, em todo workflow oficial,
   não tem `if:` nem `continue-on-error:`, que a deixariam sem rodar ou o
   job seguir com ela reprovada, e que a entrada das invariantes está no
@@ -202,10 +204,24 @@ pontos onde acontece — não num canal paralelo:
   liga as invariantes é um item do `steps:` do job de lints; a ação tem a
   forma que o runner lê, e cada passo dela é o item de `runs.steps` com o
   `id` dele — uma cópia como o texto de um bloco não conta —; e, nos
-  workflows oficiais, nenhum job roda num `container:`, o `env:` do
-  workflow e o dos jobs só têm os nomes de uma lista fechada, nenhum passo
-  escreve no `GITHUB_ENV`, e o checkout é só o do commit. O que as
-  guardas de texto do
+  workflows oficiais, nenhum job tem `container:`, o `env:` do workflow e o
+  dos jobs só têm os nomes de uma lista fechada, nenhuma linha cita o
+  `GITHUB_ENV`, e o checkout só tem o `uses:` e o `name:`. O lote A14
+  dizia "nenhum passo escreve no `GITHUB_ENV`, e o checkout é só o do
+  commit", e o adversário da rodada 7 mostrou o que a regra não via: os
+  comandos `set-env` e `add-path` do runner, ligados pelo `env:` de um
+  passo, e um passo que clona ou troca a pasta da ação antes dela. Desde o
+  lote A15, também: nenhuma linha cita o `ACTIONS_ALLOW_UNSECURE_COMMANDS`
+  nem os dois comandos, nas formas que o runner lê; nenhum job tem
+  `services:`; as ações permitidas só nas versões de uma lista; os dois
+  primeiros passos de cada job são o checkout e a ação; e, na ação, o nome
+  `canal`, fora da expansão, só aparece na linha que o lê do
+  `rust-toolchain.toml` e na que escreve a saída, e só esta cita o
+  `GITHUB_OUTPUT`. Essas são as regras da guarda, uma a
+  uma no inventário do README; a definição da CI é a raiz da confiança, e
+  uma mudança que escapa delas — um nome montado em pedaços, um passo
+  depois da ação, o script da ação — é da revisão, e não da guarda. O que
+  as guardas de texto do
   `xtask` não fecham — quem escreve no kernel para contorná-las de
   propósito — e a definição da CI ficam com a revisão ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)).
   E as recusas das perguntas sobre quem
