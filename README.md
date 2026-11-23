@@ -1855,8 +1855,9 @@ a regra, a remoção e a cópia na escrita, e a parte da paginação do lote
 ICACHE-4 —, no ARM, em depuração e em release: a mutação do adversário
 reprova só o caso da regra, 66 de 67, com a conta de sempre — um `tlbi` por
 endereço em cada compartilhada — e "o ultimo tlbi deste nucleo foi o de
-0x2004001000, com a folha nova: false" nas três; a remoção e os dois da
-cópia na escrita passam. Sem ela, 67 de 67, as três com o `tlbi` no endereço
+0x2004001000, com a folha nova: false" — na do usuário, o de 0x100000000
+—, a folha nova `false` nas três; a remoção e os dois da cópia na escrita
+passam. Sem ela, 67 de 67, as três com o `tlbi` no endereço
 mapeado e a folha nova; e no x86, que não tem o caso, a lista passa, 67 de
 67. Na suíte inteira pelas partes da CI, em depuração, o caso passou na
 parte 2/3 do ARM.
@@ -12915,7 +12916,9 @@ e à tela do Terminal, e não ao log, `SENHA_NOVA` e `OUTRA_SENHA_NOVA` foram
 inteiras a uma linha da serial; e com o parâmetro não declarado gravado
 duas vezes, a chave que o caso do lote EXECUTADO digita, `graviola-madura`
 — o "O que fica" do lote ICACHE-6 não citava o diagnóstico dele. O lote
-ICACHE-7, [B], só na suíte: os 26 diagnósticos passam por `sem_segredo`,
+ICACHE-7, [B], só na suíte: os 26 diagnósticos — os de dez casos; os de
+outros três que digitam a senha da suíte num console, e os de
+`admin_espera`, desde o lote ICACHE-8 (abaixo) — passam por `sem_segredo`,
 que devolve o texto se ele não leva um pedaço nem uma palavra inteira das
 senhas da suíte e do que o caso digitou, nem a forma escrita de uma
 credencial, e senão diz o tamanho dele, o que ele leva e onde, pelo mesmo
@@ -12939,9 +12942,66 @@ dele, nas duas.
 
 Ficam: os diagnósticos dos casos do registro de pessoas (`pessoas: …`), que
 dão a senha à função, e não a um console, e dizem o registro inteiro — o
-primeiro teste de cada um usa uma senha que não é da suíte, e uma regressão
-uniforme reprova ali —; e, por desenho, os ecos do console físico, que
-escreve na serial o que se digita nele como linha de comando.
+primeiro teste de `pessoas: recusas e tentativas` usa uma senha que não é da
+suíte, e uma regressão uniforme reprova ali; o de `pessoas: uma sessao por
+console` entra com a senha da suíte e diz o registro do login inteiro; e
+`pessoas: os estados nao se confundem` registra a pessoa com a forma
+escrita da credencial da senha da suíte, que o diagnóstico de
+`admin_espera` levava, pelos parâmetros, até o lote ICACHE-8 (abaixo) —; e,
+por desenho, os ecos do console físico, que escreve na serial o que se
+digita nele como linha de comando.
+
+O adversário da rodada 9 achou o mesmo fora dos 26 (o achado 3 dele):
+`admin_espera`, que confere o desfecho de uma operação administrativa,
+dizia na falha os parâmetros, a resposta e o registro inteiros, e os de um
+`person.register` levam a forma escrita da credencial da senha da suíte —
+Argon2id com o custo mínimo e o sal fixo, que um dicionário abre. Com o
+registro de uma pessoa sem a conferência do papel — a regressão de um ramo
+que `teto: o administrador delega e nao exerce` existe para pegar —, ela
+foi à serial e à tela do console físico, onde o caso seguinte a achou e
+reprovou. E outros três casos digitam a senha da suíte num console e
+diziam texto cru na falha (o informativo 4 dele): `terminal: o agente nao
+edita nem confirma a linha da senha` e `terminal: a edicao da arvore que
+corre com o Enter da pessoa nao entra na linha do nome`, a resposta de um
+`ui.act`, e `smp: o login nao entra no console reaberto`, o `detalhe` do
+`person.login`. O lote ICACHE-8, [B], só na suíte: os parâmetros, a
+resposta e o registro de `admin_espera`, e os nove diagnósticos desses três
+casos, passam por `sem_segredo`.
+
+As provas, com quatro núcleos, nas duas arquiteturas, em depuração e em
+release, com a suíte filtrada à lista do lote — a do adversário e os três
+casos: o registro sem a conferência do papel reprova o caso do teto e
+`pessoas: os estados nao se confundem`, e o diagnóstico diz "person.register
+um texto de 169 byte(s), que leva a forma escrita de uma credencial, no byte
+46 de 169", com a resposta, que não a leva, inteira; nenhuma credencial vai
+à serial, e o caso seguinte passa: a tela não a recebeu. Dos nove
+diagnósticos dos três casos, dois uma mutação alcança, cada um com a
+regressão que põe a senha no texto que ele diz: a recusa da linha da pessoa
+dizendo o que a linha tem — no Terminal que pede a senha, o começo dela —
+reprova `terminal: o agente nao edita…`, que diz "set_value: um texto de
+223 byte(s), que leva uma palavra inteira de SENHA_DE_TESTE, no byte 186 de
+223"; e o login que chega com o console já fechado gravado também como uma
+recusa, com a senha no `detalhe`, reprova o do SMP, que diz "o login acabou
+em DenyNotAuthenticated: um texto de 63 byte(s), que leva um pedaco de
+SENHA_DE_TESTE, no byte 34 de 63" — os mesmos números nas duas
+arquiteturas, em depuração e em release. Com os
+diagnósticos crus de antes, as mesmas duas mutações levam `cavalo` e a
+senha inteira a duas linhas do subsistema `teste`. Os outros sete — os
+quatro do caso da linha da senha depois do login e os três do da edição que
+corre com o Enter — dizem a resposta de um `ui.act` de quando o kernel não
+tem a senha — a linha pede um comando, antes de ela ser digitada ou depois
+de o console a consumir e zerar —, e nenhuma mutação de um ramo os alcança:
+passam por `sem_segredo` pela mesma regra.
+
+Ficam, por desenho: o diagnóstico que leva um segredo sai inteiro — diz o
+tamanho, o segredo e o byte, e nada mais do texto, nem o que nele não é
+segredo: no do lote EXECUTADO, o `detalhe` do `INVALID_ARGUMENT` sempre leva
+a chave digitada, e o diagnóstico do parâmetro gravado duas vezes nunca diz
+os códigos nem os métodos dos registros (o informativo 5 do adversário); e
+o resumo do campo `parametros` da auditoria, o BLAKE2s sem chave do que se
+digitou, que os diagnósticos dizem em `{:?}` e `sem_segredo` não vê, como a
+conferência não vê — a [AUD-CAMPO](docs/DECISOES.md#aud-campo) (o
+informativo 3).
 
 O que ela não vê, por enquanto: a chave de um objeto JSON que uma pessoa
 entrada digita no console vai como veio ao `detalhe` do registro
@@ -18472,10 +18532,15 @@ que a conferência diz, e, desde o lote ICACHE-6, que o laço roda por ela o
 caso desse controle — os outros, porque o laço é um só para a fatia e a
 cauda: um laço partido, com a cauda por fora, passaria nele. E, desde o
 lote ICACHE-7, o `cargo xtask test` reprova a linha `FALHOU` de um caso com
-o placar dizendo que todos passaram (abaixo). O resto do estado global — as
-filas, o histórico e os cursores do teclado, entre outros — continua com a
-disciplina de cada caso. As mutações, no ARM, com a suíte filtrada aos casos
-do teclado, do HID, do pareamento e do executor: a conferência sem o shift,
+o placar dizendo que todos passaram (abaixo). E, desde o lote ICACHE-8, a
+função conta os casos que roda chamada de fora de outro caso e os que
+reprova, e o laço confere as duas contas contra as dele antes do placar: o
+laço que jogasse fora o resultado dela, o que dissesse `FALHOU` sem somar a
+falha e o partido, com a cauda por fora, reprovam ali (abaixo). O resto do
+estado global — as filas, o histórico e os cursores do teclado, entre
+outros — continua com a disciplina de cada caso. As mutações, no ARM, com a
+suíte filtrada aos casos do teclado, do HID, do pareamento e do executor: a
+conferência sem o shift,
 ou o executor sem soltá-lo, reprovam o caso de controle; o HID sem soltar
 reprova o próprio caso do HID, e o do pareamento passa. O holdover da
 bancada de tempo, na parte 3/3: o x86 a -133 ppm (2056 s em 2056) e o ARM
@@ -18665,9 +18730,10 @@ x86.
 
 Fica de fora o laço que jogasse fora o resultado inteiro de `rodar_um_caso`:
 esconderia também a falha do próprio caso, e é a honestidade do executor, que
-um controle de dentro não alcança. E a lápide da revogação anula as mensagens
-vivas da credencial, como em `persistencia: a lapide vence a imagem`; a suíte
-não tem nenhuma de um administrador da imagem.
+um controle de dentro não alcança — o lote ICACHE-8 o fecha pela conta da
+função, que o laço confere antes do placar (abaixo). E a lápide da revogação
+anula as mensagens vivas da credencial, como em `persistencia: a lapide
+vence a imagem`; a suíte não tem nenhuma de um administrador da imagem.
 
 O adversário da rodada 6 achou o que esses controles ainda deixavam passar
 (os achados 1 e 4 dele). O do laço prova a função, e não que o laço a use:
@@ -18721,24 +18787,28 @@ na 1/3 do ARM e na 2/3 do x86.
 O adversário da rodada 8 achou o que esses controles ainda deixavam passar,
 dois níveis abaixo (o achado 2 dele), e o que nem eles nem o `cargo xtask
 test` viam (o informativo 1). O da política mudava, de cada linha de dois
-números, só o último — a taxa por segundo, as mensagens por remetente, os
-bytes do armazém, quantos apertos e o grupo de um quórum ficavam como
-estavam —, e as listas de um papel só cresciam; o estendido do registro
-mudava as fontes de hora só pela incerteza. Uma comparação da política que
-visse de cada par o último número e, das listas, quantos itens, e uma
-impressão que visse das fontes o quórum, os tetos e quantas são, passavam
-nos dois. E o laço que roda o caso por `rodar_um_caso`, diz `FALHOU` e não
-soma a falha deu, com cinco casos reprovados, "29 de 29 passaram", o
-emulador saindo com sucesso e o `cargo xtask test` dizendo que todos
-passaram: ele conferia o código de saída, o anúncio e o placar, que vêm do
-mesmo laço, e não as linhas `FALHOU`. O lote ICACHE-7, [B]:
+números, um só — o último na taxa, nas mensagens, no armazém e nos apertos,
+e o primeiro, o M, no quórum: a taxa por segundo, as mensagens por
+remetente, os bytes do armazém, quantos apertos e o grupo de um quórum
+ficavam como estavam —, e as listas de um papel só cresciam; o estendido do
+registro mudava as fontes de hora só pela incerteza. Uma comparação da
+política que visse de cada par só o número que essas mudanças moviam e, das
+listas, quantos itens, e uma impressão que visse das fontes o quórum, os
+tetos e quantas são, passavam nos dois. E o laço que roda o caso por
+`rodar_um_caso`, diz `FALHOU` e não soma a falha deu, com cinco casos
+reprovados, "29 de 29 passaram", o emulador saindo com sucesso e o `cargo
+xtask test` dizendo que todos passaram: ele conferia o código de saída, o
+anúncio e o placar, que vêm do mesmo laço, e não as linhas `FALHOU`. O lote
+ICACHE-7, [B]:
 
 - o controle da política muda mais nove coisas, uma de cada vez — o
   primeiro número das linhas `taxa`, `mensagens`, `armazem` e `apertos`; o
   grupo do quórum do `system.update`, de 2 de 3 para 2 de 2, no piso; e um
   prefixo, um editor, um domínio e uma inclusão trocados por outros, com a
   conta igual (a inclusão, por `@tempo`, que não inclui nada: sem ciclo) —,
-  vinte e cinco ao todo;
+  vinte e cinco ao todo. A lista das permissões escritas de um papel
+  continuou só crescendo, e o `remoto` só saindo, até o lote ICACHE-8
+  (abaixo);
 - o estendido do registro troca as chaves das duas primeiras fontes de hora
   entre si, com os nomes, os destinos e os parâmetros iguais — dezoito ao
   todo;
@@ -18750,8 +18820,9 @@ mesmo laço, e não as linhas `FALHOU`. O lote ICACHE-7, [B]:
   com que o laço a termina, onde quer que ela comece: o começo pode trazer
   o que o caso ou o console escreveram sem fim de linha — o `X` de
   `console: o log humano chega a tela`, o `duke> ` do prompt —, e pelo
-  recuo a linha desse caso escaparia. Só o laço escreve o ` FALHOU -- `; uma
-  linha do log que o citasse reprovaria a suíte, o lado seguro. O boot pela
+  recuo a linha desse caso escaparia. Só o laço escreve o ` FALHOU -- ` — e
+  o caso do estouro da pilha, que encerra o emulador com falha —; uma linha
+  do log que o citasse reprovaria a suíte, o lado seguro. O boot pela
   UEFI do ARM, que roda a suíte pelo firmware, já reprovava toda linha
   `FALHOU`. Três testes novos no hospedeiro: a linha de um caso que
   reprovou, também depois do `X` e do prompt, e as que não são; a
@@ -18760,8 +18831,9 @@ mesmo laço, e não as linhas `FALHOU`. O lote ICACHE-7, [B]:
 
 As provas, com quatro núcleos, nas duas arquiteturas, em depuração e em
 release, com a suíte filtrada à lista do lote: a comparação da política
-reduzida do adversário — de cada par, o último número; das listas, quantos
-itens; das inclusões, quantas — reprova só o controle da política, 66 de
+reduzida do adversário — de cada par, o número que as mudanças de antes
+moviam, o último ou o M do quórum; das listas, quantos itens; das
+inclusões, quantas — reprova só o controle da política, 66 de
 67, que diz as nove mudanças novas que ela não viu, e nenhuma das dezesseis
 de antes; e a impressão das fontes de hora pelo quórum, pelo salto, pela
 incerteza e por quantas são reprova só o estendido do registro, 66 de 67:
@@ -18791,11 +18863,103 @@ escapa —, o da leitura e o da conferência; e o erro sem as linhas, o da
 conferência e o do processo.
 
 Fica de fora o laço que jogasse fora o resultado inteiro de `rodar_um_caso`
-— o caso que falha dito `ok` e contado como passado —, que nenhum controle
-de dentro alcança e o `xtask` não distingue de uma suíte que passou; numa
-linha de lista, o segundo item trocado sozinho — a mesma regressão sem fim:
-a troca de um item guarda a comparação pela conta, e a do último, a que só
-visse o primeiro —; e o nome de um papel que já existe.
+— o caso que falha dito `ok` e contado como passado —, que os controles da
+suíte não alcançam e o `xtask` não distingue de uma suíte que passou —
+fechado desde o lote ICACHE-8 pela conta da função, que o laço confere antes
+do placar (abaixo) —; numa linha de lista, o segundo item trocado sozinho —
+a mesma regressão sem fim: a troca de um item guarda a comparação pela
+conta, e a do último, a que só visse o primeiro —; e o nome de um papel que
+já existe.
+
+O adversário da rodada 9 achou o que o laço e os controles ainda deixavam
+passar (os achados 1 e 2 dele). O laço que jogava fora o resultado inteiro
+de `rodar_um_caso` — o "Fica de fora" dos lotes ICACHE-5 e ICACHE-7 —, com
+sete casos reprovados de verdade, deu "31 de 31 passaram", o emulador
+saindo com sucesso e o `cargo xtask test` dizendo que todos passaram, nas
+duas arquiteturas: o placar, o código de saída e as linhas de cada caso vêm
+do mesmo laço, e o caso dito `ok` não deixa linha `FALHOU` para o `xtask`
+conferir. E os controles deixavam passar uma comparação reduzida: o da
+política, uma que visse das permissões escritas de cada papel só quantas —
+a lista delas só crescia — e do `remoto` só se há a linha — ele só saía —;
+o estendido do registro, uma impressão que visse das fontes de hora só a
+incerteza e as chaves, na ordem. O lote ICACHE-8, [B], só na suíte:
+
+- `rodar_um_caso` conta os casos que roda chamada de fora de outro caso —
+  com `DENTRO_DE_RODAR_UM_CASO` em zero na entrada; o do controle do laço,
+  que ela roda por dentro, não conta — e os que reprova (`CASOS_DE_FORA` e
+  `REPROVADOS_DE_FORA`), e o laço confere as duas contas contra as dele
+  antes do placar: se não casam, diz "o laco contou N caso(s) e F
+  reprovado(s); rodar_um_caso, N' e F'" e encerra o emulador com falha. A
+  mesma conta reprova o laço que joga fora o resultado, o que diz `FALHOU` e
+  não soma a falha — no kernel, e não só no `xtask` — e o partido, com a
+  cauda por fora. Ela roda no fim de toda suíte — inteira, em cada parte da
+  CI, em release, com `--video virtio` e pelo iniciador do ARM —, e as duas
+  contas cobrem os mesmos casos em cada caminho: o laço roda a fatia da
+  parte, ou a da lista numa rodada filtrada, e a cauda, que roda em toda
+  parte, todos por `rodar_um_caso`, e nada mais a chama de fora de um caso.
+  O `--video virtio` só troca o adaptador de vídeo do emulador, com o mesmo
+  ELF; o iniciador do ARM sobe pelo firmware o mesmo kernel da suíte, e
+  reprova também a saída sem o placar;
+- o controle da política muda mais duas coisas — uma permissão escrita de um
+  papel, trocada por `random.read` com a conta igual, numa linha que termina
+  numa permissão, e o papel do `remoto`, trocado por `dispositivo` —, vinte
+  e sete ao todo; e o estendido do registro, mais quatro — o quórum e o
+  salto das fontes de hora, um a mais, e os destinos e os nomes das duas
+  primeiras trocados entre si, cada um com o resto igual —, vinte e dois ao
+  todo.
+
+As provas, com quatro núcleos e a suíte filtrada à lista do lote — a do
+adversário, com os oito controles do executor, os casos que digitam um
+segredo, a regra da entrada nova, a remoção, os dois da cópia na escrita, o
+do teto e `pessoas: os estados nao se confundem`, e os três casos do
+informativo 4: 34 casos no ARM e 33 no x86, com a cauda —, nas duas
+arquiteturas, em depuração e em release. O laço que joga fora o resultado,
+com a recusa da troca dizendo as senhas, o registro sem a conferência do
+papel e as duas comparações reduzidas do adversário, diz `ok` de todos e
+reprova: "o laco contou 34 caso(s) e 0 reprovado(s); rodar_um_caso, 34 e 8"
+— no x86, 33 e 8 —, com o emulador saindo com falha e o `cargo xtask test`
+dizendo que os testes falharam; o que diz `FALHOU` e não soma, com as
+mesmas, as oito linhas `FALHOU` e a mesma conta, e o kernel reprova antes
+do placar; e o partido, com todos os casos `ok` e o controle do laço
+passando, "rodar_um_caso, 28 e 0" no ARM e "26 e 0" no x86 — a cauda tem
+seis casos no ARM e sete no x86. A conferência só dos casos deixa passar o
+laço que joga fora o resultado — "34 de 34 passaram", com quatro casos
+reprovados de verdade —, e a só dos reprovados, o partido: cada metade
+fecha um. As comparações reduzidas do adversário, com o laço inteiro,
+reprovam só os dois controles, cada um pelas mudanças novas — "o executor
+nao viu, ou nao devolveu: ["uma permissao de um papel, trocada por outra",
+"o papel do remoto, trocado por outro"]" e "a impressao nao viu, ou o
+executor nao devolveu: ["o quorum das fontes de hora", "o salto das fontes
+de hora", "o destino de uma fonte de hora", "o nome de uma fonte de
+hora"]" —, e nenhuma das vinte e cinco e das dezoito de antes. Sem as
+mutações, 34 de 34 no ARM e 33 de 33 no x86, em depuração e em release, e a
+conta casa. E a suíte inteira, nas duas arquiteturas, pelas partes da CI em
+depuração — 360 de 360 em cada parte do ARM; 366 de 366, 365 de 365 e 365
+de 365 no x86 — e inteira em release — 1068 de 1068 no ARM e 1082 de 1082 no
+x86 —, passou com a conferência das duas contas no fim de cada uma, com
+o controle da política na parte 2/3 do ARM e na 3/3 do x86, o estendido
+na 1/3 do ARM e na 2/3 do x86, o controle do laço na 3/3 do ARM e na 1/3
+do x86, e os três casos do informativo 4 na parte deles.
+
+As mutações, uma de cada vez ou juntas onde cada uma reprova um caso seu, e
+cada uma restaurada com o SHA-256 conferido: as sete do adversário — o laço
+que joga fora o resultado, o que não conta e o partido; as duas
+comparações reduzidas; o registro sem a conferência do papel; e a recusa da
+troca dizendo as senhas — reprovam como acima; as duas do informativo 4
+reprovam os dois casos que elas alcançam, e também `consoles: login e
+logout`, que confere a recusa da linha da senha do console físico pelo
+mesmo texto — sem diagnóstico, e sem segredo na serial; e as duas metades
+da conferência, cada uma sozinha, deixam passar o laço que a outra fecha.
+
+Fica de fora: a permissão de uma linha `recurso` — trocada sozinha, a do
+papel fica sem o alcance, e a leitura recusa a política —, o serviço de
+uma linha `servico` e a operação de um `quorum`, que o controle da política
+não troca — a regressão sem fim de sempre —; e a própria conferência das
+duas contas, que nenhum caso vê: desfeita, a suíte volta a ser a de antes
+do lote. O andamento do `cargo xtask test` guarda só os primeiros 1024
+bytes de cada linha (`acompanhar`): uma linha `FALHOU` com mais que isso
+antes do ` FALHOU -- ` escaparia da conferência dele; a maior linha da
+suíte tem 705 bytes, e a conta do kernel não depende da linha.
 
 Os casos que conferem um `person.login` — o registro do login, as recusas,
 o limite de tentativas, a pessoa revogada, o login que chega atrasado — o
@@ -19002,11 +19166,11 @@ do x86, parte 2/2, com 48,5.
 
 A CI 545 (`2b133da`, o lote ICACHE-6 e o parágrafo da CI 544) passou verde,
 48 de 48, na primeira tentativa, em 71,1 minutos e 1108 de máquina. A
-suíte inteira passou com o registro cortado que reprova e o diagnóstico sem
-a senha, com as anotações novas da ordem — a troca de permissão do ARM e o
-`invlpg` deste núcleo no x86 — e com os controles um nível abaixo, em todas
-as partes e em release — o ARM em release, 1068 de 1068: o lote não
-acrescentou caso. O holdover da bancada de tempo, na parte 3/3: o x86 a
+suíte inteira passou com o registro cortado que reprova e o diagnóstico da
+conferência sem a senha, com as anotações novas da ordem — a troca de
+permissão do ARM e o `invlpg` deste núcleo no x86 — e com os controles um
+nível abaixo, em todas as partes e em release — o ARM em release, 1068 de
+1068: o lote não acrescentou caso. O holdover da bancada de tempo, na parte 3/3: o x86 a
 -125 ppm (2057 s em 2057) e o ARM a -4 ppm (2055 s em 2055), os dois dentro
 da guarda. O último job foi o do SDK da malha entre dispositivos (mesma
 arquitetura), que esperou 43,8 minutos na fila e rodou 23,3; o maior, a

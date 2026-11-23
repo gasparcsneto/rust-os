@@ -30,7 +30,10 @@
 //! emulador vêm do mesmo laço que roda os casos: um laço que dissesse a
 //! falha e não a contasse daria os dois de uma suíte que passou, e os
 //! controles da suíte não veem o veredito do próprio laço (o informativo 1
-//! do adversário do kernel da rodada 8; desde o lote ICACHE-7).
+//! do adversário do kernel da rodada 8; desde o lote ICACHE-7). Desde o lote
+//! ICACHE-8, o kernel confere também, antes do placar, a conta do laço — os
+//! casos e os que reprovaram — contra a da função por onde ele roda cada
+//! caso, e reprova esse laço ali: esta conferência é a segunda, de fora.
 
 use protocolo::partes::{ErroDaParte, Parte};
 
@@ -188,11 +191,12 @@ pub(crate) fn ler_o_placar(linha: &str) -> Option<(usize, usize)> {
 /// e o console físico, o `duke> ` do prompt. Pelo recuo, a linha desse caso
 /// escaparia.
 ///
-/// Só o laço escreve o ` FALHOU -- `: o resumo do fim, que o kernel só
-/// escreve quando conta alguma falha, diz `falhou:`, e nenhuma linha do log
-/// o leva. Uma que o citasse reprovaria a suíte — o lado seguro. O
-/// andamento do `cargo xtask test` reconhece o caso que reprovou por esta
-/// mesma regra (`termina_um_caso`, no `main.rs`).
+/// Só o laço escreve o ` FALHOU -- ` — e o caso do estouro da pilha, que
+/// encerra o emulador com falha —: o resumo do fim, que o kernel só escreve
+/// quando conta alguma falha, diz `falhou:`, e nenhuma linha do log o leva.
+/// Uma que o citasse reprovaria a suíte — o lado seguro. O andamento do
+/// `cargo xtask test` reconhece o caso que reprovou por esta mesma regra
+/// (`termina_um_caso`, no `main.rs`).
 pub(crate) fn e_um_caso_que_falhou(linha: &str) -> bool {
     linha.contains(" FALHOU -- ")
 }

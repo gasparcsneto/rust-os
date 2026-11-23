@@ -1402,12 +1402,18 @@ lote EXECUTADO.
   arquiteturas — achou 0 no log, 37 ocorrências no `detalhe` de onze
   registros da auditoria e as 16 senhas e palavras procuradas no journal; o
   próprio caso do lote EXECUTADO deixa a chave dele (`graviola-madura`) lá.
-  E dali ela ia à serial — na CI, ao log do job — por todo diagnóstico da
-  suíte que dissesse os registros da auditoria: numa falha que nada tinha
-  com a chave, o mesmo registro gravado duas vezes, ela foi a uma linha
-  dela (o informativo 2 do adversário do kernel da rodada 8); desde o lote
-  ICACHE-7, os diagnósticos dos casos que digitam um segredo não levam o
-  texto, e o que a auditoria grava continua com esta decisão.
+  E dali ela vai à serial — na CI, ao log do job — por todo diagnóstico da
+  suíte que diga os registros da auditoria em que ela está: numa falha que
+  nada tinha com a chave, o mesmo registro gravado duas vezes, ela foi a uma
+  linha dela (o informativo 2 do adversário do kernel da rodada 8); desde o
+  lote ICACHE-7, não pelos diagnósticos dos casos que digitam um segredo,
+  que não levam o texto — os de dez casos; os de outros três, desde o lote
+  ICACHE-8 —, e o que a auditoria grava continua com esta decisão. E o
+  `parametros` do registro, o BLAKE2s sem chave do que se digitou, vai à
+  serial por todo diagnóstico que diga o registro em `{:?}` — 32 números —,
+  também pelos que passam por `sem_segredo`, que não o vê, como a
+  conferência não o vê (o informativo 3 do adversário do kernel da rodada
+  9; ver os riscos).
   Sem ninguém entrado, nada disso vai à auditoria. O comportamento é
   anterior ao lote EXECUTADO, que só o deixou à vista.
 - **A área de 5.3.** A semântica da auditoria: o que o registro de uma
@@ -2666,8 +2672,10 @@ pendência #298.
   que não espera a confirmação dos outros núcleos, ou que grava o endereço
   do descarte depois de avisar — e o percurso especulativo, que só um
   processador de verdade faz; o laço que jogasse fora o resultado inteiro
-  do caso, que um controle de dentro não alcança; e a `executado:`, que diz
-  que o gate permitiu e o comando começou, e não que ele teve efeito.
+  do caso, que um controle de dentro não alcança — o lote ICACHE-8 o fecha
+  pela conta da função, que o laço confere antes do placar —; e a
+  `executado:`, que diz que o gate permitiu e o comando começou, e não que
+  ele teve efeito.
 
   Depois do lote ICACHE-5, o lote A14, [B], fez os achados do adversário
   da rodada 6 sobre o lote A13 — a leitura dos workflows, a ação do
@@ -2750,10 +2758,12 @@ pendência #298.
     remoção vê pela anotação dele;
   - os controles da política e do registro mudam também os campos de dentro
     de um papel — de cada linha de dois números, o último, e as listas só
-    crescendo: o outro número e os itens trocados, desde o lote ICACHE-7 —,
-    e a chave de um administrador, os editores campo a campo, o conteúdo das
-    lápides e o das fontes de hora — pela incerteza; a chave de uma fonte,
-    desde o lote ICACHE-7;
+    crescendo: o outro número e os itens trocados, desde o lote ICACHE-7 —
+    os de quatro listas; os das permissões escritas, desde o lote ICACHE-8
+    —, e a chave de um administrador, os editores campo a campo, o conteúdo
+    das lápides e o das fontes de hora — pela incerteza; a chave de uma
+    fonte, desde o lote ICACHE-7; o quórum, o salto, o destino e o nome de
+    uma fonte, desde o lote ICACHE-8;
   - o texto: a ordem que a anotação não via, o registro cortado e o
     diagnóstico, os controles um nível abaixo, o E1 e os P7 a P13 do revisor
     da rodada 6 — os P10 a P13 e o informativo 1 do adversário, nos riscos e
@@ -2775,10 +2785,13 @@ pendência #298.
   regra falha fechada, e a varredura não achou nenhum. Ficavam também, sem
   que o texto os dissesse, e o lote ICACHE-7 os fecha: os diagnósticos dos
   próprios casos que digitam um segredo — o do lote EXECUTADO também —, que
-  diziam na falha o registro, as linhas e a tela inteiros; os controles
-  dois níveis abaixo; a ordem do `tlbi` da entrada nova compartilhada no
-  ARM; e o laço que diz `FALHOU` e não conta, que passava nos controles e no
-  `cargo xtask test`.
+  diziam na falha o registro, as linhas e a tela inteiros — os de dez
+  casos; os de outros três, e os de `admin_espera`, o lote ICACHE-8 —; os
+  controles dois níveis abaixo — menos as permissões escritas de um papel,
+  o `remoto` e as fontes de hora além da chave, que o lote ICACHE-8 fecha
+  —; a ordem do `tlbi` da entrada nova compartilhada no ARM; e o laço que
+  diz `FALHOU` e não conta, que passava nos controles e no `cargo xtask
+  test` — no kernel também, desde o lote ICACHE-8.
 
   Depois do lote ICACHE-6, o lote A15, [B], fez os achados do adversário da
   rodada 7 sobre o lote A14 — os workflows oficiais e o canal da ação do
@@ -2834,17 +2847,20 @@ pendência #298.
   kernel da rodada 8 sobre o lote ICACHE-6, sem autoridade, regra,
   registro, identidade, persistência ou semântica de auditoria novos, e só
   na suíte e no `cargo xtask test`:
-  - os diagnósticos dos casos que digitam um segredo — vinte e seis, com os
-    do lote EXECUTADO — dizem onde e qual, sem o texto, como os da
-    conferência desde o lote ICACHE-6: com o motivo da recusa da troca
-    dizendo as senhas digitadas, ou o parâmetro inválido gravado duas
-    vezes, as senhas e a chave digitada iam à serial pelo diagnóstico, e por
-    nenhum outro caminho;
+  - os diagnósticos de dez casos que digitam um segredo — vinte e seis, com
+    os do lote EXECUTADO; os de outros três, desde o lote ICACHE-8 — dizem
+    onde e qual, sem o texto, como os da conferência desde o lote ICACHE-6:
+    com o motivo da recusa da troca dizendo as senhas digitadas, ou o
+    parâmetro inválido gravado duas vezes, as senhas e a chave digitada iam
+    à serial pelo diagnóstico, e por nenhum outro caminho;
   - os controles da política e do registro mudam também o outro número de
-    cada linha, os itens das listas de um papel trocados com a conta igual e
-    a chave de uma fonte de hora: uma comparação que visse o último número e
-    a conta das listas, ou uma impressão que visse as fontes só pelo
-    quórum, pelos tetos e por quantas são, passava;
+    cada linha, os itens de quatro listas de um papel — um prefixo, um
+    editor, um domínio e uma inclusão — trocados com a conta igual e a chave
+    de uma fonte de hora: uma comparação que visse de cada par só o número
+    que as mudanças de antes moviam — o último, e o M do quórum — e a conta
+    das listas, ou uma impressão que visse as fontes só pelo quórum, pelos
+    tetos e por quantas são, passava; a lista das permissões escritas, o
+    `remoto` e o resto das fontes de hora, desde o lote ICACHE-8;
   - no ARM, o caso da regra da entrada nova confere, pela anotação do `tlbi`
     deste núcleo, a ordem e o endereço do da compartilhada: o `tlbi` antes
     de escrever a entrada passava pela conta;
@@ -2859,13 +2875,18 @@ pendência #298.
     conferência dos segredos"; e [Testes](../README.md#testes)).
 
   Fica: o laço que jogasse fora o resultado inteiro de `rodar_um_caso`, que
-  nem a suíte nem o `xtask` distinguem de uma suíte que passou; numa linha
-  de lista, o segundo item trocado sozinho, e o nome de um papel que já
-  existe; os diagnósticos dos casos do registro de pessoas, que dão a senha
-  à função e dizem o registro inteiro — o primeiro teste de cada um usa uma
-  senha que não é da suíte —; e a ordem dos `tlbi` num processador de
-  verdade, que só ele mostra. Três testes novos no hospedeiro, e as
-  mutações do lote ([README](../README.md#testes)).
+  nem os controles da suíte nem o `xtask` distinguem de uma suíte que
+  passou — o lote ICACHE-8 o fecha pela conta da função, que o laço confere
+  antes do placar —; numa linha de lista, o segundo item trocado sozinho, e
+  o nome de um papel que já existe; os diagnósticos dos casos do registro de
+  pessoas, que dão a senha à função e dizem o registro inteiro — o primeiro
+  teste de `pessoas: recusas e tentativas` usa uma senha que não é da
+  suíte; o de `pessoas: uma sessao por console` entra com a da suíte; e
+  `pessoas: os estados nao se confundem` registra a pessoa com a forma
+  escrita da credencial dela, que o diagnóstico de `admin_espera` levava
+  pelos parâmetros, até o lote ICACHE-8 —; e a ordem dos `tlbi` num
+  processador de verdade, que só ele mostra. Três testes novos no
+  hospedeiro, e as mutações do lote ([README](../README.md#testes)).
 
   Depois do lote ICACHE-7, o lote A16, [B], fez os achados do adversário da
   rodada 8 sobre o lote A15 — a lista dos arquivos que a guarda lê, o
@@ -2922,6 +2943,55 @@ pendência #298.
   pedem uma decisão de um lote com um run da CI. Sete testes novos no
   hospedeiro e um ajustado, e as mutações do lote (*As do lote A16*, no
   [README](../README.md#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
+
+  Depois do lote A16, o lote ICACHE-8, [B], fez os achados do adversário do
+  kernel da rodada 9 sobre o lote ICACHE-7 e os itens do revisor da rodada 9
+  sobre o texto dele, sem autoridade, regra, registro, identidade,
+  persistência ou semântica de auditoria novos, e só na suíte — no `xtask`,
+  só o doc do `partes.rs`:
+  - o laço que jogava fora o resultado inteiro de `rodar_um_caso` — o "Fica"
+    dos lotes ICACHE-5 e ICACHE-7 — passava, com casos reprovados de
+    verdade, nos controles da suíte e no `cargo xtask test`: a função conta
+    agora os casos que roda chamada de fora de outro caso e os que reprova,
+    e o laço confere as duas contas contra as dele antes do placar, no fim
+    de toda suíte — inteira, numa parte, em release, com `--video virtio` e
+    pelo iniciador do ARM —; a mesma conta reprova, do lado do kernel, o
+    laço que diz `FALHOU` e não soma a falha, e o laço partido, com a cauda
+    por fora;
+  - os controles deixavam passar uma comparação reduzida: o da política
+    muda também uma permissão escrita de um papel, trocada por outra com a
+    conta igual, e o papel do `remoto`, trocado — vinte e sete mudanças —;
+    e o estendido do registro, o quórum e o salto das fontes de hora, e o
+    destino e o nome de uma delas — vinte e duas;
+  - os diagnósticos de `admin_espera` — os parâmetros, a resposta e o
+    registro — e os de três casos que digitam a senha da suíte num console
+    passam por `sem_segredo`: com o registro de uma pessoa sem a conferência
+    do papel, os parâmetros de um `person.register` levavam a forma escrita
+    da credencial da senha da suíte à serial e à tela do console físico;
+  - o texto: o que os achados desmentem no do lote ICACHE-7 — o laço que os
+    controles não alcançam, os controles e os diagnósticos dos casos que
+    digitam um segredo —, aqui e no README; os itens do revisor da rodada 9
+    sobre ele — o número que as mudanças da política moviam, o endereço do
+    `tlbi` na compartilhada do usuário, o caso do estouro da pilha, que
+    também escreve o `FALHOU`, e o diagnóstico da conferência na CI 545 —; e
+    o informativo 3 do adversário na [AUD-CAMPO](#aud-campo), sem mudar a
+    recomendação ([Consoles](../README.md#consoles), "A conferência dos
+    segredos"; e [Testes](../README.md#testes)).
+
+  Fica: a permissão de uma linha `recurso` — trocada sozinha, a do papel
+  fica sem o alcance, e a leitura recusa a política —, o serviço de uma
+  linha `servico` e a operação de um `quorum`, que o controle da política
+  não troca — a regressão sem fim de sempre —; o diagnóstico que leva um
+  segredo, que sai inteiro — diz o tamanho, o segredo e o byte, e nada mais
+  do texto —; os sete diagnósticos dos três casos que dizem a resposta de
+  um `ui.act` de quando o kernel não tem a senha — passam por `sem_segredo`
+  pela mesma regra, e mutação nenhuma de um ramo os alcança —; o andamento
+  do `cargo xtask test`, que guarda só os primeiros 1024 bytes de cada
+  linha — uma linha `FALHOU` com mais que isso antes do ` FALHOU -- `
+  escaparia da conferência dele; a maior da suíte tem 705 bytes, e a
+  conta do kernel não depende da linha —; e a ordem dos `tlbi` num
+  processador de verdade. Nenhum teste novo no hospedeiro; as mutações do
+  lote ([README](../README.md#testes)).
 
 ### I7
 
