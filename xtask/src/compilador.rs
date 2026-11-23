@@ -5607,12 +5607,13 @@ mod testes {
 
     /// A instalação do toolchain oficial antes da ação (desde o lote A17: os
     /// testes que rodam a ação disputavam o rustup no canário, no run 5): o
-    /// ambiente dela é o dos passos, mais o proxy e o servidor da
-    /// distribuição de quem roda o teste, e nada que escolha o toolchain — o
-    /// `RUSTUP_TOOLCHAIN` do candidato e o `RUSTUP_AUTO_INSTALL=0` do
-    /// canário, o `LD_LIBRARY_PATH` e o `CARGO` que o cargo põe nos testes
-    /// ficam de fora —; e o toolchain que ela instala, ou acha instalado, é o
-    /// do canal oficial com o host.
+    /// ambiente dela é o dos passos, mais, de quem roda o teste, só os nomes
+    /// da rede do rustup ([`A_REDE_DO_RUSTUP`]) — aqui, o proxy, os
+    /// certificados e o servidor da distribuição —, e nada que escolha o
+    /// toolchain — o `RUSTUP_TOOLCHAIN` do candidato e o
+    /// `RUSTUP_AUTO_INSTALL=0` do canário, o `LD_LIBRARY_PATH` e o `CARGO`
+    /// que o cargo põe nos testes ficam de fora —; e o toolchain que ela
+    /// instala, ou acha instalado, é o do canal oficial com o host.
     #[test]
     fn a_instalacao_de_antes_da_acao_e_a_do_oficial() {
         let de_fora = [
@@ -5621,6 +5622,7 @@ mod testes {
             ("LD_LIBRARY_PATH", "/x/lib"),
             ("CARGO", "/x/bin/cargo"),
             ("HTTPS_PROXY", "http://127.0.0.1:1"),
+            ("SSL_CERT_FILE", "/x/certificados.pem"),
             ("RUSTUP_DIST_SERVER", "http://127.0.0.1:2"),
         ];
         let ambiente = ambiente_da_instalacao(
@@ -5643,11 +5645,13 @@ mod testes {
                 "CARGO_HOME",
                 "RUSTUP_HOME",
                 "HTTPS_PROXY",
+                "SSL_CERT_FILE",
                 "RUSTUP_DIST_SERVER"
             ]
         );
         assert_eq!(ambiente[0].1.to_str(), Some("/casa/bin:/usr/bin:/bin"));
         assert_eq!(ambiente[3].1.to_str(), Some("/rustup"));
+        assert_eq!(ambiente[5].1.to_str(), Some("/x/certificados.pem"));
         let canal = canal_do_arquivo(include_str!("../../rust-toolchain.toml")).expect("o canal");
         let instalado = o_oficial_instalado().as_ref().expect("a instalação");
         assert!(
@@ -9633,7 +9637,11 @@ jobs:
     /// cada push. O `on:` da CI do repositório passa, e o `push` nas formas do
     /// `on:` — o valor na linha, a lista em bloco, a chave do mapa —; sem o
     /// `push`, com um filtro dentro dele ou com um valor na linha da chave, e
-    /// com a raiz recuada, reprova uma vez.
+    /// com a raiz recuada, reprova uma vez. O filtro legítimo também — o
+    /// `paths-ignore:` que pularia a CI numa mudança só de documentação, em
+    /// bloco ou em fluxo —: reprova de propósito, porque tiraria as
+    /// invariantes de uma parte dos pushes (o F2 do adversário da rodada 10,
+    /// desde o lote A18 neste teste).
     #[test]
     fn adversario_a16_a_ci_nos_pushes() {
         let ci = include_str!("../../.github/workflows/ci.yml");
@@ -9660,6 +9668,8 @@ jobs:
             "on:\n  push:\n    paths:\n      - kernel/**\n",
             "on:\n  push: {}\n",
             "on:\n  - push:\n      branches: [x]\n",
+            "on:\n  push:\n    paths-ignore:\n      - '**.md'\n  pull_request:\n",
+            "on:\n  push:\n    paths-ignore: ['**.md']\n  pull_request:\n",
         ] {
             let fora = a_ci_nos_pushes(&ci.replacen(gatilhos, reprova, 1));
             assert!(
@@ -9891,7 +9901,11 @@ jobs:
     /// levaria os registros do `xtask` sem citá-lo. O canário do repositório
     /// passa — também com o caminho entre aspas —; o `path:` do `target/`, o
     /// da pasta de cima e o de um bloco com a pasta dos registros e mais uma
-    /// reprovam uma vez cada, pela regra da publicação.
+    /// reprovam uma vez cada, pela regra da publicação. O caminho se compara
+    /// pelo texto, na forma canônica: o sem a `/` do fim e o da expressão sem
+    /// os espaços, que o GitHub resolve para a mesma pasta, reprovam de
+    /// propósito (o F1 do adversário da rodada 10, desde o lote A18 neste
+    /// teste).
     #[test]
     fn adversario_a16_a_publicacao_do_canario() {
         let canario = include_str!("../../.github/workflows/canario.yml");
@@ -9910,6 +9924,14 @@ jobs:
             (
                 "um bloco com mais uma pasta",
                 "          path: |\n            ${{ runner.temp }}/registros/\n            target/\n",
+            ),
+            (
+                "sem a `/` do fim (o F1 da rodada 10)",
+                "          path: ${{ runner.temp }}/registros\n",
+            ),
+            (
+                "a expressão sem os espaços (o F1 da rodada 10)",
+                "          path: ${{runner.temp}}/registros/\n",
             ),
         ] {
             let texto = canario.replacen(caminho, novo, 1);
@@ -10090,7 +10112,11 @@ jobs:
     /// cujo `''` a linha crua lia como duas aspas; e as expressões como o
     /// leitor de modelos do GitHub as acha e o valor como o YAML o lê, pelas
     /// formas. A expressão passa, também numa chave entre aspas, e os
-    /// workflows do repositório também.
+    /// workflows do repositório também. A expressão achada se compara pelo
+    /// texto, na forma canônica: a sem o espaço antes do `}}` e a da
+    /// indexação (`outputs['canal']`), que o GitHub avalia igual, reprovam de
+    /// propósito, na chave e pela função (o F1 do adversário da rodada 10,
+    /// desde o lote A18 neste teste).
     #[test]
     fn adversario_a15_o_canal_na_chave_pela_expressao() {
         let chave = "          key: testes-${{ steps.compilador.outputs.canal }}-";
@@ -10115,6 +10141,14 @@ jobs:
             (
                 "o texto da expressão num literal com aspas dentro",
                 "          key: testes-${{ 'a''${{ steps.compilador.outputs.canal }}' }}-",
+            ),
+            (
+                "a expressão sem o espaço antes do `}}` (o F1 da rodada 10)",
+                "          key: testes-${{ steps.compilador.outputs.canal}}-",
+            ),
+            (
+                "a expressão com a indexação (o F1 da rodada 10)",
+                "          key: testes-${{ steps.compilador.outputs['canal'] }}-",
             ),
         ] {
             let texto = OFICIAL.replacen(chave, novo, 1);
@@ -10177,6 +10211,11 @@ jobs:
             ("${{ 'b}}${{ steps.compilador.outputs.canal }}' }}", false),
             ("${{ steps.compilador.outputs.canal", false),
             ("x-${{ steps.compilador.outputs.canal }}}-y", true),
+            // A forma canônica, pelo texto (o F1 da rodada 10): as outras
+            // grafias que o GitHub avalia igual falham fechadas.
+            ("${{ steps.compilador.outputs.canal}}", false),
+            ("${{steps.compilador.outputs.canal}}", false),
+            ("${{ steps.compilador.outputs['canal'] }}", false),
         ] {
             assert_eq!(o_canal_numa_expressao(chave), tem, "{chave}");
         }
