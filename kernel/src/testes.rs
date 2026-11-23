@@ -17742,6 +17742,28 @@ fn pessoas_estados_nao_se_confundem() -> Resultado {
 const SENHA_NOVA: &str = "jabuticaba pitanga quindim";
 /// Outra, para quando duas trocas disputam a mesma credencial.
 const OUTRA_SENHA_NOVA: &str = "graviola cupuacu bacuri";
+/// A senha de outra pessoa dos casos da troca (`troca-dina`).
+const OUTRA_SENHA: &[u8] = b"caju umbu siriguela";
+/// Uma senha digitada onde se pede um comando: longa, com espaço, e
+/// sem pedaço em comum com nada que o sistema escreve.
+const NO_LUGAR_ERRADO: &str = "pitanga madura no pe";
+/// Uma senha digitada depois do nome de um comando.
+const DEPOIS_DO_NOME: &str = "jabuticaba no quintal";
+/// O que se digita depois da palavra `senha`: uma senha no lugar errado.
+const NA_LINHA: &str = "goiabada com queijo";
+
+/// As senhas que os casos dão às conferências dos segredos, pelo nome: o
+/// diagnóstico de uma conferência que reprova diz qual delas achou, e onde,
+/// sem ela — ver [`Achado`].
+const SENHAS_DA_SUITE: &[(&str, &[u8])] = &[
+    ("SENHA_DE_TESTE", SENHA_DE_TESTE),
+    ("SENHA_NOVA", SENHA_NOVA.as_bytes()),
+    ("OUTRA_SENHA_NOVA", OUTRA_SENHA_NOVA.as_bytes()),
+    ("OUTRA_SENHA", OUTRA_SENHA),
+    ("NO_LUGAR_ERRADO", NO_LUGAR_ERRADO.as_bytes()),
+    ("DEPOIS_DO_NOME", DEPOIS_DO_NOME.as_bytes()),
+    ("NA_LINHA", NA_LINHA.as_bytes()),
+];
 
 /// A senha da suíte, como texto.
 fn senha_de_teste() -> &'static str {
@@ -17815,46 +17837,184 @@ const MENOR_PALAVRA_SECRETA: usize = 6;
 
 /// O que as conferências procuram de um segredo: os pedaços das senhas, e
 /// do sal e do verificador das credenciais — ver [`PEDACO_SECRETO`] —, e as
-/// palavras inteiras das senhas — ver [`MENOR_PALAVRA_SECRETA`].
+/// palavras inteiras das senhas — ver [`MENOR_PALAVRA_SECRETA`]. Cada um com
+/// as origens dele, que o diagnóstico de uma falha diz no lugar do segredo
+/// — ver [`Achado`].
 struct Segredos {
-    pedacos: alloc::collections::BTreeSet<[u8; PEDACO_SECRETO]>,
-    palavras: alloc::collections::BTreeSet<alloc::vec::Vec<u8>>,
+    /// Cada pedaço, com as origens dele em `origens`.
+    pedacos: alloc::collections::BTreeMap<[u8; PEDACO_SECRETO], alloc::vec::Vec<usize>>,
+    /// Cada palavra inteira, com as senhas dela em `origens`: `pitanga` e
+    /// `jabuticaba` estão em duas senhas da suíte cada uma.
+    palavras: alloc::collections::BTreeMap<alloc::vec::Vec<u8>, alloc::vec::Vec<usize>>,
+    /// De onde vem cada segredo: uma senha pelo nome, se ela é uma das da
+    /// suíte ([`SENHAS_DA_SUITE`]), ou pela posição na lista do caso; ou o
+    /// sal ou o verificador de uma credencial, pela posição.
+    origens: alloc::vec::Vec<alloc::string::String>,
+}
+
+/// Onde um texto leva um segredo, sem o segredo: o que ele é — um pedaço ou
+/// uma palavra inteira, e de quais origens de [`Segredos`], ou a forma
+/// escrita de uma credencial — e em que byte do texto. É o que o
+/// diagnóstico de uma conferência que reprova diz: o texto leva o segredo, e
+/// o log da falha vai à serial — na suíte, ao log da CI. Ele ia inteiro: o
+/// relatório com a senha, e o texto do console da troca (o informativo 3 do
+/// adversário da rodada 6).
+#[derive(Clone, Copy)]
+struct Achado<'a> {
+    /// As origens dele, ou nenhuma para a forma escrita de uma credencial.
+    origens: &'a [usize],
+    /// Uma palavra inteira, e não um pedaço.
+    palavra: bool,
+    /// O primeiro byte dele no texto.
+    byte: usize,
+    /// O tamanho do texto.
+    de: usize,
 }
 
 impl Segredos {
     /// `texto` leva um pedaço, ou uma palavra inteira?
     fn em(&self, texto: &[u8]) -> bool {
-        leva_pedaco(texto, &self.pedacos)
-            || self
-                .palavras
+        self.onde(texto).is_some()
+    }
+
+    /// O primeiro pedaço, ou a primeira palavra inteira, que `texto` leva.
+    /// Sem pedir memória: as conferências o chamam também com a trava da
+    /// auditoria na mão.
+    fn onde(&self, texto: &[u8]) -> Option<Achado<'_>> {
+        let de = texto.len();
+        let pedaco = texto
+            .windows(PEDACO_SECRETO)
+            .enumerate()
+            .find_map(|(byte, j)| {
+                let origens = self
+                    .pedacos
+                    .get(&<[u8; PEDACO_SECRETO]>::try_from(j).ok()?)?;
+                Some(Achado {
+                    origens,
+                    palavra: false,
+                    byte,
+                    de,
+                })
+            });
+        let palavra = self
+            .palavras
+            .iter()
+            .filter_map(|(p, origens)| {
+                let byte = texto.windows(p.len()).position(|j| j == p.as_slice())?;
+                Some(Achado {
+                    origens,
+                    palavra: true,
+                    byte,
+                    de,
+                })
+            })
+            .min_by_key(|a| a.byte);
+        o_primeiro(pedaco, palavra)
+    }
+
+    /// O que o diagnóstico diz de `achado`: o que ele é e onde, sem ele.
+    fn dizer(&self, achado: Achado<'_>) -> alloc::string::String {
+        let o_que = if achado.origens.is_empty() {
+            alloc::string::String::from("a forma escrita de uma credencial")
+        } else {
+            let nomes: alloc::vec::Vec<&str> = achado
+                .origens
                 .iter()
-                .any(|p| texto.windows(p.len()).any(|j| j == p.as_slice()))
+                .map(|&i| self.origens.get(i).map_or("?", |s| s.as_str()))
+                .collect();
+            alloc::format!(
+                "{} de {}",
+                if achado.palavra {
+                    "uma palavra inteira"
+                } else {
+                    "um pedaco"
+                },
+                nomes.join(" e de ")
+            )
+        };
+        alloc::format!("{}, no byte {} de {}", o_que, achado.byte, achado.de)
     }
 }
 
+/// Dos dois achados, o que vem primeiro no texto.
+fn o_primeiro<'a>(a: Option<Achado<'a>>, b: Option<Achado<'a>>) -> Option<Achado<'a>> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(if b.byte < a.byte { b } else { a }),
+        (a, b) => a.or(b),
+    }
+}
+
+/// O nome com que o diagnóstico diz a senha `senha`, a `i`-ésima das `n` de
+/// um caso: o da constante, se ela é uma das da suíte
+/// ([`SENHAS_DA_SUITE`]), ou a posição dela na lista.
+fn nome_da_senha(senha: &str, i: usize, n: usize) -> alloc::string::String {
+    SENHAS_DA_SUITE
+        .iter()
+        .find(|(_, s)| *s == senha.as_bytes())
+        .map_or_else(
+            || alloc::format!("a senha {} de {} da lista do caso", i + 1, n),
+            |(nome, _)| alloc::string::String::from(*nome),
+        )
+}
+
 /// Os segredos das `senhas` e das `credenciais`: os pedaços de todas, e as
-/// palavras inteiras das senhas, separadas pelo espaço.
+/// palavras inteiras das senhas, separadas pelo espaço — cada um com as
+/// origens dele.
 fn segredos(senhas: &[&str], credenciais: &[sigilo::credencial::Credencial]) -> Segredos {
-    let escritas: alloc::vec::Vec<alloc::string::String> =
-        credenciais.iter().map(|c| c.escrever()).collect();
-    let mut textos: alloc::vec::Vec<&[u8]> = senhas.iter().map(|s| s.as_bytes()).collect();
-    // `argon2id:m=..,t=..,p=..:<sal>:<verificador>`: os dois últimos.
-    for e in &escritas {
-        textos.extend(e.rsplitn(3, ':').take(2).map(str::as_bytes));
+    /// Põe em `s` a origem `nome` e os pedaços de `texto`, com ela; devolve
+    /// o índice dela.
+    fn cortar(s: &mut Segredos, texto: &[u8], nome: alloc::string::String) -> usize {
+        let origem = s.origens.len();
+        s.origens.push(nome);
+        for p in texto.windows(PEDACO_SECRETO) {
+            if let Ok(p) = <[u8; PEDACO_SECRETO]>::try_from(p) {
+                let origens = s.pedacos.entry(p).or_default();
+                if origens.last() != Some(&origem) {
+                    origens.push(origem);
+                }
+            }
+        }
+        origem
     }
-    Segredos {
-        pedacos: textos
-            .iter()
-            .flat_map(|t| t.windows(PEDACO_SECRETO))
-            .filter_map(|p| p.try_into().ok())
-            .collect(),
-        palavras: senhas
-            .iter()
-            .flat_map(|s| s.split_ascii_whitespace())
+    let mut s = Segredos {
+        pedacos: alloc::collections::BTreeMap::new(),
+        palavras: alloc::collections::BTreeMap::new(),
+        origens: alloc::vec::Vec::new(),
+    };
+    for (i, senha) in senhas.iter().enumerate() {
+        let origem = cortar(
+            &mut s,
+            senha.as_bytes(),
+            nome_da_senha(senha, i, senhas.len()),
+        );
+        for p in senha
+            .split_ascii_whitespace()
             .filter(|p| p.len() >= MENOR_PALAVRA_SECRETA)
-            .map(|p| p.as_bytes().to_vec())
-            .collect(),
+        {
+            let origens = s.palavras.entry(p.as_bytes().to_vec()).or_default();
+            if origens.last() != Some(&origem) {
+                origens.push(origem);
+            }
+        }
     }
+    for (k, c) in credenciais.iter().enumerate() {
+        let escrita = c.escrever();
+        // `argon2id:m=..,t=..,p=..:<sal>:<verificador>`: os dois últimos.
+        let mut partes = escrita.rsplitn(3, ':');
+        let verificador = partes.next().unwrap_or("");
+        let sal = partes.next().unwrap_or("");
+        cortar(
+            &mut s,
+            sal.as_bytes(),
+            alloc::format!("o sal da credencial {}", k + 1),
+        );
+        cortar(
+            &mut s,
+            verificador.as_bytes(),
+            alloc::format!("o verificador da credencial {}", k + 1),
+        );
+    }
+    s
 }
 
 /// `texto` leva um dos `pedacos`?
@@ -17864,23 +18024,42 @@ fn leva_pedaco(texto: &[u8], pedacos: &alloc::collections::BTreeSet<[u8; PEDACO_
         .any(|j| <[u8; PEDACO_SECRETO]>::try_from(j).is_ok_and(|j| pedacos.contains(&j)))
 }
 
+/// O primeiro dos `segredos` que `texto` leva — um pedaço, ou uma palavra
+/// inteira —, ou a forma escrita de uma credencial: ver [`Achado`].
+fn onde_esta<'a>(texto: &str, segredos: &'a Segredos) -> Option<Achado<'a>> {
+    let forma = texto.find("argon2id:m=").map(|byte| Achado {
+        origens: &[],
+        palavra: false,
+        byte,
+        de: texto.len(),
+    });
+    o_primeiro(forma, segredos.onde(texto.as_bytes()))
+}
+
 /// `texto` leva um dos `segredos` — um pedaço, ou uma palavra inteira —, ou
 /// a forma escrita de uma credencial?
 fn leva_segredo(texto: &str, segredos: &Segredos) -> bool {
-    texto.contains("argon2id:m=") || segredos.em(texto.as_bytes())
+    onde_esta(texto, segredos).is_some()
 }
 
 /// Nenhum texto da auditoria — campo nenhum de registro nenhum —, do log
 /// do caso, do `system.info`, do registro de pessoas e do histórico do
 /// teclado leva um pedaço das `senhas`, do sal ou do verificador das
 /// `credenciais`, uma palavra inteira das `senhas`, ou a forma escrita de
-/// credencial nenhuma — ver [`Segredos`].
+/// credencial nenhuma — ver [`Segredos`]. Na falha, o log diz qual e onde,
+/// sem o segredo — ver [`Achado`].
 fn nenhum_segredo_em_lugar_nenhum(
     senhas: &[&str],
     credenciais: &[sigilo::credencial::Credencial],
 ) -> Resultado {
     nenhum_segredo_na_auditoria_nem_nos_relatorios(senhas, credenciais)?;
-    if leva_segredo(&historico_do_teclado(), &segredos(senhas, credenciais)) {
+    let segredos = segredos(senhas, credenciais);
+    if let Some(achado) = onde_esta(&historico_do_teclado(), &segredos) {
+        crate::log_error!(
+            "teste",
+            "o historico do teclado leva {}",
+            segredos.dizer(achado)
+        );
         return Err("um segredo, ou um pedaco dele, entrou no historico do teclado");
     }
     Ok(())
@@ -17905,46 +18084,78 @@ fn historico_do_teclado() -> alloc::string::String {
 /// últimos registros dele — os 64 do `log.tail` de antes podiam não
 /// alcançar o começo de um caso longo. O anel que rolou por cima da marca
 /// reprova: lido assim, uma ausência diria "não foi ao log" sem ter lido —
-/// ver [`registros_do_log_desde`]. A mensagem que leva o segredo não vai ao
-/// log da falha: o subsistema e o número bastam a quem investiga.
+/// ver [`registros_do_log_desde`]. E o registro cortado no anel também: o
+/// anel guarda os primeiros bytes da mensagem, e o resto foi só para a
+/// serial — ver [`nenhum_registro_cortado`]. O texto que leva o segredo
+/// não vai ao log da falha — nem a mensagem do log, nem o campo da
+/// auditoria, nem o relatório —: o log diz onde ele está e qual é, pela
+/// origem, sem ele — ver [`Achado`].
 fn nenhum_segredo_na_auditoria_nem_nos_relatorios(
     senhas: &[&str],
     credenciais: &[sigilo::credencial::Credencial],
 ) -> Resultado {
     let segredos = segredos(senhas, credenciais);
-    let leva = |t: &str| leva_segredo(t, &segredos);
+    // O primeiro registro, e o primeiro campo dele, que leva um segredo: só
+    // o número, o nome do campo e o achado saem da trava.
     let na_auditoria = crate::autorizacao::com_auditoria(|c| {
         c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
-            .any(|r| {
+            .find_map(|r| {
                 let e = &r.evento;
-                leva(&e.agente)
-                    || leva(&e.recurso)
-                    || leva(&e.detalhe)
-                    || leva(&e.metodo)
-                    || leva(&e.papel)
+                [
+                    ("agente", &e.agente),
+                    ("recurso", &e.recurso),
+                    ("detalhe", &e.detalhe),
+                    ("metodo", &e.metodo),
+                    ("papel", &e.papel),
+                ]
+                .into_iter()
+                .find_map(|(campo, texto)| {
+                    onde_esta(texto, &segredos).map(|achado| (r.seq, campo, achado))
+                })
             })
     })
-    .unwrap_or(false);
-    if na_auditoria {
+    .flatten();
+    if let Some((seq, campo, achado)) = na_auditoria {
+        crate::log_error!(
+            "teste",
+            "o registro {} da auditoria leva, no campo {}, {}",
+            seq,
+            campo,
+            segredos.dizer(achado)
+        );
         return Err("um segredo, ou um pedaco dele, foi para a auditoria");
     }
-    for (seq, subsistema, mensagem) in registros_do_log_desde(MARCA_DO_CASO.load(SeqCst))? {
-        if leva(subsistema) || leva(&mensagem) {
+    let do_caso = registros_do_log_desde(MARCA_DO_CASO.load(SeqCst))?;
+    for r in &do_caso {
+        if let Some(achado) = onde_esta(r.subsistema, &segredos) {
             crate::log_error!(
                 "teste",
-                "o registro {} do log, do subsistema {}, leva um segredo",
-                seq,
-                subsistema
+                "o registro {} do log leva, no nome do subsistema, {}",
+                r.seq,
+                segredos.dizer(achado)
+            );
+            return Err("um segredo, ou um pedaco dele, foi para o log");
+        }
+        if let Some(achado) = onde_esta(&r.mensagem, &segredos) {
+            crate::log_error!(
+                "teste",
+                "o registro {} do log, do subsistema {}, leva {}",
+                r.seq,
+                r.subsistema,
+                segredos.dizer(achado)
             );
             return Err("um segredo, ou um pedaco dele, foi para o log");
         }
     }
+    // O que não coube no anel foi só para a serial, e a leitura de cima não
+    // o vê: um registro cortado no caso reprova (o adversário da rodada 6).
+    nenhum_registro_cortado(&do_caso)?;
     for (comando, params) in [("system.info", "{}"), ("person.registry", "{}")] {
         // A forma escrita de uma credencial começa assim: nenhum relatório
         // a mostra — nem a de agora, nem a de antes.
         let r = chamar(comando, params)?;
-        if leva(&r) {
-            crate::log_error!("teste", "{}: {}", comando, r);
+        if let Some(achado) = onde_esta(&r, &segredos) {
+            crate::log_error!("teste", "o {} leva {}", comando, segredos.dizer(achado));
             return Err("um segredo, ou um pedaco dele, saiu num relatorio");
         }
     }
@@ -17953,11 +18164,27 @@ fn nenhum_segredo_na_auditoria_nem_nos_relatorios(
 
 /// Nenhum registro do journal — a região atual inteira, decifrada, depois
 /// de a auditoria em memória ir para ele — leva um pedaço ou uma palavra
-/// inteira das `senhas`.
+/// inteira das `senhas`. Na falha, o log diz o tipo do registro e o que
+/// ele leva, sem o segredo — ver [`Achado`].
 fn nenhum_segredo_no_journal(senhas: &[&str]) -> Resultado {
     crate::persistencia::gravar_auditoria()?;
     let segredos = segredos(senhas, &[]);
-    if crate::persistencia::algum_registro_de_teste(|r| segredos.em(&r.conteudo))? {
+    // Sem pedir memória dentro do percurso: o achado e o tipo, e o texto
+    // do diagnóstico depois.
+    let mut achado = None;
+    crate::persistencia::algum_registro_de_teste(|r| {
+        if achado.is_none() {
+            achado = segredos.onde(&r.conteudo).map(|a| (r.tipo, a));
+        }
+        achado.is_some()
+    })?;
+    if let Some((tipo, a)) = achado {
+        crate::log_error!(
+            "teste",
+            "um registro do journal, do tipo {}, leva {}",
+            tipo,
+            segredos.dizer(a)
+        );
         return Err("um segredo, ou um pedaco dele, foi para o journal");
     }
     Ok(())
@@ -18091,9 +18318,18 @@ fn senha_a_pessoa_troca_a_propria() -> Resultado {
             let arvore = chamar("ui.tree", "{}")?;
             let (console, _) = console_da_arvore(&arvore)?;
             let texto = texto_do_console(&console)?;
-            if leva_segredo(&texto, &segredos(&[atual, SENHA_NOVA], &[]))
-                || !texto.contains("senha trocada")
-            {
+            // O texto da tela vai ao log da falha só sem senha nenhuma; com
+            // uma, o log diz qual e onde, sem ela — ver [`Achado`].
+            let da_troca = segredos(&[atual, SENHA_NOVA], &[]);
+            if let Some(achado) = onde_esta(&texto, &da_troca) {
+                crate::log_error!(
+                    "teste",
+                    "o texto do console na tela leva {}",
+                    da_troca.dizer(achado)
+                );
+                return Err("uma senha apareceu na tela, ou a resposta nao");
+            }
+            if !texto.contains("senha trocada") {
                 crate::log_error!("teste", "{}", texto);
                 return Err("uma senha apareceu na tela, ou a resposta nao");
             }
@@ -18353,7 +18589,6 @@ fn senha_so_a_propria_com_a_sessao_e_a_permissao() -> Resultado {
     use politica::auditoria::Titular;
     crate::pessoas::esquecer_registradas();
     crate::teclado::esvaziar();
-    const OUTRA_SENHA: &[u8] = b"caju umbu siriguela";
     let cai = crate::pessoas::registrar_de_teste("troca-cai", "operador", SENHA_DE_TESTE);
     let dina = crate::pessoas::registrar_de_teste("troca-dina", "observador", OUTRA_SENHA);
     let alta = crate::pessoas::registrar_de_teste("troca-alta", "sistema", SENHA_DE_TESTE);
@@ -19116,9 +19351,6 @@ fn consoles_nada_antes_do_login() -> Resultado {
     use crate::ui::Origem;
     use politica::Codigo;
     use politica::auditoria::{Titular, resumo_dos_parametros};
-    /// Uma senha digitada onde se pede um comando: longa, com espaço, e
-    /// sem pedaço em comum com nada que o sistema escreve.
-    const NO_LUGAR_ERRADO: &str = "pitanga madura no pe";
     crate::pessoas::esquecer_registradas();
     crate::teclado::esvaziar();
     crate::interpretador::abrir_console(Console::Fisico);
@@ -19258,8 +19490,6 @@ fn consoles_sem_ninguem_o_comando_vai_sem_o_resumo() -> Resultado {
     use crate::pessoas::Console;
     use politica::Codigo;
     use politica::auditoria::{Titular, resumo_dos_parametros};
-    /// Uma senha digitada depois do nome de um comando.
-    const DEPOIS_DO_NOME: &str = "jabuticaba no quintal";
     crate::pessoas::esquecer_registradas();
     crate::teclado::esvaziar();
     crate::pessoas::registrar_de_teste("bia-do-i7", "operador", SENHA_DE_TESTE);
@@ -19346,18 +19576,30 @@ fn linhas_do_console_desde(
 ) -> Result<alloc::vec::Vec<alloc::string::String>, &'static str> {
     Ok(registros_do_log_desde(marca)?
         .into_iter()
-        .filter(|(_, subsistema, _)| *subsistema == "console")
-        .map(|(_, _, mensagem)| mensagem)
+        .filter(|r| r.subsistema == "console")
+        .map(|r| r.mensagem)
         .collect())
 }
 
+/// Um registro do log como a suíte o lê do anel — ver
+/// [`registros_do_log_desde`].
+struct RegistroDoLog {
+    seq: u64,
+    subsistema: &'static str,
+    mensagem: alloc::string::String,
+    /// Os bytes da mensagem que não couberam no anel
+    /// (`log::Record::perdidos`): o anel guarda os primeiros, e a serial
+    /// recebe a mensagem inteira (`log::registrar`) — o resto foi só para
+    /// ela.
+    perdidos: u16,
+}
+
 /// Os registros do log desde `marca` — de todo subsistema, na ordem —, cada
-/// um com o número, o subsistema e a mensagem. Erro se o anel já não
-/// alcança a marca: lido num anel que rolou por cima dela, uma ausência
-/// diria "não saiu" sem ter lido.
-fn registros_do_log_desde(
-    marca: u64,
-) -> Result<alloc::vec::Vec<(u64, &'static str, alloc::string::String)>, &'static str> {
+/// um com o número, o subsistema, a mensagem como o anel a guardou e o
+/// que dela não coube nele. Erro se o anel já não alcança a marca: lido
+/// num anel que rolou por cima dela, uma ausência diria "não saiu" sem
+/// ter lido.
+fn registros_do_log_desde(marca: u64) -> Result<alloc::vec::Vec<RegistroDoLog>, &'static str> {
     // O anel guarda 128 registros: lidos todos, o primeiro é o mais antigo
     // que ainda está nele.
     let mut primeira = None;
@@ -19365,17 +19607,45 @@ fn registros_do_log_desde(
     crate::log::ultimos(128, crate::log::Level::Trace, |r| {
         primeira.get_or_insert(r.seq);
         if r.seq >= marca {
-            registros.push((
-                r.seq,
-                r.subsistema,
-                alloc::string::String::from(r.mensagem()),
-            ));
+            registros.push(RegistroDoLog {
+                seq: r.seq,
+                subsistema: r.subsistema,
+                mensagem: alloc::string::String::from(r.mensagem()),
+                perdidos: r.perdidos(),
+            });
         }
     });
     if primeira.is_some_and(|p| p > marca) {
         return Err("o anel do log rolou por cima das linhas que o caso ia ler");
     }
     Ok(registros)
+}
+
+/// Nenhum dos `registros` foi cortado no anel. O anel guarda os primeiros
+/// bytes de cada mensagem, e a serial recebe a mensagem inteira
+/// (`log::registrar`): o resto de um registro cortado foi só para a serial
+/// — no hardware, o console serial; na suíte, o log da CI —, e quem procura
+/// um texto no que o anel guardou não o vê. Lido assim, uma ausência diria
+/// "não foi ao log" sem ter lido — o mesmo raciocínio do anel que rolou por
+/// cima da marca, em [`registros_do_log_desde`] —, e o registro cortado
+/// reprova, com o número, o subsistema e quantos bytes ficaram de fora. A
+/// conferência dos segredos via só os 160 primeiros bytes de cada registro,
+/// e uma senha que um erro levasse ao fim de uma mensagem longa ia à serial
+/// com o caso passando (o achado 2 do adversário da rodada 6).
+fn nenhum_registro_cortado(registros: &[RegistroDoLog]) -> Resultado {
+    if let Some(r) = registros.iter().find(|r| r.perdidos > 0) {
+        crate::log_error!(
+            "teste",
+            "o registro {} do log, do subsistema {}, perdeu {} byte(s) no anel: foram so para a serial",
+            r.seq,
+            r.subsistema,
+            r.perdidos
+        );
+        return Err(
+            "um registro do log do caso foi cortado no anel, e o resto dele foi so para a serial",
+        );
+    }
+    Ok(())
 }
 
 /// O lote EXECUTADO: a linha `executado:` do interpretador sai só depois
@@ -19448,12 +19718,18 @@ fn consoles_o_executado_sai_depois_da_decisao() -> Resultado {
         linhas.iter().filter(|l| l.as_str() == linha).count() == 1
             && linhas.iter().filter(|l| deste(l)).count() == 1
     };
-    let nada_que_se_digitou = |marca: u64, digitado: &str| {
-        let mut levou = false;
-        crate::log::ultimos(128, crate::log::Level::Trace, |r| {
-            levou |= r.seq >= marca && r.mensagem().contains(digitado);
-        });
-        !levou
+    // Nada do que se digitou foi ao log desde `marca`. Lido pelo leitor dos
+    // registros do caso: o anel que rolou por cima da marca reprova, e o
+    // registro cortado no anel também — o resto dele foi só para a serial, e
+    // uma ausência no que o anel guardou não diria nada (o informativo 4 do
+    // adversário da rodada 6, o ponto cego do achado 2 dele).
+    let nada_que_se_digitou = |marca: u64, digitado: &str| -> Result<bool, &'static str> {
+        let registros = registros_do_log_desde(marca)?;
+        if registros.iter().any(|r| r.mensagem.contains(digitado)) {
+            return Ok(false);
+        }
+        nenhum_registro_cortado(&registros)?;
+        Ok(true)
     };
     crate::interpretador::abrir_console(console);
     let _ = tela();
@@ -19472,7 +19748,7 @@ fn consoles_o_executado_sai_depois_da_decisao() -> Resultado {
                 crate::log_error!("teste", "linhas: {:?}", linhas);
                 return Err("sem ninguem entrado, o log nao disse so o negado do comando");
             }
-            if !nada_que_se_digitou(marca, NAO_E_COMANDO) {
+            if !nada_que_se_digitou(marca, NAO_E_COMANDO)? {
                 return Err("sem ninguem entrado, a linha que nao e comando foi ao log");
             }
             if !tela().contains("negado: DENY_NOT_AUTHENTICATED; `login` para entrar") {
@@ -19539,7 +19815,7 @@ fn consoles_o_executado_sai_depois_da_decisao() -> Resultado {
                 crate::log_error!("teste", "linhas: {:?}", linhas);
                 return Err("o parametro invalido nao deixou so a linha dele no log");
             }
-            if !nada_que_se_digitou(marca, CHAVE_DE_QUEM_DIGITOU) {
+            if !nada_que_se_digitou(marca, CHAVE_DE_QUEM_DIGITOU)? {
                 return Err("a chave que o comando nao declara foi ao log");
             }
             if !tela().contains(&alloc::format!("parametro invalido: {dito}")) {
@@ -19662,8 +19938,6 @@ fn consoles_a_senha_com_algo_na_linha_sem_ninguem_e_a_mesma_recusa() -> Resultad
     use crate::pessoas::Console;
     use politica::Codigo;
     use politica::auditoria::{Titular, resumo_dos_parametros};
-    /// O que se digita depois da palavra: uma senha no lugar errado.
-    const NA_LINHA: &str = "goiabada com queijo";
     /// A linha inteira, como o histórico a guarda.
     const A_LINHA: &str = "senha goiabada com queijo\n";
     crate::pessoas::esquecer_registradas();
