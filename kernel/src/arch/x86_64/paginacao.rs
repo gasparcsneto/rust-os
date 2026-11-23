@@ -432,6 +432,10 @@ pub fn desmapear(virtual_: u64) -> Result<u64, &'static str> {
 
         match mapeador.unmap(pagina) {
             Ok((frame, flush)) => {
+                // O `invlpg` deste núcleo, depois de a entrada sair da tabela.
+                // Na suíte, ele passa pela anotação (`InvlpgAnotado`).
+                #[cfg(feature = "modo-teste")]
+                let flush = InvlpgAnotado(flush);
                 flush.flush();
 
                 // E nos outros núcleos, se a página é do kernel. Antes de o
@@ -582,6 +586,62 @@ pub fn com_traducao_de_teste(virtual_: u64) -> bool {
         tabela = entrada & 0x000F_FFFF_FFFF_F000;
     }
     true
+}
+
+/// Só para a suíte: o `invlpg` deste núcleo na remoção ([`desmapear`]),
+/// anotado. Na suíte, `desmapear` embrulha nele o `MapperFlush` do pacote,
+/// e o `flush` daqui anota — o endereço, e se a entrada ainda estava na
+/// tabela ativa ([`com_traducao_de_teste`]), por núcleo — e faz o mesmo
+/// `invlpg`. Fora da suíte, `desmapear` chama o `flush` do pacote, e o
+/// kernel compila igual.
+///
+/// # A ordem
+///
+/// A remoção invalida este núcleo depois de tirar a entrada. Invalidado
+/// antes, um percurso especulativo entre o `invlpg` e a escrita põe a
+/// tradução velha de volta na TLB — num processador; o emulador não
+/// percorre por especulação —, e ela fica depois de o frame voltar ao
+/// alocador. O aviso aos outros núcleos tem a anotação dele
+/// (`smp::descartar_nos_outros`); a deste núcleo não tinha nenhuma, e o caso
+/// da remoção passava com o `invlpg` antes do `unmap` (o achado 3 do
+/// adversário da rodada 6). Agora ele confere as duas.
+#[cfg(feature = "modo-teste")]
+struct InvlpgAnotado(x86_64::structures::paging::mapper::MapperFlush<Size4KiB>);
+
+#[cfg(feature = "modo-teste")]
+impl InvlpgAnotado {
+    /// Anota, e faz o `invlpg` do `MapperFlush` embrulhado.
+    fn flush(self) {
+        let virtual_ = self.0.page().start_address().as_u64();
+        let nucleo = super::gdt::nucleo_atual();
+        ULTIMO_INVLPG_COM_TRADUCAO[nucleo]
+            .store(com_traducao_de_teste(virtual_), Ordering::Release);
+        ULTIMO_INVLPG[nucleo].store(virtual_, Ordering::Release);
+        self.0.flush();
+    }
+}
+
+/// Só para a suíte: o endereço do último `invlpg` da remoção de cada
+/// núcleo, e se a entrada ainda estava na tabela quando ele saiu — ver
+/// [`InvlpgAnotado`]. Por núcleo: a de cada um só muda pela remoção dele.
+#[cfg(feature = "modo-teste")]
+static ULTIMO_INVLPG: [AtomicU64; crate::nucleos::MAX_NUCLEOS] =
+    [const { AtomicU64::new(0) }; crate::nucleos::MAX_NUCLEOS];
+/// Ver [`ULTIMO_INVLPG`].
+#[cfg(feature = "modo-teste")]
+static ULTIMO_INVLPG_COM_TRADUCAO: [core::sync::atomic::AtomicBool; crate::nucleos::MAX_NUCLEOS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; crate::nucleos::MAX_NUCLEOS];
+
+/// Só para a suíte: o último `invlpg` da remoção **deste núcleo** — o
+/// endereço, e se a entrada ainda estava na tabela quando ele saiu. Ver
+/// [`InvlpgAnotado`].
+#[cfg(feature = "modo-teste")]
+pub fn ultimo_invlpg_deste_nucleo_de_teste() -> (u64, bool) {
+    let nucleo = super::gdt::nucleo_atual();
+    (
+        ULTIMO_INVLPG[nucleo].load(Ordering::Acquire),
+        ULTIMO_INVLPG_COM_TRADUCAO[nucleo].load(Ordering::Acquire),
+    )
 }
 
 /// Endereço virtual por onde o kernel enxerga uma página física.

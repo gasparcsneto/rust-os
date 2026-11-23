@@ -30146,6 +30146,15 @@ fn smp_travas_excluem_entre_nucleos() -> Resultado {
 /// janela: todo núcleo está mascarado, e nenhum outro invalida nada no
 /// meio. A remoção que não avisa núcleo nenhum não anota nada, e a
 /// anotação de antes fica; essa, quem a pega são as leituras.
+///
+/// E a invalidação deste núcleo também. No aarch64 ela é o mesmo `tlbi`
+/// difundido, que inclui este núcleo, e a mesma anotação. No x86 é outra
+/// instrução, o `invlpg` deste núcleo, e só o aviso aos outros tinha
+/// anotação: a remoção com o `invlpg` antes do `unmap` passava, com os
+/// quatro núcleos lendo o conteúdo novo (o achado 3 do adversário da rodada
+/// 6). O `invlpg` da remoção passa, na suíte, por uma função anotada
+/// (`paginacao::InvlpgAnotado`), por núcleo, e o caso confere que o deste
+/// núcleo também saiu com a entrada fora.
 fn smp_desmapear_do_kernel_vale_em_todos_os_nucleos() -> Resultado {
     #[cfg(target_arch = "aarch64")]
     use crate::arch::aarch64::mmu::mapear_frame_sem_invalidar_de_teste as mapear_sem_invalidar;
@@ -30275,6 +30284,8 @@ fn smp_desmapear_do_kernel_vale_em_todos_os_nucleos() -> Resultado {
         // remoção: o endereço, e se a entrada ainda estava na tabela — ver
         // "A ordem".
         let mut aviso = (0, true);
+        // E a deste núcleo, lida junto.
+        let mut local = (0, true);
         // A janela, mascarada também deste lado: no aarch64, uma troca de
         // espaço daqui no meio difundiria um `vmalle1is`.
         let r =
@@ -30311,6 +30322,7 @@ fn smp_desmapear_do_kernel_vale_em_todos_os_nucleos() -> Resultado {
                 // mostraria.
                 let antigo = crate::arch::desmapear(PAGINA)?;
                 aviso = invalidacao_dos_outros_nucleos_de_teste();
+                local = invalidacao_deste_nucleo_de_teste();
                 if let Err(motivo) = remapear() {
                     crate::frames::liberar(antigo);
                     return Err(motivo);
@@ -30358,6 +30370,12 @@ fn smp_desmapear_do_kernel_vale_em_todos_os_nucleos() -> Resultado {
             aviso.0,
             aviso.1
         );
+        crate::log_info!(
+            "teste",
+            "a ultima invalidacao deste nucleo: {:#x}, com a entrada ainda na tabela: {}",
+            local.0,
+            local.1
+        );
         let depois = |n: &usize| LIDO_DEPOIS[*n].load(SeqCst);
         let veredito = if leitores.iter().any(|n| depois(n) == ANTIGO) {
             Err("um nucleo continuou lendo o frame antigo: a traducao nao morreu nele")
@@ -30369,6 +30387,10 @@ fn smp_desmapear_do_kernel_vale_em_todos_os_nucleos() -> Resultado {
             Err("a ultima invalidacao dos outros nucleos nao foi a da pagina")
         } else if aviso.1 {
             Err("a remocao avisou os outros nucleos com a traducao ainda na tabela")
+        } else if local.0 != PAGINA {
+            Err("a ultima invalidacao deste nucleo nao foi a da pagina")
+        } else if local.1 {
+            Err("a remocao invalidou este nucleo com a traducao ainda na tabela")
         } else {
             Ok(())
         };
@@ -33607,6 +33629,11 @@ fn memoria_marca_recusa_pagina_somente_leitura() -> Resultado {
 /// O caso mede pelos contadores porque é a única forma de ver a diferença: o
 /// conteúdo e as permissões ficam idênticos dos dois jeitos, e um `fork` que
 /// copiasse sempre passaria em todos os outros casos desta suíte.
+///
+/// No aarch64 ele confere também a ordem da marca pelo caminho do `fork`: o
+/// `tlbi` da última página marcada do lado do pai viu a folha nova, sem a
+/// escrita e com a marca — ver "A ordem da troca", no caso da marca que
+/// derruba a tradução gravável (o achado 3 do adversário da rodada 6).
 fn memoria_copia_na_escrita_nao_copia_sem_socio() -> Resultado {
     use crate::arch::{self, Permissoes};
 
@@ -33631,6 +33658,12 @@ fn memoria_copia_na_escrita_nao_copia_sem_socio() -> Resultado {
             }
 
             let clone = crate::paginacao::Espaco::clonar_o_ativo(privada)?;
+            // No aarch64, o `tlbi` da última marca do lado do pai, como este
+            // núcleo o anotou — ver `a_troca_viu_a_folha_nova`. No x86, a
+            // marca de uma página do processo invalida só este núcleo, por um
+            // `invlpg` sem anotação.
+            #[cfg(target_arch = "aarch64")]
+            let troca = crate::arch::aarch64::mmu::ultima_folha_deste_nucleo_de_teste();
 
             // O filho morre sem nunca ter rodado. Agora o pai é o único dono
             // de tudo, e as marcas continuam lá.
@@ -33669,6 +33702,12 @@ fn memoria_copia_na_escrita_nao_copia_sem_socio() -> Resultado {
                 );
                 return Err("resolver com um dono so tirou copia a toa");
             }
+            #[cfg(target_arch = "aarch64")]
+            a_troca_viu_a_folha_nova(
+                "no lado do pai do fork",
+                ALVO..ALVO + PAGINAS * arch::TAMANHO_PAGINA,
+                troca,
+            )?;
             Ok(())
         }
     })
@@ -33748,6 +33787,56 @@ fn invalidacao_dos_outros_nucleos_de_teste() -> (u64, bool) {
     }
 }
 
+/// O último `tlbi` difundido deste núcleo, como o aarch64 o anota na suíte:
+/// o endereço, o descritor que ele viu na tabela, e se esse descritor é o
+/// de uma página de cópia na escrita — ver
+/// `mmu::ultima_folha_deste_nucleo_de_teste`.
+#[cfg(target_arch = "aarch64")]
+type Troca = (u64, u64, bool);
+
+/// O `tlbi` de uma marca da cópia na escrita, anotado por este núcleo, foi
+/// o de uma das `paginas` marcadas e viu a folha nova — sem a escrita e com
+/// a marca —, e não a velha: a marca escreveu a entrada antes de invalidar.
+/// Diz no log, com `onde`, o que ele viu. Ver "A ordem da troca", no caso da
+/// marca que derruba a tradução gravável.
+#[cfg(target_arch = "aarch64")]
+fn a_troca_viu_a_folha_nova(onde: &str, paginas: core::ops::Range<u64>, troca: Troca) -> Resultado {
+    let (endereco, folha, da_copia) = troca;
+    crate::log_info!(
+        "teste",
+        "{}: o ultimo tlbi deste nucleo foi o de {:#x}, com a folha {:#x}",
+        onde,
+        endereco,
+        folha
+    );
+    if !paginas.contains(&endereco) {
+        return Err("o ultimo tlbi deste nucleo, depois da marca, nao foi o de uma pagina marcada");
+    }
+    if !da_copia {
+        return Err(
+            "a marca invalidou a TLB com a entrada velha na tabela: o tlbi nao viu a folha nova, sem a escrita e com a marca",
+        );
+    }
+    Ok(())
+}
+
+/// A última invalidação deste núcleo — o endereço, e se a entrada dele
+/// ainda estava na tabela naquela hora: no x86, o `invlpg` da remoção
+/// (`paginacao::ultimo_invlpg_deste_nucleo_de_teste`); no aarch64, o `tlbi`
+/// difundido, que inclui este núcleo — a mesma anotação de
+/// [`invalidacao_dos_outros_nucleos_de_teste`]. Ver o caso da remoção, "A
+/// ordem".
+fn invalidacao_deste_nucleo_de_teste() -> (u64, bool) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        crate::arch::aarch64::mmu::ultima_invalidacao_de_teste()
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::arch::x86_64::paginacao::ultimo_invlpg_deste_nucleo_de_teste()
+    }
+}
+
 /// Os `tlbi` difundidos dos núcleos de fora de `par` até agora, ou `None` se
 /// um deles está no meio de um — ver `mmu::tlbi_de_fora_de_teste`. Lida
 /// antes e depois de uma janela: igual, e não `None`, a janela ficou limpa.
@@ -33820,8 +33909,23 @@ fn tlbi_difundidos_de_fora(par: &[usize]) -> Option<u64> {
 /// e a de depois, derrubaria a tradução gravável por conta própria, e a
 /// metade passaria sem a invalidação da marca. Cada metade confere a janela
 /// e, se ela não ficou limpa, se repete ([`ate_uma_rodada_limpa`]).
+///
+/// # A ordem da troca
+///
+/// A marca escreve a entrada e só depois invalida. Na ordem trocada — o
+/// `tlbi` antes da escrita —, um processador pode guardar a tradução
+/// gravável de novo entre os dois, por um percurso especulativo, e a escrita
+/// de depois iria por ela. O emulador não percorre por especulação: o `tlbi`
+/// adiantado tira a tradução, nada a traz de volta antes da escrita, e as
+/// duas metades passavam com ele (o achado 3 do adversário da rodada 6).
+/// Cada metade lê, logo depois de marcar, o descritor que o `tlbi` da marca
+/// viu — anotado por núcleo, só na suíte
+/// (`mmu::ultima_folha_deste_nucleo_de_teste`) —, e reprova se ele não for o
+/// novo, sem a escrita e com a marca. A anotação deste núcleo só muda pelo
+/// `tlbi` dele: o de um núcleo de fora, na janela, não a toca.
 #[cfg(target_arch = "aarch64")]
 fn memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel() -> Resultado {
+    use crate::arch::aarch64::mmu::ultima_folha_deste_nucleo_de_teste;
     use crate::arch::{self, Permissoes, TAMANHO_PAGINA};
     use crate::paginacao::copia_de_teste;
 
@@ -33919,13 +34023,17 @@ fn memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel() -> Resultado 
                 arch::trocar_espaco(raiz);
                 // A janela: da escrita de antes à de depois.
                 let antes = tlbi_difundidos_de_fora(&par);
-                let r = (|| -> Result<(u64, u64, u64, u64), &'static str> {
+                let r = (|| -> Result<(u64, u64, u64, u64, Troca), &'static str> {
                     // A escrita de antes, em `montar`: a tradução gravável de
                     // `ALVO` fica na TLB deste núcleo.
                     montar(ANTES)?;
                     // As contas deste espaço, e só dele, de agora em diante.
                     copia_de_teste::vigiar(raiz);
                     arch::marcar_copia_na_escrita(ALVO)?;
+                    // O descritor que o `tlbi` da marca viu, antes da escrita
+                    // de depois, cuja resolução invalida de novo — ver "A
+                    // ordem da troca".
+                    let troca = ultima_folha_deste_nucleo_de_teste();
                     // A de depois: tem de falhar e passar pela cópia.
                     core::ptr::write_volatile(ALVO as *mut u64, DEPOIS);
                     let (resolvidas, copiadas) = copia_de_teste::contas();
@@ -33934,6 +34042,7 @@ fn memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel() -> Resultado 
                         copiadas,
                         core::ptr::read_volatile(ALVO as *const u64),
                         core::ptr::read_volatile(SOCIO as *const u64),
+                        troca,
                     ))
                 })();
                 let limpa = antes.is_some() && tlbi_difundidos_de_fora(&par) == antes;
@@ -33944,7 +34053,7 @@ fn memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel() -> Resultado 
             drop(espaco);
             r
         })?;
-        let (resolvidas, copiadas, no_alvo, no_socio) = vistos;
+        let (resolvidas, copiadas, no_alvo, no_socio, troca) = vistos;
         crate::log_info!(
             "teste",
             "neste nucleo: {} resolucao(oes) e {} copia(s) depois da marca; no alvo {:#x}, no socio {:#x}",
@@ -33962,7 +34071,7 @@ fn memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel() -> Resultado 
         } else if no_alvo != DEPOIS {
             Err("a escrita depois da marca nao ficou no alvo")
         } else {
-            Ok(())
+            a_troca_viu_a_folha_nova("neste nucleo", ALVO..SOCIO, troca)
         };
         Ok((veredito, limpa))
     };
@@ -33998,7 +34107,7 @@ fn memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel() -> Resultado 
             // topo do kernel; voltamos ao espaço do kernel antes de largá-la.
             unsafe {
                 arch::trocar_espaco(raiz);
-                let r = (|| -> Result<((u64, u64), bool), &'static str> {
+                let r = (|| -> Result<((u64, u64), Troca, bool), &'static str> {
                     montar(ANTES)?;
                     // As contas deste espaço — a resolução do outro núcleo
                     // cai nele —, e só dele.
@@ -34012,12 +34121,15 @@ fn memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel() -> Resultado 
                         return Err("o outro nucleo nao escreveu antes da marca");
                     }
                     arch::marcar_copia_na_escrita(ALVO)?;
+                    // O descritor que o `tlbi` da marca viu, antes da escrita
+                    // de depois do outro núcleo — ver "A ordem da troca".
+                    let troca = ultima_folha_deste_nucleo_de_teste();
                     FASE.store(4, SeqCst);
                     if !girar_ate(|| FASE.load(SeqCst) == 5, VOLTAS) {
                         return Err("o outro nucleo nao escreveu depois da marca");
                     }
                     let limpa = antes.is_some() && tlbi_difundidos_de_fora(&par) == antes;
-                    Ok((copia_de_teste::contas(), limpa))
+                    Ok((copia_de_teste::contas(), troca, limpa))
                 })();
                 copia_de_teste::esquecer();
                 if r.is_err() {
@@ -34037,7 +34149,7 @@ fn memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel() -> Resultado 
             return Err("o outro nucleo nao saiu do espaco do caso");
         }
         drop(espaco);
-        let ((resolvidas, copiadas), limpa) = contas?;
+        let ((resolvidas, copiadas), troca, limpa) = contas?;
         let (no_alvo, no_socio) = (NO_ALVO.load(SeqCst), NO_SOCIO.load(SeqCst));
         crate::log_info!(
             "teste",
@@ -34057,7 +34169,7 @@ fn memoria_marcar_a_copia_na_escrita_derruba_a_traducao_gravavel() -> Resultado 
         } else if no_alvo != DEPOIS_NO_OUTRO {
             Err("a escrita noutro nucleo depois da marca nao ficou no alvo")
         } else {
-            Ok(())
+            a_troca_viu_a_folha_nova("na marca para o outro nucleo", ALVO..SOCIO, troca)
         };
         Ok((veredito, limpa))
     };

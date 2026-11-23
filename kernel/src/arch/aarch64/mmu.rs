@@ -1348,6 +1348,11 @@ unsafe fn invalidar(virtual_: u64) {
     }
     #[cfg(feature = "modo-teste")]
     let anotado = tlbi_comecando(&TLBI_POR_ENDERECO);
+    // Só na suíte: o descritor que este `tlbi` vê, por núcleo — ver
+    // [`ultima_folha_deste_nucleo_de_teste`]. Depois da conta: com as
+    // interrupções mascaradas até o fim do `tlbi`, o núcleo é este.
+    #[cfg(feature = "modo-teste")]
+    anotar_a_folha(anotado.nucleo, virtual_);
     // SAFETY: sequência de manutenção de TLB exigida pelo manual.
     unsafe {
         asm!(
@@ -1383,6 +1388,8 @@ static ULTIMA_COM_TRADUCAO: AtomicBool = AtomicBool::new(false);
 /// emulador não percorre por especulação, e só esta anotação mostra a
 /// ordem. Numa troca de permissão a entrada continua válida, e a anotação
 /// diz que tinha tradução: quem a lê é o caso da remoção.
+/// A ordem da troca, os casos da cópia na escrita a conferem pelo descritor
+/// que o `tlbi` deste núcleo viu — ver [`ultima_folha_deste_nucleo_de_teste`].
 #[cfg(feature = "modo-teste")]
 pub fn ultima_invalidacao_de_teste() -> (u64, bool) {
     (
@@ -1421,6 +1428,102 @@ fn com_traducao_de_teste(virtual_: u64) -> bool {
             .read_volatile()
             & VALIDO
             != 0
+    }
+}
+
+/// Só para a suíte: o endereço do último `tlbi` difundido por endereço de
+/// cada núcleo, e o descritor que o traduzia na raiz ativa quando ele saiu
+/// — ver [`ultima_folha_deste_nucleo_de_teste`].
+#[cfg(feature = "modo-teste")]
+static ULTIMO_TLBI_DO_NUCLEO: [AtomicU64; crate::nucleos::MAX_NUCLEOS] =
+    [const { AtomicU64::new(0) }; crate::nucleos::MAX_NUCLEOS];
+/// Ver [`ULTIMO_TLBI_DO_NUCLEO`].
+#[cfg(feature = "modo-teste")]
+static FOLHA_DO_ULTIMO_TLBI: [AtomicU64; crate::nucleos::MAX_NUCLEOS] =
+    [const { AtomicU64::new(0) }; crate::nucleos::MAX_NUCLEOS];
+
+/// Só para a suíte: anota em `nucleo` o `tlbi` de `virtual_` que ele vai
+/// fazer, e o descritor que traduz o endereço agora ([`folha_de_teste`]).
+/// Chamada por [`invalidar`], de quem segura [`TRAVA`], depois de
+/// [`tlbi_comecando`]: com as interrupções mascaradas até o fim do `tlbi`,
+/// a anotação e o `tlbi` são do mesmo núcleo.
+#[cfg(feature = "modo-teste")]
+fn anotar_a_folha(nucleo: usize, virtual_: u64) {
+    FOLHA_DO_ULTIMO_TLBI[nucleo].store(folha_de_teste(virtual_), Ordering::Release);
+    ULTIMO_TLBI_DO_NUCLEO[nucleo].store(virtual_, Ordering::Release);
+}
+
+/// Só para a suíte: o último `tlbi` difundido por endereço **deste
+/// núcleo** — o endereço, o descritor que o traduzia na raiz ativa quando o
+/// `tlbi` saiu ([`folha_de_teste`]), e se esse descritor é o de uma página
+/// de cópia na escrita: válida, sem a escrita e com a marca.
+///
+/// # A ordem da troca
+///
+/// A troca de permissão ([`com_descritor_da_folha`]) escreve a entrada e só
+/// depois invalida. Invalidado antes, um núcleo podia guardar de novo a
+/// tradução velha entre o `tlbi` e a escrita — num processador, por um
+/// percurso especulativo, que a arquitetura permite para uma entrada válida
+/// —, e na marca da cópia na escrita a velha é a **gravável**: o processo
+/// escreveria no frame que divide com o outro dono. O emulador não percorre
+/// por especulação, e as escritas dos casos não veem a ordem trocada: os
+/// casos da cópia na escrita passavam com o `tlbi` antes da escrita (o
+/// achado 3 do adversário da rodada 6). Na ordem certa, o descritor que o
+/// `tlbi` vê é o novo, e é o que os casos conferem, logo depois de marcar.
+///
+/// # Por núcleo
+///
+/// A anotação de [`ultima_invalidacao_de_teste`] é uma só para a máquina, e
+/// o caso da remoção a lê com todo núcleo mascarado na janela. Os casos da
+/// cópia na escrita não mascaram os outros núcleos, e o `tlbi` de outro —
+/// de uma pilha que o coletor devolve, ou de outro processo que marca o
+/// mesmo endereço no espaço dele — podia cair entre a marca e a leitura.
+/// Por núcleo, a de cada um só muda pelo `tlbi` dele, e quem lê com as
+/// interrupções mascaradas lê a do próprio `tlbi`.
+#[cfg(feature = "modo-teste")]
+pub fn ultima_folha_deste_nucleo_de_teste() -> (u64, u64, bool) {
+    let nucleo = super::nucleo_atual();
+    let folha = FOLHA_DO_ULTIMO_TLBI[nucleo].load(Ordering::Acquire);
+    let copia_na_escrita = (folha & (VALIDO | TABELA)) == (VALIDO | TABELA)
+        && folha & AP_SOMENTE_LEITURA != 0
+        && folha & COPIA_NA_ESCRITA != 0;
+    (
+        ULTIMO_TLBI_DO_NUCLEO[nucleo].load(Ordering::Acquire),
+        folha,
+        copia_na_escrita,
+    )
+}
+
+/// Só para a suíte: o descritor que traduz `virtual_` na raiz ativa agora —
+/// a folha do nível 3, ou o bloco no caminho —, ou zero se um nível de cima
+/// é inválido. O percurso de [`com_traducao_de_teste`], que devolve o
+/// descritor em vez de dizer se ele vale; só de leitura, de quem segura
+/// [`TRAVA`].
+#[cfg(feature = "modo-teste")]
+fn folha_de_teste(virtual_: u64) -> u64 {
+    let (i1, i2, i3) = indices(virtual_);
+    // SAFETY: a MMU está ligada e quem chama segura a trava; só lemos
+    // entradas das tabelas da raiz ativa, que o mapa de identidade alcança.
+    unsafe {
+        let e1 = raiz_ativa().add(i1).read_volatile();
+        if e1 & VALIDO == 0 {
+            return 0;
+        }
+        if e1 & TABELA == 0 {
+            return e1;
+        }
+        let e2 = ((e1 & MASCARA_ENDERECO) as *const u64)
+            .add(i2)
+            .read_volatile();
+        if e2 & VALIDO == 0 {
+            return 0;
+        }
+        if e2 & TABELA == 0 {
+            return e2;
+        }
+        ((e2 & MASCARA_ENDERECO) as *const u64)
+            .add(i3)
+            .read_volatile()
     }
 }
 
@@ -1967,6 +2070,13 @@ fn com_descritor_da_folha<R>(
                 // dependente de quanto tempo passou. Diferente de
                 // [`mapear_frame`], que troca uma entrada inválida e só publica
                 // ([`publicar`]).
+                //
+                // E depois da escrita da entrada, nunca antes: entre um `tlbi`
+                // adiantado e a escrita a entrada velha ainda vale, e um
+                // percurso especulativo do processador a põe de volta na TLB —
+                // na marca da cópia na escrita, a gravável. O emulador não
+                // mostra; na suíte, a anotação do `tlbi` mostra
+                // (`ultima_folha_deste_nucleo_de_teste`).
                 //
                 // Por muito tempo nenhum caso a derrubava: apagada, a suíte
                 // inteira passava (medido com 161 casos). Quem marcava a cópia
