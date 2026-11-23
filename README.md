@@ -19000,6 +19000,42 @@ holdover da bancada de tempo, na parte 3/3: o x86 a -92 ppm (2056 s em
 esperou 39,5 minutos na fila e rodou 26,2; o maior, a tela da virtio-gpu
 do x86, parte 2/2, com 48,5.
 
+A CI 545 (`2b133da`, o lote ICACHE-6 e o parágrafo da CI 544) passou verde,
+48 de 48, na primeira tentativa, em 71,1 minutos e 1108 de máquina. A
+suíte inteira passou com o registro cortado que reprova e o diagnóstico sem
+a senha, com as anotações novas da ordem — a troca de permissão do ARM e o
+`invlpg` deste núcleo no x86 — e com os controles um nível abaixo, em todas
+as partes e em release — o ARM em release, 1068 de 1068: o lote não
+acrescentou caso. O holdover da bancada de tempo, na parte 3/3: o x86 a
+-125 ppm (2057 s em 2057) e o ARM a -4 ppm (2055 s em 2055), os dois dentro
+da guarda. O último job foi o do SDK da malha entre dispositivos (mesma
+arquitetura), que esperou 43,8 minutos na fila e rodou 23,3; o maior, a
+atualização do ARM, com 51,1.
+
+A CI 546 (`1fe0366`, o lote A15) passou verde, 48 de 48, na primeira
+tentativa, em 78,3 minutos e 1135 de máquina. As regras novas do lote — os
+comandos do runner, o começo dos jobs pelo checkout e pela ação, os
+`services:`, as versões das ações numa lista fechada e o canal do passo da
+conferência — passaram contra os workflows de verdade: no job de lints, a
+ação com as invariantes levou 76 s, e nos outros 47 jobs, de 14 a 22 s. O
+holdover da bancada de tempo, na parte 3/3: o x86 a -121 ppm (2057 s em
+2057) e o ARM a -1 ppm (2056 s em 2056), os dois dentro da guarda. O
+último job foi o dos fluxos entre dispositivos (mesma arquitetura), que
+esperou 41,0 minutos na fila e rodou 30,5; o maior, a atualização do ARM,
+com 51,2.
+
+A CI 547 (`e4a8696`, o lote ICACHE-7) passou verde, 48 de 48, na primeira
+tentativa, em 79,5 minutos e 1147 de máquina. A suíte inteira passou com a
+conferência nova do `cargo xtask test` — a linha `FALHOU` de um caso com o
+placar cheio reprova —, com os diagnósticos sem o segredo, os controles
+dois níveis abaixo e a ordem do `tlbi` da entrada nova compartilhada no
+ARM, em todas as partes e em release — o ARM em release, 1068 de 1068. O
+holdover da bancada de tempo, na parte 3/3: o x86 a -84 ppm (2056 s em
+2056) e o ARM a -7 ppm (2056 s em 2056), os dois dentro da guarda. O
+último job foi o dos fluxos entre dispositivos (x86_64 e aarch64), que
+esperou 43,8 minutos na fila e rodou 30,5; o maior, a persistência do x86,
+parte 2/3, com 53,5.
+
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na
 508 e 58 na 509 —, e o que sobra até o piso é a ordem da fila, que não se
