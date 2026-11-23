@@ -9050,7 +9050,10 @@ fn linhas_com_atributo_do_crate(texto: &str) -> Vec<usize> {
 /// Os arquivos que dizem como o kernel se compila, fora o código dele: o
 /// config do cargo do kernel e o da raiz, que o cargo também lê de dentro
 /// de `kernel/`; as fontes do `xtask`, que o compila; e a CI, os workflows e
-/// as ações de `.github/`. Os caminhos, relativos à raiz.
+/// as ações de `.github/` — cada `.yml` e `.yaml` dela, com a extensão em
+/// qualquer caixa desde o lote A17: um `.YML` ficava fora da regra das
+/// variáveis do cargo na CI (o I3 do adversário do lote A15). Os caminhos,
+/// relativos à raiz.
 fn arquivos_do_build(raiz: &Path) -> Result<Vec<String>, String> {
     let mut arquivos = vec![
         String::from("kernel/.cargo/config.toml"),
@@ -9079,7 +9082,7 @@ fn arquivos_do_build(raiz: &Path) -> Result<Vec<String>, String> {
                 pastas.push(caminho);
             } else if caminho
                 .extension()
-                .is_some_and(|e| e == "yml" || e == "yaml")
+                .is_some_and(|e| e.eq_ignore_ascii_case("yml") || e.eq_ignore_ascii_case("yaml"))
             {
                 arquivos.push(relativo(&caminho)?);
             }
@@ -15083,6 +15086,51 @@ mod testes_dos_nomes_protegidos {
                 );
             }
         }
+    }
+
+    /// A extensão dos arquivos de `.github/` em qualquer caixa (no lote A17,
+    /// o I3 do adversário do lote A15): a regra das variáveis do cargo na CI
+    /// lê os `.yml` e os `.yaml` de `.github/` que `arquivos_do_build` lista,
+    /// e a lista comparava a extensão com a caixa — um `.YML` e um `.Yaml`
+    /// ficavam de fora. Numa árvore à parte, eles entram, com o `.yml` e o
+    /// `.yaml` de sempre, também fora de `.github/workflows/`; o `.md` e o
+    /// arquivo sem extensão, não.
+    #[test]
+    fn os_arquivos_de_github_com_a_extensao_em_qualquer_caixa() {
+        let raiz = std::env::temp_dir().join(format!("xtask-extensao-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&raiz);
+        for relativo in [
+            "xtask/src/main.rs",
+            ".github/workflows/a.YML",
+            ".github/workflows/b.Yaml",
+            ".github/workflows/c.yml",
+            ".github/actions/d/action.yaml",
+            ".github/e.yMl",
+            ".github/workflows/f.md",
+            ".github/workflows/yml",
+        ] {
+            let caminho = raiz.join(relativo);
+            std::fs::create_dir_all(caminho.parent().unwrap()).unwrap();
+            std::fs::write(&caminho, "").unwrap();
+        }
+        let lista = super::arquivos_do_build(&raiz).unwrap();
+        let _ = std::fs::remove_dir_all(&raiz);
+        let da_github: Vec<&str> = lista
+            .iter()
+            .map(String::as_str)
+            .filter(|a| a.starts_with(".github/"))
+            .collect();
+        assert_eq!(
+            da_github,
+            [
+                ".github/actions/d/action.yaml",
+                ".github/e.yMl",
+                ".github/workflows/a.YML",
+                ".github/workflows/b.Yaml",
+                ".github/workflows/c.yml",
+            ],
+            "{lista:?}"
+        );
     }
 
     /// O `__CARGO` e o `RUSTDOCFLAGS` na CI (no lote A10, o IN4 e o F1 do
