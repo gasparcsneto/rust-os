@@ -24,6 +24,13 @@
 //! `xtask` confere os dois contra o que pediu ([`conferir_a_suite`]): um ELF
 //! de outra compilação, que rodasse outra parte ou a suíte inteira, não passa
 //! por esta.
+//!
+//! E confere que nenhum caso disse `FALHOU` ([`e_um_caso_que_falhou`])
+//! quando o placar diz que todos passaram. O placar e o código de saída do
+//! emulador vêm do mesmo laço que roda os casos: um laço que dissesse a
+//! falha e não a contasse daria os dois de uma suíte que passou, e os
+//! controles da suíte não veem o veredito do próprio laço (o informativo 1
+//! do adversário do kernel da rodada 8; desde o lote ICACHE-7).
 
 use protocolo::partes::{ErroDaParte, Parte};
 
@@ -172,23 +179,52 @@ pub(crate) fn ler_o_placar(linha: &str) -> Option<(usize, usize)> {
     (campos.next()? == "passaram" && campos.next().is_none()).then_some((passaram, rodados))
 }
 
+/// Se a linha é a de um caso que reprovou: a que leva o ` FALHOU -- ` com
+/// que `testes::executar_todos` termina a linha do caso — `  <nome>  FALHOU
+/// -- <motivo>`, com um espaço só antes do `FALHOU` quando o nome passa da
+/// coluna, e com o `\r` do fim ou sem ele —, onde quer que ela comece. O
+/// começo da linha pode trazer o que o caso, ou o console, escreveu sem fim
+/// de linha antes dela: `console: o log humano chega a tela` escreve um `X`,
+/// e o console físico, o `duke> ` do prompt. Pelo recuo, a linha desse caso
+/// escaparia.
+///
+/// Só o laço escreve o ` FALHOU -- `: o resumo do fim, que o kernel só
+/// escreve quando conta alguma falha, diz `falhou:`, e nenhuma linha do log
+/// o leva. Uma que o citasse reprovaria a suíte — o lado seguro. O
+/// andamento do `cargo xtask test` reconhece o caso que reprovou por esta
+/// mesma regra (`termina_um_caso`, no `main.rs`).
+pub(crate) fn e_um_caso_que_falhou(linha: &str) -> bool {
+    linha.contains(" FALHOU -- ")
+}
+
 /// Confere, nas linhas da saída de uma suíte que passou, que ela rodou a
 /// parte `pedida` — ou a suíte inteira, sem parte: o anúncio diz a parte
-/// pedida, e o placar conta exatamente os casos anunciados, todos passando.
+/// pedida, e o placar conta exatamente os casos anunciados, todos passando
+/// —, e que nenhum caso disse `FALHOU` ([`e_um_caso_que_falhou`]).
 ///
 /// Sem anúncio, ou com outro, o ELF que rodou não é o desta compilação — ou
 /// a saída se perdeu —, e o verde não diz nada sobre a parte pedida.
+///
+/// E a linha `FALHOU` de um caso com o placar dizendo que todos passaram é
+/// o laço que disse a falha e não a contou: o placar e o código de saída do
+/// emulador vêm dele, e não a desmentem. Com a mutação do adversário do
+/// kernel da rodada 8 — o laço que diz `FALHOU` e soma zero —, a suíte com
+/// cinco casos reprovados dava "29 de 29 passaram", o emulador saía com
+/// sucesso, e o `cargo xtask test` dizia que todos passaram.
 pub(crate) fn conferir_a_suite<'a>(
     pedida: Option<Parte>,
     linhas: impl IntoIterator<Item = &'a str>,
 ) -> Result<Anuncio, String> {
     let mut anuncios = Vec::new();
     let mut placares = Vec::new();
+    let mut falharam = Vec::new();
     for linha in linhas {
         if let Some(a) = ler_o_anuncio(linha) {
             anuncios.push(a);
         } else if let Some(p) = ler_o_placar(linha) {
             placares.push(p);
+        } else if e_um_caso_que_falhou(linha) {
+            falharam.push(linha.trim());
         }
     }
     let pedido = pedida.map_or_else(
@@ -236,7 +272,16 @@ pub(crate) fn conferir_a_suite<'a>(
     }
     match placares.as_slice() {
         [(passaram, rodados)] if *passaram == anuncio.rodados && *rodados == anuncio.rodados => {
-            Ok(*anuncio)
+            if falharam.is_empty() {
+                Ok(*anuncio)
+            } else {
+                Err(format!(
+                    "o placar diz que os {rodados} casos passaram, e {} caso(s) disseram \
+                     `FALHOU` na serial — o laço disse a falha e não a contou:\n      {}",
+                    falharam.len(),
+                    falharam.join("\n      ")
+                ))
+            }
         }
         [(passaram, rodados)] => Err(format!(
             "o kernel anunciou {} casos, e o placar diz {passaram} de {rodados}",
@@ -836,6 +881,100 @@ mod testes {
         ]);
         let erro = conferir_a_suite(parte(1, 2), s.iter().copied()).unwrap_err();
         assert!(erro.contains("menos que os 495"), "{erro}");
+    }
+
+    /// As linhas dos casos que reprovaram na rodada do adversário do kernel
+    /// da rodada 8 no ARM, com o laço que diz `FALHOU` e não conta: o nome
+    /// mais curto que a coluna e o mais longo que ela.
+    const FALHARAM_NA_RODADA_8: [&str; 5] = [
+        "  senha: a prova, a nova e a desistencia     FALHOU -- a troca nao gravou o desfecho esperado, uma vez",
+        "  senha: so a propria, com a sessao e a permissao FALHOU -- um segredo, ou um pedaco dele, foi para a auditoria",
+        "  consoles: nada antes do login              FALHOU -- um segredo, ou um pedaco dele, foi para a auditoria",
+        "  consoles: sem ninguem, o comando vai a auditoria sem o resumo dos parametros; com alguem, com ele FALHOU -- um segredo, ou um pedaco dele, foi para a auditoria",
+        "  consoles: o log diz executado so depois da decisao do gate, o adiado uma vez, e a recusa e o parametro invalido em linha propria FALHOU -- o parametro invalido nao foi gravado uma vez",
+    ];
+
+    /// A linha de um caso que reprovou é a que `testes::executar_todos`
+    /// escreve, com o `\r` do fim ou sem ele, e com o que o caso ou o console
+    /// escreveram sem fim de linha antes dela — o `X` de `console: o log
+    /// humano chega a tela`, o `duke> ` do prompt —; e não a de um caso que
+    /// passou, a do log, a do resumo do fim, o anúncio nem o placar.
+    #[test]
+    fn a_linha_de_um_caso_que_reprovou_se_le() {
+        for sim in FALHARAM_NA_RODADA_8 {
+            assert!(e_um_caso_que_falhou(sim), "{sim}");
+            assert!(e_um_caso_que_falhou(&format!("{sim}\r")), "{sim}");
+        }
+        for sim in [
+            "X  console: o log humano chega a tela         FALHOU -- a tela fisica sumiu",
+            "duke>   consoles: nada antes do login              FALHOU -- um segredo, ou um pedaco dele, foi para o log",
+        ] {
+            assert!(e_um_caso_que_falhou(sim), "{sim}");
+        }
+        for nao in [
+            "",
+            "  memoria: clonar compartilha sem copiar     ok",
+            "X  console: o log humano chega a tela         ok",
+            "[ 1374]   681780ms info  teste    10.0.2.2 responde: ok",
+            "  falhou: senha: a prova, a nova e a desistencia -- a troca nao gravou o desfecho esperado, uma vez",
+            "  suite de testes :: aarch64 :: 29 casos",
+            "  29 de 29 passaram",
+        ] {
+            assert!(!e_um_caso_que_falhou(nao), "{nao}");
+        }
+    }
+
+    /// A linha `FALHOU` de um caso reprova a suíte cujo placar diz que todos
+    /// passaram — inteira ou numa parte —, e o erro diz as linhas: é a saída
+    /// do laço que diz a falha e não a conta (o informativo 1 do adversário
+    /// do kernel da rodada 8, com as linhas da rodada dele). Uma linha só
+    /// basta; sem elas, a mesma saída passa.
+    #[test]
+    fn a_linha_falhou_de_um_caso_reprova_com_o_placar_cheio() {
+        let com = |anuncio: &'static str, falharam: &[&'static str], placar: &'static str| {
+            let mut s = vec![
+                anuncio,
+                "  suite: o laco reprova o caso que a conferencia reprova ok",
+            ];
+            s.extend_from_slice(falharam);
+            s.push(placar);
+            s.push("  pilha: estouro e detectado                 ok");
+            s
+        };
+        let inteira = "  suite de testes :: aarch64 :: 29 casos";
+        let s = com(inteira, &FALHARAM_NA_RODADA_8, "  29 de 29 passaram");
+        let erro = conferir_a_suite(None, s.iter().copied()).unwrap_err();
+        assert!(
+            erro.contains("os 29 casos passaram") && erro.contains("5 caso(s)"),
+            "{erro}"
+        );
+        for linha in FALHARAM_NA_RODADA_8 {
+            assert!(erro.contains(linha.trim()), "{erro}");
+        }
+        // Numa parte, o mesmo.
+        let da_parte = "  suite de testes :: x86_64 :: parte 2 de 3: 10 de 28 casos";
+        let s = com(da_parte, &FALHARAM_NA_RODADA_8, "  10 de 10 passaram");
+        let erro = conferir_a_suite(parte(2, 3), s.iter().copied()).unwrap_err();
+        assert!(erro.contains("os 10 casos passaram"), "{erro}");
+        // Uma linha só, com o `\r` do fim e com o que o caso escreveu sem fim
+        // de linha antes dela.
+        let s = com(
+            inteira,
+            &["X  console: o log humano chega a tela         FALHOU -- a tela fisica sumiu\r"],
+            "  29 de 29 passaram\r",
+        );
+        let erro = conferir_a_suite(None, s.iter().copied()).unwrap_err();
+        assert!(
+            erro.contains("1 caso(s)")
+                && erro.contains("X  console: o log humano chega a tela")
+                && !erro.contains('\r'),
+            "{erro}"
+        );
+        // Sem as linhas `FALHOU`, as mesmas saídas passam.
+        let s = com(inteira, &[], "  29 de 29 passaram");
+        assert!(conferir_a_suite(None, s.iter().copied()).is_ok());
+        let s = com(da_parte, &[], "  10 de 10 passaram");
+        assert!(conferir_a_suite(parte(2, 3), s.iter().copied()).is_ok());
     }
 
     /// A parte vai para a compilação da suíte, e só para ela: sem parte, a

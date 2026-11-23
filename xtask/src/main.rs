@@ -29070,7 +29070,9 @@ fn test(arch: Arquitetura, release: bool, video: Video) -> Result<ExitCode, Stri
         Desfecho::Codigo(code) if code == arch.codigo_de_sucesso() => {
             // O verde é da parte pedida: o kernel a anunciou no começo, e o
             // placar do fim conta os casos dela — um ELF de outra
-            // compilação, de outra parte ou da suíte inteira, não passa.
+            // compilação, de outra parte ou da suíte inteira, não passa. E
+            // nenhum caso disse `FALHOU`: o laço que dissesse a falha e não a
+            // contasse daria o placar cheio e o código do sucesso.
             let linhas = notaveis.lock().map(|l| l.clone()).unwrap_or_default();
             match partes::conferir_a_suite(parte, linhas.iter().map(String::as_str)) {
                 Ok(a) => println!(
@@ -29112,7 +29114,8 @@ enum Desfecho {
 
 /// O andamento da suíte, lido da saída do emulador a caminho do destino
 /// dela: quantos casos terminaram até agora, e as linhas que se conferem
-/// no fim — o anúncio da parte e o placar (ver [`partes::conferir_a_suite`]).
+/// no fim — o anúncio da parte, o placar e as dos casos que reprovaram (ver
+/// [`se_confere_no_fim`] e [`partes::conferir_a_suite`]).
 struct Andamento {
     casos: Arc<AtomicU64>,
     notaveis: Arc<std::sync::Mutex<Vec<String>>>,
@@ -29151,14 +29154,12 @@ fn acompanhar(
                 if b == b'\n' {
                     if termina_um_caso(&linha) {
                         contados.fetch_add(1, Ordering::Release);
-                    } else {
-                        let texto = String::from_utf8_lossy(&linha);
-                        if (partes::ler_o_anuncio(&texto).is_some()
-                            || partes::ler_o_placar(&texto).is_some())
-                            && let Ok(mut l) = guardadas.lock()
-                        {
-                            l.push(texto.into_owned());
-                        }
+                    }
+                    let texto = String::from_utf8_lossy(&linha);
+                    if se_confere_no_fim(&texto)
+                        && let Ok(mut l) = guardadas.lock()
+                    {
+                        l.push(texto.into_owned());
                     }
                     linha.clear();
                 } else if linha.len() < 1024 {
@@ -29175,11 +29176,22 @@ fn acompanhar(
 }
 
 /// Se a linha é a de um caso terminado: `  <nome>  ok`, ou
-/// `  <nome>  FALHOU -- <motivo>`, como `testes::executar` as escreve.
+/// `  <nome>  FALHOU -- <motivo>`, como `testes::executar` as escreve — a
+/// segunda pela regra da conferência do fim
+/// ([`partes::e_um_caso_que_falhou`]).
 fn termina_um_caso(linha: &[u8]) -> bool {
     let texto = String::from_utf8_lossy(linha);
     let texto = texto.trim_end_matches('\r');
-    texto.starts_with("  ") && (texto.ends_with(" ok") || texto.contains(" FALHOU -- "))
+    (texto.starts_with("  ") && texto.ends_with(" ok")) || partes::e_um_caso_que_falhou(texto)
+}
+
+/// Se a linha é uma das que [`partes::conferir_a_suite`] confere no fim: o
+/// anúncio da parte, o placar e a de um caso que reprovou. As outras — o
+/// log, os casos que passaram — o andamento só repassa.
+fn se_confere_no_fim(texto: &str) -> bool {
+    partes::ler_o_anuncio(texto).is_some()
+        || partes::ler_o_placar(texto).is_some()
+        || partes::e_um_caso_que_falhou(texto)
 }
 
 /// Aguarda o processo, matando-o se passar `janela` —
@@ -29819,6 +29831,59 @@ mod testes {
         // Um caso a cada 0,4 s por 2,4 s — mais que a janela no total: sai sozinho.
         let (d, t) = correr("for i in 1 2 3 4 5 6; do sleep 0.4; echo \"  caso $i  ok\"; done");
         assert!(matches!(d, Desfecho::Codigo(0)) && t > Duration::from_secs(2));
+    }
+
+    /// A linha `FALHOU` de um caso chega à conferência do fim, por um
+    /// processo de verdade, como a saída do emulador chega: o andamento a
+    /// conta como um caso terminado e a guarda com o anúncio e o placar, e a
+    /// conferência reprova a suíte que saiu com sucesso e com o placar cheio
+    /// — a saída do laço que diz a falha e não a conta (o informativo 1 do
+    /// adversário do kernel da rodada 8) —, também com o que o caso escreveu
+    /// sem fim de linha antes dela. A linha do log não conta; e sem a do
+    /// caso, a mesma saída passa.
+    #[test]
+    fn a_linha_falhou_de_um_caso_chega_a_conferencia_do_fim() {
+        use super::*;
+        let correr = |casos: &[&str]| {
+            let mut roteiro = String::from("echo '  suite de testes :: aarch64 :: 3 casos'");
+            for caso in casos {
+                roteiro.push_str(&format!("; echo '{caso}'"));
+            }
+            roteiro.push_str(
+                "; echo '[   9]     9ms info  teste    10.0.2.2 responde: ok'\
+                 ; echo '-----'; echo '  3 de 3 passaram'",
+            );
+            let mut filho = Command::new("sh")
+                .args(["-c", &roteiro])
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let andamento = acompanhar(&mut filho, std::io::sink()).unwrap();
+            let casos = Arc::clone(&andamento.casos);
+            let notaveis = Arc::clone(&andamento.notaveis);
+            let desfecho =
+                aguardar_com_andamento(filho, andamento, Duration::from_secs(5)).unwrap();
+            assert!(matches!(desfecho, Desfecho::Codigo(0)));
+            let linhas = notaveis.lock().unwrap().clone();
+            (
+                casos.load(Ordering::Acquire),
+                partes::conferir_a_suite(None, linhas.iter().map(String::as_str)),
+            )
+        };
+        let (contados, veredito) = correr(&[
+            "  um                 ok",
+            "X  dois              FALHOU -- o motivo",
+            "  tres               ok",
+        ]);
+        assert_eq!(contados, 3);
+        let erro = veredito.unwrap_err();
+        assert!(
+            erro.contains("1 caso(s)") && erro.contains("X  dois              FALHOU -- o motivo"),
+            "{erro}"
+        );
+        let (contados, veredito) = correr(&["  um  ok", "  dois  ok", "  tres  ok"]);
+        assert_eq!(contados, 3);
+        assert!(veredito.is_ok(), "{veredito:?}");
     }
 
     /// O aperto de mão do canal entrega a quem espera o que a máquina
