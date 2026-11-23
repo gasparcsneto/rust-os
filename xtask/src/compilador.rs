@@ -325,6 +325,27 @@ const SAIDA_DO_CANAL: &str = "echo \"canal=$canal\" >> \"$GITHUB_OUTPUT\"";
 /// do índice — o repositório não tem nenhum —, e, no caminho de um
 /// diretório de saída, o que existe e não é pasta.
 ///
+/// # O `target` de outro workspace, desde o lote A17
+///
+/// O diretório de saída do cargo é o `target/` da raiz do workspace, e um
+/// manifesto escolhe a raiz: o `Cargo.toml` da raiz como um pacote com
+/// `workspace = "zz"` a leva para `zz/`, e o `target/` do `xtask` com ela —
+/// fora da lista dos diretórios de build, a única que a regra dos arquivos do
+/// commit lia. Num brinquedo, com a ação rodada como o runner num checkout
+/// novo, as duas marcas do cargo de uma dependência do registro sem
+/// dependências (o `zeroize`, cujo fingerprint não leva o caminho do
+/// checkout, e sim o do `CARGO_HOME`) e o rlib e o rmeta compilados de uma
+/// fonte com uma função no `.init_array`, em `zz/target/`, passaram pelos
+/// quatro passos: o cargo tomou o rlib pelo que compilou, o ligador oficial o
+/// pôs no `xtask` das invariantes, e a função respondeu por elas (o A1 do
+/// adversário do lote A16). O passo recusa o arquivo do commit em toda pasta
+/// `target`, em qualquer nível — sem config nem ambiente, que a ação fecha, o
+/// diretório de saída se chama `target`, onde quer que a raiz esteja —, e o
+/// `workspace` de um pacote em todo manifesto (`package.workspace`, e o da
+/// tabela antiga, `project.workspace`, que o cargo do canal ainda lê): o
+/// repositório não o usa, e as outras regras daqui supõem a raiz onde ela
+/// está.
+///
 /// # O canal que o passo `conferir` devolve, desde o lote A14
 ///
 /// O `outputs.canal` da ação é a saída `canal` do passo `conferir`
@@ -372,8 +393,11 @@ const PASSOS_DA_ACAO: [(&str, &str, &[&str]); 4] = [
             "\"ls-files\"",
             "\"cargo-features\" in manifesto",
             "erros.extend(manifesto_fora(arquivo))",
+            "for tabela in (\"package\", \"project\"):",
+            "if isinstance(pacote, dict) and \"workspace\" in pacote:",
             "os.path.samefile(achado, rustup)",
             "arquivo.startswith(saidas)",
+            "\"target\" in arquivo.split(\"/\")[:-1]",
             "if modo == \"120000\":",
             "if os.path.islink(atual):",
             "if modo == \"160000\":",
@@ -4598,6 +4622,24 @@ mod testes {
                 acao.replacen(", \"RUSTUP_HOME\", \"RUST_BACKTRACE\")", ", \"RUSTUP_HOME\", \"RUST_BACKTRACE\", \"RUSTFLAGS\")", 1),
             ),
             (
+                "sem toda pasta target",
+                acao.replace(" or \"target\" in arquivo.split(\"/\")[:-1]", ""),
+            ),
+            (
+                "sem o workspace de um pacote",
+                acao.replace(
+                    "if isinstance(pacote, dict) and \"workspace\" in pacote:",
+                    "if False:",
+                ),
+            ),
+            (
+                "sem o workspace da tabela antiga",
+                acao.replace(
+                    "for tabela in (\"package\", \"project\"):",
+                    "for tabela in (\"package\",):",
+                ),
+            ),
+            (
                 "sem os links do commit",
                 acao.replace("if modo == \"120000\":", "if modo == \"0\":"),
             ),
@@ -5285,6 +5327,118 @@ mod testes {
             "{}",
             instalado.sysroot.display()
         );
+    }
+
+    /// O `target` de outro workspace (o A1 do adversário do lote A16, alto):
+    /// o `Cargo.toml` da raiz como um pacote com `workspace = "zz"` leva a
+    /// raiz do workspace — e o `target/` do `xtask` — para `zz/`, fora dos
+    /// diretórios de build, e o passo do ambiente só recusava o arquivo do
+    /// commit no `target/` deles: o rlib de uma dependência, do commit, o
+    /// cargo o tomava pelo que compilou. Rodado como o runner: o `workspace`
+    /// do pacote — também na tabela antiga, `[project]` — reprova uma vez; o
+    /// rlib numa pasta `target` de outro nível, uma vez; os dois juntos, uma
+    /// vez cada; e o link `zz/target` para uma pasta do commit com o rlib,
+    /// uma vez, pela regra dos links, que vale no commit inteiro. Passam o
+    /// `[workspace]` noutra pasta, que nenhum pacote escolhe, e um arquivo
+    /// com o nome `target`.
+    #[test]
+    fn adversario_a16_o_target_de_outro_workspace() {
+        let base = base_da_acao("acao-a16-workspace");
+        let pacote = |tabela: &str| {
+            format!(
+                "[{tabela}]\nname = \"raiz\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+                 publish = false\nworkspace = \"zz\"\n\n[lib]\npath = \"zz/raiz.rs\"\n"
+            )
+        };
+        let do_workspace = String::from("[workspace]\nresolver = \"3\"\nmembers = [\"..\"]\n");
+        let rlib = "zz/target/debug/build/zeroize/c781be9a644ae917/out/\
+                    libzeroize-c781be9a644ae917.rlib";
+        let no_target = "um arquivo do commit num diretório de saída do cargo";
+        let comuns: Vec<(&str, String)> = vec![
+            ("zz/Cargo.toml", do_workspace.clone()),
+            ("zz/raiz.rs", String::new()),
+            (
+                "docs/target",
+                String::from("um arquivo com o nome, e não uma pasta\n"),
+            ),
+        ];
+        // O nome, os arquivos a mais e os erros, cada um uma vez.
+        type Caso = (&'static str, Vec<(&'static str, String)>, Vec<String>);
+        let casos: Vec<Caso> = vec![
+            (
+                "a-raiz-em-zz",
+                vec![("Cargo.toml", pacote("package"))],
+                vec![String::from("Cargo.toml: package.workspace 'zz'")],
+            ),
+            (
+                "a-raiz-em-zz-pela-tabela-antiga",
+                vec![("Cargo.toml", pacote("project"))],
+                vec![String::from("Cargo.toml: project.workspace 'zz'")],
+            ),
+            (
+                "o-rlib-em-zz-target",
+                vec![(rlib, String::from("!<arch>\n"))],
+                vec![format!("{rlib}: {no_target}")],
+            ),
+            (
+                "os-dois",
+                vec![
+                    ("Cargo.toml", pacote("package")),
+                    (rlib, String::from("!<arch>\n")),
+                ],
+                vec![
+                    String::from("Cargo.toml: package.workspace 'zz'"),
+                    format!("{rlib}: {no_target}"),
+                ],
+            ),
+        ];
+        let mut cegos = Vec::new();
+        for (nome, a_mais, esperados) in &casos {
+            let mut arquivos = comuns.clone();
+            arquivos.extend(a_mais.iter().cloned());
+            let forcados: Vec<&str> = a_mais
+                .iter()
+                .map(|(a, _)| *a)
+                .filter(|a| a.contains("target/"))
+                .collect();
+            let r = rodar_a_acao(&base, nome, &arquivos, &forcados, &[], None);
+            let erros = r.saida.matches("::error::").count();
+            let todos = esperados
+                .iter()
+                .all(|e| r.saida.matches(&format!("::error::{e}")).count() == 1);
+            if r.passou || erros != esperados.len() || !todos {
+                cegos.push(format!("{nome}: {}", r.saida));
+            }
+        }
+        // Um link `target` para uma pasta do commit não contorna a regra: o
+        // link reprova pela regra dos links, em qualquer nível, uma vez; o
+        // rlib, na pasta para onde ele aponta, não está numa pasta `target`.
+        let mut com_link = comuns.clone();
+        com_link.push(("zz/carga/debug/libzeroize.rlib", String::from("!<arch>\n")));
+        let r = rodar_a_acao_com_links(
+            &base,
+            "o-target-por-um-link",
+            &com_link,
+            &[("zz/target", "carga")],
+            &[],
+            &[],
+            None,
+        );
+        let link = "::error::zz/target: um link no commit";
+        if r.passou
+            || r.saida.matches("::error::").count() != 1
+            || r.saida.matches(link).count() != 1
+        {
+            cegos.push(format!("o-target-por-um-link: {}", r.saida));
+        }
+        // Os controles: o `[workspace]` noutra pasta, que nenhum pacote
+        // escolhe, e o arquivo `docs/target`.
+        let controle = rodar_a_acao(&base, "controle", &comuns, &[], &[], None);
+        if !controle.passou {
+            cegos.push(format!("controle: {}", controle.saida));
+        }
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(cegos.is_empty(), "{cegos:#?}");
     }
 
     /// O diretório de saída por um link (no lote A12, o achado 3 do

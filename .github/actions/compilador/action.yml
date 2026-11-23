@@ -76,10 +76,15 @@
 #    - nenhum `Cargo.toml` da árvore com `cargo-features`, e nenhum perfil
 #      com `rustflags` nem `codegen-backend`: o `profile-rustflags` do
 #      manifesto da raiz escolheria o ligador de tudo o que o perfil
-#      compila, o `xtask` das invariantes inclusive;
-#    - e nenhum arquivo do commit num diretório de saída do cargo (o
-#      `target/` de cada diretório de build): o cargo tomaria um artefato
-#      do commit pelo que ele compilou. Desde o lote A12, também nenhum link
+#      compila, o `xtask` das invariantes inclusive; e, desde o lote A17,
+#      nenhum com o `workspace` de um pacote (`package.workspace`, ou o da
+#      tabela antiga, `project.workspace`), que leva a raiz do workspace — e
+#      o `target/` dela — para outra pasta;
+#    - e nenhum arquivo do commit numa pasta `target`, em qualquer nível —
+#      até o lote A17, só no `target/` de cada diretório de build: o
+#      diretório de saída do cargo é o `target/` da raiz do workspace, que
+#      um manifesto escolhe —: o cargo tomaria um artefato do commit pelo
+#      que ele compilou. Desde o lote A12, também nenhum link
 #      no commit — o modo 120000 do índice — nem no caminho de um diretório
 #      de saída, no disco: um `target` que é link para uma pasta do commit
 #      escapava da regra, que casa o caminho do arquivo. Desde o lote A13,
@@ -220,8 +225,11 @@ runs:
             """O que um `Cargo.toml` tem que escolhe o programa que compila ou
             liga: um `cargo-features`, que liga as opções instáveis do
             manifesto, e um perfil com uma chave de `PERFIL_FORA`, em
-            qualquer tabela dele — o pacote, o `build-override`. Lido como
-            o cargo o lê (é TOML), com os escapes das chaves resolvidos."""
+            qualquer tabela dele — o pacote, o `build-override`; e, desde o
+            lote A17, o `workspace` de um pacote, que leva a raiz do
+            workspace — e o diretório de saída do cargo, o `target/` dela —
+            para outra pasta. Lido como o cargo o lê (é TOML), com os escapes
+            das chaves resolvidos."""
             try:
                 with open(arquivo, "rb") as aberto:
                     manifesto = tomllib.load(aberto)
@@ -234,6 +242,18 @@ runs:
                     "instáveis do manifesto, como os rustflags de um perfil, que escolhem o ligador "
                     "de tudo o que o perfil compila — o xtask das invariantes inclusive"
                 )
+            # A raiz do workspace fica onde está: o `workspace` de um pacote —
+            # também na tabela antiga, `[project]`, que o cargo ainda lê — a
+            # leva para outra pasta, e o `target/` com ela, fora das regras
+            # daqui. O repositório não o usa (o A1 do adversário do lote A16).
+            for tabela in ("package", "project"):
+                pacote = manifesto.get(tabela)
+                if isinstance(pacote, dict) and "workspace" in pacote:
+                    achados.append(
+                        f"{arquivo}: {tabela}.workspace {pacote['workspace']!r}: leva a raiz do "
+                        "workspace — e o diretório de saída do cargo, o target/ dela — para outra "
+                        "pasta; o repositório não o usa, e as regras daqui supõem a raiz onde ela está"
+                    )
             pendentes = [("profile", manifesto.get("profile"))]
             while pendentes:
                 caminho, tabela = pendentes.pop()
@@ -357,7 +377,13 @@ runs:
                 )
             if nome == "Cargo.toml" and os.path.isfile(arquivo):
                 erros.extend(manifesto_fora(arquivo))
-            if arquivo.startswith(saidas):
+            # O diretório de saída do cargo é o `target/` da raiz do workspace,
+            # e um manifesto escolhe a raiz: com o `package.workspace` na raiz,
+            # ela ia para outra pasta, e o `target/` dela ficava fora da lista
+            # de cima — o rlib de uma dependência, do commit, o cargo o ligava
+            # ao xtask das invariantes (o A1 do adversário do lote A16). Toda
+            # pasta `target`, em qualquer nível, conta, desde o lote A17.
+            if arquivo.startswith(saidas) or "target" in arquivo.split("/")[:-1]:
                 erros.append(
                     f"{arquivo}: um arquivo do commit num diretório de saída do cargo — o cargo o "
                     "tomaria pelo que ele compilou"
