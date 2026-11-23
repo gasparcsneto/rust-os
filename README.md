@@ -1760,13 +1760,77 @@ conferência nova a vê. O endereço errado do adversário — a invalidação d
 página uma página adiante: no x86, o `invlpg` deste núcleo, o descarte dos
 outros e os dois; no ARM, o `tlbi` difundido — continua reprovando, pelas
 leituras (o informativo 3 dele): o esvaziamento da TLB inteira nas páginas
-grandes do QEMU não alcançou a página do caso. E as do lote ICACHE-4 — sem
-invalidação nenhuma, nas duas; a M-RL; no x86, sem o aviso, com o aviso só ao
-núcleo 1 e com o aviso sem o `invlpg` deste núcleo — continuam reprovando,
-pelas mesmas leituras. Em cada uma, só o caso reprova, 47 de 48. Sem elas, 48
-de 48 nas duas, com a anotação da página com a entrada fora e o veredito na
-rodada 1; e na varredura, a suíte inteira pelas partes da CI, o caso passou
-nas duas, na parte 1/3, com a rodada em 120 ms no ARM e em 160 no x86.
+grandes do QEMU não alcançou a página do caso. E as dos lotes ICACHE-3 e
+ICACHE-4 — sem invalidação nenhuma, nas duas; a M-RL; no x86, sem o aviso,
+com o aviso só ao núcleo 1 e com o aviso sem o `invlpg` deste núcleo —
+continuam reprovando, pelas mesmas leituras. Em cada uma, só o caso reprova,
+47 de 48. Sem elas, 48 de 48 nas duas, com a anotação da página com a
+entrada fora e o veredito na rodada 1; e na varredura, a suíte inteira pelas
+partes da CI, o caso passou nas duas, na parte 1/3, com a rodada em 120 ms no
+ARM e em 160 no x86.
+
+**A ordem que a anotação não via.** O adversário da rodada 6 achou a mesma
+classe fora do alcance da anotação (o achado 3 dele): no ARM, a troca de
+permissão — a marca da cópia na escrita — com o `tlbi` antes de a entrada ser
+escrita; no x86, a remoção com o `invlpg` deste núcleo antes de a entrada
+sair, que a anotação, só do aviso aos **outros** núcleos, não via — no ARM o
+`tlbi … is` inclui este núcleo, e a anotação vê a ordem dele. Na marca, a
+tradução que um percurso especulativo põe de volta entre os dois é a
+**gravável**, e o processo escreveria no frame que divide com o outro dono;
+na remoção do x86, este núcleo ficaria com a tradução depois de o frame
+voltar ao alocador. Os casos que prometem o efeito passavam com as duas: o
+emulador não percorre por especulação. O lote ICACHE-6, [B]:
+
+- no ARM, `mmu::invalidar` anota também, por núcleo, o descritor que traduzia
+  o endereço na raiz ativa quando o `tlbi` saiu
+  (`ultima_folha_deste_nucleo_de_teste`), e os casos da cópia na escrita
+  conferem, logo depois de marcar, que ele é o novo — sem a escrita e com a
+  marca —: as duas metades de `memoria: marcar a copia na escrita derruba a
+  traducao gravavel da TLB…` e, pelo caminho do `fork`, `memoria: copia na
+  escrita nao copia sem socio`. Por núcleo, porque esses casos não mascaram
+  os outros núcleos: o `tlbi` de um de fora — de uma pilha que o coletor
+  devolve, ou de outro processo que marca o mesmo endereço no espaço dele —
+  não toca a anotação deste;
+- no x86, o `invlpg` da remoção passa, na suíte, por uma função anotada
+  (`paginacao::InvlpgAnotado`, que embrulha o `MapperFlush` do pacote), por
+  núcleo, e o caso da remoção confere as duas anotações: a do aviso aos
+  outros e a deste núcleo — "a remocao invalidou este nucleo com a traducao
+  ainda na tabela".
+
+Fora da suíte o kernel compila igual: as anotações, os percursos e o
+embrulho estão todos atrás de `#[cfg(feature = "modo-teste")]`, e o lote só
+inseriu linhas nos backends. Medido em release, sem `modo-teste`, nas duas
+arquiteturas: tudo o que a máquina carrega — o ponto de entrada, o
+cabeçalho de programa e cada seção alocada — sai igual byte a byte ao kernel
+da base com uma linha em branco no lugar de cada linha inserida; contra a
+base como está, o `.text` igual, e muda só o número da linha de quatro
+`Location` de pânico no x86 e de seis no ARM, os que vêm depois das linhas
+inseridas. Nenhum símbolo das anotações nos kernels.
+
+As provas, em depuração com quatro núcleos, com a suíte filtrada à parte da
+paginação (os 43 casos do lote ICACHE-4, com a remoção e os da cópia na
+escrita): sem mutação, 48 de 48 nas duas, com a última invalidação deste
+núcleo a da página com a entrada fora, e o descritor que o `tlbi` da marca
+viu, o novo. A mutação do adversário no ARM — o `tlbi` antes de escrever a
+entrada, e nenhum depois — reprova os dois casos da cópia na escrita, e só
+eles, 46 de 48: "a marca invalidou a TLB com a entrada velha na tabela…",
+com o descritor velho, gravável, na anotação; as leituras passam — uma
+resolução, uma cópia e o valor de depois no alvo —, como ele previu. A do
+x86 — o `invlpg` cru deste núcleo antes do `unmap`, e o do `unmap` ignorado
+— reprova só o caso da remoção, 47 de 48 ("a ultima invalidacao deste nucleo
+nao foi a da pagina"); e pela função anotada — o `InvlpgAnotado` antes do
+`unmap` — também ("a remocao invalidou este nucleo com a traducao ainda na
+tabela"): nas duas formas, os quatro núcleos leram o conteúdo novo. As dos
+lotes ICACHE-3 a ICACHE-5 continuam reprovando só o caso da remoção, 47 de
+48 cada: o aviso antes de a entrada sair, nas duas, pela anotação dos
+outros; e, pelas leituras, a página uma página adiante — no ARM; no x86, no
+`invlpg` deste núcleo, no descarte dos outros e nos dois —, sem invalidação
+nenhuma nas duas, a M-RL e, no x86, sem o aviso, com o aviso só ao núcleo 1
+e sem o `invlpg` deste núcleo. Os casos que o lote muda passaram na lista
+do lote em release, nas duas; e, na varredura, a suíte inteira pelas partes
+da CI, em depuração, a remoção passou na parte 1/3 das duas, com a anotação
+deste núcleo certa, e, no ARM, a marca na 3/3 e o `fork` na 2/3, com o
+descritor novo.
 
 **As travas são justas.** O `spin::Mutex` é um teste-e-troca: ganha quem
 chegar primeiro naquele instante, e um núcleo que solta e pede de novo ganha
@@ -2086,9 +2150,22 @@ não compila.
   descarte depois de avisar (`smp::descartar_nos_outros`), passaria — no
   QEMU a NMI é atendida antes de o leitor ver a fase seguinte, e um caso não
   as pega sem segurar a NMI de um leitor (o informativo 4 do adversário da
-  rodada 5; não rodadas). E a ordem do aviso, desde o lote ICACHE-5, só a
-  anotação a vê, e não as leituras: o percurso especulativo que a tornaria
-  visível, só um processador de verdade faz.
+  rodada 5; não rodadas). E a ordem do aviso, desde o lote ICACHE-5 — e a da
+  troca de permissão no ARM e a do `invlpg` deste núcleo no x86, desde o lote
+  ICACHE-6 —, só a anotação a vê, e não as leituras: o percurso especulativo
+  que a tornaria visível, só um processador de verdade faz.
+- No x86, a troca de permissão — a marca da cópia na escrita numa página do
+  processo — invalida só este núcleo, por um `invlpg` sem anotação: a ordem
+  dela nenhum caso vê, e o caso que escreve pela tradução velha depois de
+  marcar (`memoria: marcar a copia na escrita derruba…`) é só do ARM. A
+  função anotada da remoção caberia ali (o adversário da rodada 6).
+- A anotação vê a ordem do programa, e não a da memória. No ARM, sem o `dsb
+  ishst` antes do `tlbi`, a escrita da entrada podia ainda não ter chegado ao
+  percorredor dos outros núcleos quando o `tlbi` saísse, e a anotação, lida
+  neste núcleo, diria a entrada fora; no x86, o aviso sai por uma escrita no
+  APIC, que não passa à frente da escrita da entrada. Não confirmado: a
+  mutação sem o `dsb ishst` não rodou, e no emulador, que não reordena, ela
+  não diria nada do processador (o informativo 5 do adversário da rodada 6).
 - As entradas de topo das regiões do kernel nascem na raiz que está ativa
   quando a primeira página da região é mapeada, e nada garante que seja a
   do kernel; e um espaço copia as do kernel quando nasce, e não vê as que
@@ -12495,7 +12572,9 @@ ICACHE-5, [B], só na suíte:
   `senha` e `teste`, aparecem em texto do sistema e ficam de fora; as de
   seis ou mais das senhas da suíte não aparecem em mensagem nenhuma dele;
 - o log é o do caso inteiro, de todo subsistema: desde a marca que o
-  executor tira no começo de cada caso, e não os registros do fim. O anel
+  executor tira no começo de cada caso, e não os registros do fim — de cada
+  registro, o que o anel guardou; o resto de um registro cortado, que vai só
+  à serial, reprova desde o lote ICACHE-6 (abaixo). O anel
   que rolou por cima da marca reprova: lido assim, uma ausência diria "não
   foi ao log" sem ter lido. A mensagem que leva o segredo não vai ao log da
   falha: o subsistema e o número bastam a quem investiga.
@@ -12503,8 +12582,9 @@ ICACHE-5, [B], só na suíte:
 A varredura — a suíte inteira, nas duas arquiteturas, em depuração, pelas
 partes da CI — não achou falso positivo: nenhuma palavra de seis bytes ou mais
 das senhas da suíte em texto do sistema, e nenhum caso que rolasse o anel
-antes de conferir — os sete escrevem de 3 a 15 registros até a conferência,
-contra os 128 do anel. As provas, em depuração com quatro núcleos, nas duas
+antes de conferir — os sete escrevem de 3 a 15 registros no caso inteiro — a
+conferência vem antes do fim dele —, contra os 128 do anel. As provas, em
+depuração com quatro núcleos, nas duas
 arquiteturas, com a suíte filtrada aos sete casos que conferem segredos e ao
 do lote EXECUTADO: a M5 do lote EXECUTADO — sem ninguém entrado, a primeira
 palavra da linha no `negado:` do log — reprova agora `consoles: nada antes do
@@ -12515,6 +12595,53 @@ sempre — também o reprova ("… foi para a auditoria"). `consoles: sem ningue
 o comando vai a auditoria…` passa com as duas, e deve passar: a primeira
 palavra das linhas dele é `log.tail`.
 
+O adversário da rodada 6 achou o que a conferência ainda não lia (o achado 2
+e o informativo 4 dele): de cada registro do log, ela lia o que o anel
+guardou — os 160 primeiros bytes da mensagem —, e a serial recebe a mensagem
+inteira. Uma senha que um erro levasse ao fim de uma mensagem longa ia à
+serial — no hardware, o console serial; na suíte, o log da CI — com o caso
+passando: ele levou `pitanga` a dois registros da serial, e `consoles: nada
+antes do login` passou. O `nada_que_se_digitou` do lote EXECUTADO tinha o
+mesmo ponto cego, e não conferia se o anel tinha rolado por cima da marca. E,
+quando a conferência reprovava, o diagnóstico levava o relatório, ou o texto
+do console da troca, com a senha (o informativo 3). O lote ICACHE-6, [B], só
+na suíte:
+
+- um registro do caso cortado no anel reprova a conferência — "um registro
+  do log do caso foi cortado no anel, e o resto dele foi so para a serial"
+  —, com o número, o subsistema e quantos bytes ficaram de fora: lido
+  assim, uma ausência diria "não foi ao log" sem ter lido, como no anel que
+  rolou; e o `nada_que_se_digitou` lê pelo mesmo leitor, que reprova o anel
+  rolado e o registro cortado;
+- o diagnóstico de uma falha diz qual segredo achou — uma senha da suíte pelo
+  nome da constante, ou pela posição na lista do caso; o sal ou o
+  verificador de qual credencial —, se é um pedaço ou uma palavra inteira, e
+  em que byte de qual texto: o número e o campo do registro da auditoria, o
+  número e o subsistema do registro do log, o relatório, o histórico do
+  teclado, o tipo do registro do journal, a tela da troca. O texto, nunca.
+
+As provas, em depuração com quatro núcleos, nas duas arquiteturas, com a
+suíte filtrada à lista do lote — os controles do executor, os sete casos que
+conferem segredos, o do lote EXECUTADO, a remoção e a cópia na escrita: a
+mutação do adversário — sem ninguém entrado, uma linha a mais no log, com o
+nome digitado depois de 178 bytes — reprova `consoles: nada antes do login` e
+`consoles: sem ninguem, o comando vai a auditoria…`, que passavam com ela, e
+o do lote EXECUTADO, pelo `nada_que_se_digitou`: "um registro do log do caso
+foi cortado no anel…", com o registro, o subsistema e de 26 a 29 bytes de
+fora; os outros 22 passam. Os dois casos dos consoles que conferem segredos e
+não passam pela recusa sem login — a senha digitada adiantado e a linha
+`senha` com algo nela — passam com ela: a linha a mais não sai neles. E o
+diagnóstico sem a senha, no ARM, com a suíte filtrada aos oito casos: a M5
+do lote EXECUTADO reprova `consoles: nada antes do login` com "o registro
+106 do log, do subsistema console, leva uma palavra inteira de
+NO_LUGAR_ERRADO, no byte 8 de 59", e a primeira palavra no `detalhe` da
+auditoria, com "o registro 74 da auditoria leva, no campo detalhe, uma
+palavra inteira de NO_LUGAR_ERRADO, no byte 0 de 7" — nenhuma linha de
+diagnóstico com uma palavra das senhas da suíte. Na varredura, nenhum
+registro de mais de 160 bytes caiu nos oito casos, nas duas arquiteturas: os
+longos do sistema, de 23 a 49 por parte, são de casos que não conferem
+segredos.
+
 O que ela não vê, por enquanto: a chave de um objeto JSON que uma pessoa
 entrada digita no console vai como veio ao `detalhe` do registro
 `INVALID_ARGUMENT` da auditoria, e com ele ao journal — o log leva `(campo
@@ -12523,7 +12650,14 @@ grava ali é uma decisão [C] com o dono do projeto (a
 [AUD-CAMPO](docs/DECISOES.md#aud-campo)). Nenhum caso
 de hoje digita assim a palavra de uma senha que confere; o do lote
 EXECUTADO digita `graviola-madura`, que junta duas palavras de senhas da
-suíte, e fica no fim da tabela, depois de todos os que as conferem.
+suíte, e fica no fim da tabela, depois de todos os que as conferem. E, por
+desenho, o que não é o byte exato: a palavra em maiúsculas, partida, com
+escape de JSON ou em hexadecimal, e as palavras de menos de seis bytes —
+nenhum caminho do kernel transforma o que se digita antes de gravar: o nome
+do comando vai como o marcador, a chave como veio, os parâmetros como
+resumo (o informativo 2 do adversário da rodada 6). A conferência também
+não vê o resumo do campo `parametros` da auditoria, só os cinco campos de
+texto — ver a [AUD-CAMPO](docs/DECISOES.md#aud-campo).
 
 ### Coordenação
 
@@ -16369,9 +16503,9 @@ E a recusa sem login deixa uma linha por linha digitada: um processo com um
 pseudo-terminal — o `terminal.attach` é só do papel `sistema` — que digite
 linhas sem ninguém entrado empurra o anel do log, de 128 registros, com um
 `negado:` por linha, e grava um registro por linha na auditoria, sem taxa,
-como já gravava antes do lote. O mesmo processo já enche o log pela própria
-saída padrão, sem taxa nenhuma: a linha nova não custa nada a mais (o
-informativo 1 do adversário da rodada 5).
+como já gravava antes do lote EXECUTADO. O mesmo processo já enche o log
+pela própria saída padrão, sem taxa nenhuma: a linha nova não custa nada a
+mais (o informativo 1 do adversário da rodada 5).
 Até o lote EXECUTADO, a `executado:` saía antes da validação e da decisão: o
 comando negado também a deixava, e o adiado, duas vezes — a primeira sem ter
 rodado. A `ajuda` não muda: é uma palavra do console, não passa pelo gate e
@@ -17898,8 +18032,10 @@ identidade desde o lote ICACHE-3, e a política em vigor e o registro de
 pessoas desde o lote ICACHE-4 (abaixo) —, o caso do HID solta o shift e
 confere a minúscula, e um caso no fim da tabela é o controle da
 conferência — da função; que o laço do executor a chama depois de cada
-caso, prova outro, desde o lote ICACHE-4, e que ele usa o que ela diz, um
-terceiro, desde o lote ICACHE-5. O resto do estado global — as
+caso, prova outro, desde o lote ICACHE-4; e um terceiro prova, desde o lote
+ICACHE-5, que a função por onde o laço roda cada caso junta ao resultado o
+que a conferência diz, e, desde o lote ICACHE-6, que o laço roda os casos
+por ela. O resto do estado global — as
 filas, o histórico e os cursores do teclado, entre outros — continua com a
 disciplina de cada caso. As mutações, no ARM, com a suíte filtrada aos casos
 do teclado, do HID, do pareamento e do executor: a conferência sem o shift,
@@ -18095,6 +18231,55 @@ esconderia também a falha do próprio caso, e é a honestidade do executor, que
 um controle de dentro não alcança. E a lápide da revogação anula as mensagens
 vivas da credencial, como em `persistencia: a lapide vence a imagem`; a suíte
 não tem nenhuma de um administrador da imagem.
+
+O adversário da rodada 6 achou o que esses controles ainda deixavam passar
+(os achados 1 e 4 dele). O do laço prova a função, e não que o laço a use:
+ele chama `rodar_um_caso` ele mesmo, e um laço que voltasse ao código de
+antes — contasse o caso, rodasse, chamasse a conferência e jogasse fora o que
+ela diz — passava nos oito controles, com o caso que deixasse o estado mudado
+passando calado. E os da política e do registro deixavam passar uma
+comparação reduzida um nível abaixo: de cada papel, os recursos, os
+processos, as cotas, os editores, os domínios e as inclusões; e, na
+impressão, a chave de um administrador sozinha, a chave e o nome de um
+editor, o conteúdo de uma lápide e o do registro de fontes de hora. O lote
+ICACHE-6, [B], só na suíte:
+
+- `rodar_um_caso` conta as chamadas dela com um caso rodando, e o controle do
+  laço exige, antes de rodar o caso dele, estar em exatamente uma — a do laço
+  do executor: o resto do controle prova a função, e isto, que ela é o
+  caminho do laço;
+- o controle da política muda mais sete coisas, todas de dentro de um papel —
+  um prefixo numa linha `recurso`, os processos, a cota de mensagens, a do
+  armazém, um editor, um domínio e uma inclusão —, dezesseis ao todo, e no
+  fim põe a do começo ele mesmo: uma comparação que não visse a última
+  mudança a deixaria em vigor para os casos seguintes. O nome de um papel que
+  já existe fica sem mudança própria: ele está em todas as linhas do papel e
+  nas que o citam, e trocá-lo é reescrever a política inteira — a comparação
+  de hoje, a `PartialEq` da política, o vê;
+- o estendido do registro muda mais cinco — a chave de um administrador
+  sozinha; a chave e o nome de um editor, pela lista dos editores da imagem
+  trocada por uma igual; o conteúdo das fontes de hora, pelo registro da
+  imagem refeito pelo texto com as mesmas fontes e outra incerteza — e
+  refeito com a de antes ele sai igual ao da imagem, o que confere o texto
+  —; e o de uma lápide, uma trocada por outra, contra o registro com a
+  primeira —, dezessete ao todo.
+
+As provas, em depuração com quatro núcleos, nas duas arquiteturas, com a
+suíte filtrada à lista do lote — os oito controles, os segredos e os
+consoles, a remoção e a cópia na escrita: a mutação do adversário — o laço de
+antes, por dentro: conta o caso, roda, chama a conferência e joga fora o que
+ela diz — reprova só o controle do laço, 24 de 25: "o laco do executor nao
+rodou este caso por rodar_um_caso", com nenhuma chamada aberta; sem ela, 25
+de 25. A política comparada sem os campos de dentro de um papel — sem as
+linhas `recurso`, `processos`, `mensagens`, `armazem`, `editores` e
+`dominios`, e sem as inclusões — reprova só o controle da política, que diz
+as sete mudanças que ela não viu; e a impressão do registro um nível abaixo —
+os administradores sem a chave, os editores e as lápides só pela conta, e as
+fontes de hora só pelo "tem ou não tem" — reprova só o estendido, que diz as
+cinco que ela não viu. Os três passaram na lista do lote em release, nas
+duas; e, na varredura, cada um na parte em que cai: o do laço na 3/3 do ARM
+e na 1/3 do x86, o da política na 2/3 do ARM e na 3/3 do x86, e o estendido
+na 1/3 do ARM e na 2/3 do x86.
 
 Os casos que conferem um `person.login` — o registro do login, as recusas,
 o limite de tentativas, a pessoa revogada, o login que chega atrasado — o

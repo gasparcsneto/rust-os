@@ -1399,19 +1399,20 @@ lote EXECUTADO.
   ela "é texto de quem digitou … e pode ser uma senha no lugar errado": a
   auditoria guarda o que o log não leva. A sonda do adversário — as cinco
   senhas da suíte digitadas como chave, com a pessoa de teste, nas duas
-  arquiteturas — achou 0 no log, 37 na auditoria e as 16 senhas e palavras
-  procuradas no journal; o próprio caso do lote EXECUTADO deixa a chave
-  dele (`graviola-madura`) lá. Sem ninguém entrado, nada disso vai à
-  auditoria. O comportamento é anterior ao lote EXECUTADO, que só o deixou
-  à vista.
+  arquiteturas — achou 0 no log, 37 ocorrências no `detalhe` de onze
+  registros da auditoria e as 16 senhas e palavras procuradas no journal; o
+  próprio caso do lote EXECUTADO deixa a chave dele (`graviola-madura`) lá.
+  Sem ninguém entrado, nada disso vai à auditoria. O comportamento é
+  anterior ao lote EXECUTADO, que só o deixou à vista.
 - **A área de 5.3.** A semântica da auditoria: o que o registro de uma
-  recusa grava do que a Pessoa entrada digitou. O passo 1 da continuidade
-  e o I7 do lote B do #448 aplicaram como [B] a regra de que a senha não
-  vai à auditoria — mas só sem ninguém entrado; com alguém entrado, o I7
-  manteve o comando com o resumo dos parâmetros. Estender a regra ao
-  `detalhe` de quem entrou muda o que a auditoria diz de uma pessoa, e por
-  isso este dossiê a trata como [C]. Se o dono a vir como a mesma regra,
-  ela passa às [B].
+  recusa grava do que a Pessoa entrada digitou. O N6 do passo 1 da
+  continuidade e o I7 do lote B do #448 aplicaram como [B] a regra de que a
+  senha não vai à auditoria à linha digitada num console sem ninguém
+  entrado — o N6 à linha que não é comando, o I7 ao comando que existe —;
+  com alguém entrado, o I7 manteve o comando com o resumo dos parâmetros.
+  Estender a regra ao `detalhe` de quem entrou muda o que a auditoria diz de
+  uma pessoa, e por isso este dossiê a trata como [C]. Se o dono a vir como
+  a mesma regra, ela passa às [B].
 - **As alternativas.**
   - (a) No console, o `detalhe` diz o que o log diz: o nome que o comando
     declara — texto do registro de comandos —, ou `(campo nao declarado)`.
@@ -1426,22 +1427,33 @@ lote EXECUTADO.
   - (c) Não mudar, e dizer no texto que a auditoria guarda a chave
     digitada.
 - **Os riscos.** (a): a auditoria deixa de dizer qual chave desconhecida a
-  pessoa mandou — a tela ainda diz, a quem digitou. (a′): também tira a
-  ajuda de depuração dos canais de máquina, onde não há senha digitada.
-  (b): mais uma forma no registro, e o dicionário. (c): o texto de quem
-  digita continua no journal.
+  pessoa mandou — a tela ainda diz, a quem digitou. E a chave digitada
+  continua no registro por outro campo: o `parametros` da recusa é o
+  BLAKE2s sem chave dos parâmetros como vieram — o resto da linha depois do
+  nome do comando, o objeto JSON inteiro, com a chave dentro —, porque
+  `auditar_invalido` recebe os parâmetros sem tratar (`params.0`, no
+  `despachar`) e `auditar` grava o `resumo_dos_parametros` deles. Ele se
+  adivinha por dicionário, como o de um comando aceito, que o I7 mantém; e a
+  conferência dos segredos da suíte não vê resumo nenhum: ela lê os cinco
+  campos de texto do registro (o informativo 1 do adversário do kernel da
+  rodada 6). (a′): também tira a ajuda de depuração dos canais de máquina,
+  onde não há senha digitada. (b): mais uma forma no registro, e o
+  dicionário. (c): o texto de quem digita continua no journal.
 - **O impacto.** (a): uma linha do `despachar` — a chamada de
   `auditar_invalido` passa `campo_para_o_log(comando, campo)` —; o caso do
   lote EXECUTADO passa a conferir também a auditoria e o journal; os casos
   que conferem o `detalhe` de um `INVALID_ARGUMENT` do console com a chave
   como veio, se houver; o texto. Não mudam o formato do registro, a
   cadeia, o journal, o Gate, a Policy nem a decisão; os registros já
-  gravados ficam como estão.
+  gravados ficam como estão. A (a) muda só o `detalhe`: o `parametros` do
+  mesmo registro continua o resumo dos parâmetros como vieram, com a chave
+  digitada dentro — a recusa sem ninguém entrado, essa, grava o resumo do
+  vazio (`recusar_sem_login`).
 - **As fechadas.** A 1.7 — a auditoria e a proveniência existentes: a (a)
   muda o conteúdo de um campo de um tipo de registro do console, e não o
-  formato nem a cadeia. O I7 ("com alguém entrado, o comando vai com o
-  resumo dos parâmetros, como sempre") não se reabre: o resumo dos
-  parâmetros de um comando aceito fica como está.
+  formato nem a cadeia. O I7 — "com alguém entrado, o comando vai com o
+  resumo dos parâmetros, como sempre", no caso dele — não se reabre: o
+  resumo dos parâmetros de um comando aceito fica como está.
 - **O plano de validação.** O caso do lote EXECUTADO confere a chave
   digitada fora da auditoria e do journal, e `(campo nao declarado)` no
   `detalhe` do registro; a mutação "o detalhe com a chave como veio" o
@@ -1451,12 +1463,12 @@ lote EXECUTADO.
   diferença entre o log e a auditoria, no único caminho em que a chave vem
   de uma pessoa.
 - **Destrava.** Nada do roteiro. Desde o lote ICACHE-5, a conferência dos
-  segredos da suíte procura a palavra inteira de cada senha na auditoria
-  inteira e no journal. O caso do lote EXECUTADO deixa lá a chave dele,
-  `graviola-madura`, que junta palavras de duas senhas da suíte, e fica no
-  fim da tabela, depois dos casos que conferem essas senhas; até a
-  decisão, um caso novo que as confira, na mesma parte e depois dele,
-  reprova por este caminho.
+  segredos da suíte procura cada palavra de seis bytes ou mais de cada
+  senha na auditoria inteira e, nos dois casos que o leem, no journal. O
+  caso do lote EXECUTADO deixa lá a chave dele, `graviola-madura`, que
+  junta palavras de duas senhas da suíte, e fica no fim da tabela, depois
+  dos casos que conferem essas senhas; até a decisão, um caso novo que as
+  confira, na mesma parte e depois dele, reprova por este caminho.
 
 ### R13-CONSENT
 
@@ -2619,12 +2631,15 @@ pendência #298.
     caso reprova o que saiu com ela;
   - a conferência dos segredos procura também cada palavra inteira de seis
     bytes ou mais de cada senha, e lê o log do caso inteiro, desde a marca
-    que o executor tira no começo dele: a primeira palavra de uma senha ia
-    ao log e à auditoria sem ela ver;
-  - o laço do executor junta ao resultado o que a conferência diz, e um
-    controle o prova; o da política muda nove coisas, e o estendido do
-    registro, doze — os campos que a comparação e a impressão veem e que
-    os controles do lote ICACHE-4 não mudavam;
+    que o executor tira no começo dele — de cada registro, o que o anel
+    guardou; o registro cortado reprova desde o lote ICACHE-6 —: a primeira
+    palavra de uma senha ia ao log e à auditoria sem ela ver;
+  - o laço do executor roda cada caso por uma função que junta ao
+    resultado o que a conferência diz, e um controle prova a função — que
+    o laço a usa, ele confere desde o lote ICACHE-6 —; o da política muda
+    nove coisas, e o estendido do registro, doze — os campos que a
+    comparação e a impressão veem e que os controles do lote ICACHE-4 não
+    mudavam;
   - os casos que conferem um `person.login` o procuram desde uma marca, e
     não no anel inteiro, onde a devolução do registro de pessoas grava o
     dela;
@@ -2693,6 +2708,48 @@ pendência #298.
   Seis testes novos no hospedeiro, e as mutações do lote (*As do lote
   A14*, no
   [README](../README.md#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
+
+  Depois do lote A14, o lote ICACHE-6, [B], fez os achados do
+  adversário do kernel da rodada 6 e os itens do revisor da rodada 6 sobre o
+  lote ICACHE-5 e a AUD-CAMPO, sem autoridade, regra, registro, identidade,
+  persistência ou semântica de auditoria novos, e só na suíte — as
+  anotações novas moram nos backends da paginação, atrás de
+  `#[cfg(feature = "modo-teste")]`, e fora da suíte o kernel compila igual:
+  - o controle do laço confere também que o laço roda o caso por
+    `rodar_um_caso`: o laço que voltasse ao código de antes e jogasse fora o
+    que a conferência diz passava nos oito controles;
+  - a conferência dos segredos reprova o registro do caso cortado no anel —
+    o resto dele foi só para a serial, e uma senha no fim de uma mensagem
+    longa passava —, e o `nada_que_se_digitou` do lote EXECUTADO lê pelo
+    mesmo leitor; e o diagnóstico de uma falha diz qual senha, pelo nome, e
+    onde, sem ela;
+  - a ordem que a anotação não via: no ARM, a troca de permissão — a marca
+    da cópia na escrita — com o `tlbi` antes da escrita, que os casos da
+    cópia na escrita veem agora pelo descritor que o `tlbi` deste núcleo
+    viu; e, no x86, o `invlpg` deste núcleo antes do `unmap`, que o caso da
+    remoção vê pela anotação dele;
+  - os controles da política e do registro mudam também os campos de dentro
+    de um papel, e a chave de um administrador, os editores campo a campo e
+    o conteúdo das lápides e das fontes de hora;
+  - o texto: a ordem que a anotação não via, o registro cortado e o
+    diagnóstico, os controles um nível abaixo, o E1 e os P7 a P13 do revisor
+    da rodada 6 — os P10 a P13 e o informativo 1 do adversário, nos riscos e
+    no impacto da (a), na [AUD-CAMPO](#aud-campo), sem mudar a recomendação
+    — ([README](../README.md#vários-núcleos), "A ordem que a anotação não
+    via"; [Consoles](../README.md#consoles), "A conferência dos segredos"; e
+    [Testes](../README.md#testes)).
+
+  Fica: no x86, a troca de permissão — a marca da cópia na escrita de uma
+  página do processo — invalida só este núcleo, sem anotação, e a ordem dela
+  nenhum caso vê; a anotação vê a ordem do programa, e não a da memória —
+  sem o `dsb ishst` antes do `tlbi`, a escrita da entrada podia não ter
+  chegado aos outros núcleos, e a anotação diria a entrada fora (não
+  confirmado) —; a conferência dos segredos procura os bytes exatos, por
+  desenho — a palavra em maiúsculas, partida, com escape ou em hexadecimal,
+  e as de menos de seis bytes, não —; o nome de um papel que já existe, que
+  o controle da política não troca; e um registro de mais de 160 bytes de
+  outro fio, no meio de um caso que confere segredos, que o reprovaria — a
+  regra falha fechada, e a varredura não achou nenhum.
 
 ### I7
 
