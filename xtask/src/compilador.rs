@@ -233,6 +233,18 @@ const CHAVES_DO_TOOLCHAIN: [&str; 4] = ["channel", "components", "targets", "pro
 /// [`conferir_a_acao`].
 const PASSO_DO_EXECUTOR: &str = "executor";
 
+/// A linha do passo `conferir` da ação do compilador que lê o canal: o
+/// `channel` do `rust-toolchain.toml` da raiz, o arquivo que o passo confere
+/// contra o do commit logo depois ([`o_canal_do_passo_conferir`]). Desde o
+/// lote A15.
+const LEITURA_DO_CANAL: &str = "canal=$(python3 -I -c 'import tomllib; \
+     print(tomllib.load(open(\"rust-toolchain.toml\", \"rb\"))[\"toolchain\"][\"channel\"])')";
+
+/// A linha do passo `conferir` da ação do compilador que escreve a saída
+/// `canal`, a de toda chave de cache: uma marca do passo ([`PASSOS_DA_ACAO`])
+/// e a única que cita o `GITHUB_OUTPUT` nele ([`o_canal_do_passo_conferir`]).
+const SAIDA_DO_CANAL: &str = "echo \"canal=$canal\" >> \"$GITHUB_OUTPUT\"";
+
 /// Os passos da ação do compilador, na ordem ([`conferir_a_acao`]): o do
 /// ambiente — o ambiente do job, as casas, o PATH, os `rust-toolchain`, os
 /// manifestos, os diretórios de saída —, o que confere e instala o canal, o
@@ -282,11 +294,14 @@ const PASSO_DO_EXECUTOR: &str = "executor";
 ///
 /// O `outputs.canal` da ação é a saída `canal` do passo `conferir`
 /// ([`forma_da_acao`]), e o passo a escreve com o canal que conferiu e
-/// instalou — a linha é uma marca dele: com um valor fixo, no
-/// `outputs.canal` ou no `echo` do passo, toda chave de cache levaria o
-/// mesmo texto em todo compilador, e "um cache é do compilador que o encheu"
-/// deixaria de valer, com o `cargo xtask invariantes` passando (o M2 do
-/// adversário do lote A13, e o N3 do revisor da rodada 6).
+/// instalou — a linha é uma marca dele ([`SAIDA_DO_CANAL`]): com um valor
+/// fixo, no `outputs.canal` ou no `echo` do passo, toda chave de cache
+/// levaria o mesmo texto em todo compilador, e "um cache é do compilador que
+/// o encheu" deixaria de valer, com o `cargo xtask invariantes` passando (o
+/// M2 do adversário do lote A13, e o N3 do revisor da rodada 6). A marca
+/// prova que a linha existe, e não o valor: desde o lote A15, a regra do
+/// canal ([`o_canal_do_passo_conferir`]) confere que o valor é o que o
+/// passo lê do `rust-toolchain.toml` (o B1 do adversário do lote A14).
 ///
 /// # O git sem o ambiente do job, desde o lote A14
 ///
@@ -334,7 +349,7 @@ const PASSOS_DA_ACAO: [(&str, &str, &[&str]); 4] = [
             "git diff --quiet HEAD -- rust-toolchain.toml sdk/modelo/rust-toolchain.toml",
             "export RUSTUP_TOOLCHAIN=\"$canal\"",
             "sysroot=$(rustc --print sysroot)",
-            "echo \"canal=$canal\" >> \"$GITHUB_OUTPUT\"",
+            SAIDA_DO_CANAL,
             "env -i PATH=\"$PATH\" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git diff",
         ],
     ),
@@ -3042,6 +3057,11 @@ fn conferir_a_acao(texto: &str) -> Vec<String> {
                 ));
             }
         }
+        // O canal que o passo `conferir` escreve é o que ele lê (desde o lote
+        // A15): a marca da saída prova que a linha existe, e não o valor.
+        if id == "conferir" {
+            fora.extend(o_canal_do_passo_conferir(&script));
+        }
         if shell_esperado.contains("python3") {
             // Todo diretório de build do `xtask`, como um item da tupla: um
             // novo entra nos dois.
@@ -3122,6 +3142,80 @@ fn conferir_a_acao(texto: &str) -> Vec<String> {
         }
     }
     fora
+}
+
+/// A regra do canal do passo `conferir` da ação do compilador — `script`, o
+/// dele ([`passo_da_acao`]) —, nas linhas de código do script (sem as de
+/// comentário): as duas primeiras são o `set -euo pipefail` e a que lê o
+/// canal do `rust-toolchain.toml` ([`LEITURA_DO_CANAL`]); o nome `canal`,
+/// fora da expansão (`$canal`, `${canal}`), só aparece nessa linha e na que
+/// escreve a saída ([`SAIDA_DO_CANAL`]) ([`cita_o_nome`]); e o
+/// `GITHUB_OUTPUT` aparece uma vez, nesta.
+///
+/// # Por quê, desde o lote A15
+///
+/// A marca do `echo` da saída (o lote A14) prova que a linha existe, e não
+/// o valor que ela escreve: `canal=nightly-2000-01-01` numa linha antes
+/// dela, ou um segundo `echo` depois, que vence o primeiro, punham na chave
+/// de todo cache um canal que não é o do compilador que a encheu, e o
+/// `cargo xtask invariantes` passava (o B1 do adversário do lote A14). Com a
+/// regra, o valor da saída é o da linha que lê o arquivo — que o passo
+/// confere contra o do commit logo depois —, menos o que ela não vê: o nome
+/// montado em pedaços, ou executado de um texto (o `eval`, o `source`), que
+/// é o limite de toda regra de texto. O script da ação é a raiz da
+/// confiança, com a revisão.
+fn o_canal_do_passo_conferir(script: &str) -> Vec<String> {
+    let codigo: Vec<&str> = script
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    let mut fora = Vec::new();
+    if codigo.get(..2) != Some(&["set -euo pipefail", LEITURA_DO_CANAL][..]) {
+        fora.push(format!(
+            "{ACAO_DO_COMPILADOR}: o passo `conferir` não começa pelo `set -euo pipefail` e pela \
+             linha que lê o canal do `rust-toolchain.toml` (`{LEITURA_DO_CANAL}`): o que roda antes \
+             dela — uma função, um `PATH`, um `cd` — escolhe o valor que ela lê"
+        ));
+    }
+    for linha in &codigo {
+        if *linha != LEITURA_DO_CANAL && *linha != SAIDA_DO_CANAL && cita_o_nome(linha, "canal") {
+            fora.push(format!(
+                "{ACAO_DO_COMPILADOR}: `{linha}` no passo `conferir` — o nome `canal`, fora da \
+                 expansão (`$canal`), só na linha que o lê do `rust-toolchain.toml` e na que o \
+                 escreve na saída: noutra, ele pode receber outro valor, e a chave de todo cache \
+                 levaria um canal que não é o do compilador que a encheu"
+            ));
+        }
+    }
+    let citacoes: usize = codigo
+        .iter()
+        .map(|l| l.matches("GITHUB_OUTPUT").count())
+        .sum();
+    if citacoes != 1 || !codigo.contains(&SAIDA_DO_CANAL) {
+        fora.push(format!(
+            "{ACAO_DO_COMPILADOR}: o passo `conferir` cita o `GITHUB_OUTPUT` {citacoes} vez(es) — só \
+             a linha `{SAIDA_DO_CANAL}`, uma vez, escreve a saída: uma segunda escrita do canal \
+             vence a primeira"
+        ));
+    }
+    fora
+}
+
+/// `linha` cita `nome` — a palavra inteira, de letras, dígitos e `_` — fora
+/// da expansão do shell: sem o `$` antes, nem o `${`, o `${!` e o `${#`; e
+/// o `${nome=…}` e o `${nome:=…}`, que dão valor ao nome, também contam.
+fn cita_o_nome(linha: &str, nome: &str) -> bool {
+    let da_palavra = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    linha.match_indices(nome).any(|(i, _)| {
+        let antes = &linha[..i];
+        let depois = &linha[i + nome.len()..];
+        let inteira = !antes.ends_with(da_palavra) && !depois.starts_with(da_palavra);
+        let expansao = ["$", "${", "${!", "${#"].iter().any(|p| antes.ends_with(p));
+        let atribui =
+            antes.ends_with("${") && (depois.starts_with('=') || depois.starts_with(":="));
+        inteira && (!expansao || atribui)
+    })
 }
 
 /// As linhas do passo `id` da ação do compilador — o item de `linhas`, as
@@ -7240,6 +7334,152 @@ jobs:
                 "{nome}"
             );
         }
+    }
+
+    /// O canal que o passo `conferir` escreve (o B1 do adversário do lote
+    /// A14): a marca da saída provava que a linha existe, e não o valor — o
+    /// canal fixo numa linha antes dela, e um segundo `echo` depois, passavam.
+    /// Reprovam agora, cada um pela regra do canal: as duas formas dele, e as
+    /// outras que dão valor ao nome — o `read`, o `printf -v`, o `declare`, o
+    /// `unset` com o padrão da expansão, a aritmética, o `::set-output` —, a
+    /// saída escrita pelo `tee` ou na mesma linha da marca, o canal
+    /// reatribuído na linha da marca ou numa cópia da linha da leitura — as
+    /// duas só valem inteiras —, e uma função, o `PATH` ou a leitura de outro
+    /// arquivo antes da linha que lê o canal. Os comentários com a palavra, e
+    /// as expansões, passam; e a ação do repositório também.
+    #[test]
+    fn adversario_a14_o_canal_que_o_passo_conferir_escreve() {
+        let saida = format!("        {SAIDA_DO_CANAL}\n");
+        let leitura = format!("        {LEITURA_DO_CANAL}\n");
+        assert_eq!(ACAO.matches(&saida).count(), 1);
+        assert_eq!(ACAO.matches(&leitura).count(), 1);
+        let antes_da_saida =
+            |linha: &str| ACAO.replacen(&saida, &format!("        {linha}\n{saida}"), 1);
+        let depois_da_saida =
+            |linha: &str| ACAO.replacen(&saida, &format!("{saida}        {linha}\n"), 1);
+        let antes_da_leitura =
+            |linha: &str| ACAO.replacen(&leitura, &format!("        {linha}\n{leitura}"), 1);
+        let nome = "no passo `conferir` — o nome `canal`, fora da expansão";
+        let comeco =
+            "o passo `conferir` não começa pelo `set -euo pipefail` e pela linha que lê o canal";
+        let escrita = "o passo `conferir` cita o `GITHUB_OUTPUT`";
+        let casos: Vec<(&str, String, &str)> = vec![
+            (
+                "o canal reatribuído antes da saída",
+                antes_da_saida("canal=nightly-2000-01-01"),
+                nome,
+            ),
+            (
+                "um segundo echo depois da saída",
+                depois_da_saida("echo \"canal=nightly-2000-01-01\" >> \"$GITHUB_OUTPUT\""),
+                escrita,
+            ),
+            (
+                "o read",
+                antes_da_saida("read -r canal <<< nightly-2000-01-01"),
+                nome,
+            ),
+            (
+                "o printf -v",
+                antes_da_saida("printf -v canal '%s' nightly-2000-01-01"),
+                nome,
+            ),
+            (
+                "o declare",
+                antes_da_saida("declare canal=nightly-2000-01-01"),
+                nome,
+            ),
+            (
+                "o unset e o padrão da expansão",
+                antes_da_saida("unset canal; : \"${canal:=nightly-2000-01-01}\""),
+                nome,
+            ),
+            (
+                "o padrão da expansão sozinho",
+                antes_da_saida(": \"${canal=nightly-2000-01-01}\""),
+                nome,
+            ),
+            ("a aritmética", antes_da_saida("(( canal = 1 ))"), nome),
+            (
+                "o set-output",
+                depois_da_saida("echo \"::set-output name=canal::nightly-2000-01-01\""),
+                nome,
+            ),
+            (
+                "o tee",
+                depois_da_saida("echo \"x=y\" | tee -a \"$GITHUB_OUTPUT\""),
+                escrita,
+            ),
+            (
+                "a saída e outra escrita na mesma linha",
+                ACAO.replacen(
+                    &saida,
+                    &format!("        {SAIDA_DO_CANAL}; echo \"x=y\" >> \"$GITHUB_OUTPUT\"\n"),
+                    1,
+                ),
+                escrita,
+            ),
+            (
+                "o canal reatribuído na linha da saída, antes dela",
+                ACAO.replacen(
+                    &saida,
+                    &format!("        canal=nightly-2000-01-01; {SAIDA_DO_CANAL}\n"),
+                    1,
+                ),
+                nome,
+            ),
+            (
+                "a linha da leitura de novo, com outra atribuição",
+                antes_da_saida(&format!("{LEITURA_DO_CANAL}; canal=nightly-2000-01-01")),
+                nome,
+            ),
+            (
+                "uma função antes da leitura",
+                antes_da_leitura("python3() { echo nightly-2000-01-01; }"),
+                comeco,
+            ),
+            (
+                "o PATH antes da leitura",
+                antes_da_leitura("PATH=/tmp/falsos:$PATH"),
+                comeco,
+            ),
+            (
+                "a leitura de outro arquivo",
+                ACAO.replacen(
+                    "open(\"rust-toolchain.toml\", \"rb\"))[\"toolchain\"]",
+                    "open(\"outro.toml\", \"rb\"))[\"toolchain\"]",
+                    1,
+                ),
+                comeco,
+            ),
+        ];
+        let mut cegos = Vec::new();
+        for (rotulo, texto, esperado) in &casos {
+            assert_ne!(texto, ACAO, "{rotulo}");
+            let fora = conferir_a_acao(texto);
+            if fora.iter().filter(|f| f.contains(*esperado)).count() != 1 {
+                cegos.push(format!("{rotulo}: {fora:#?}"));
+            }
+        }
+        assert!(cegos.is_empty(), "{cegos:#?}");
+        // Passam: os comentários com a palavra, e as expansões do nome.
+        for texto in [
+            antes_da_saida("# o canal do arquivo, conferido acima"),
+            antes_da_leitura("# o canal sai da linha de baixo"),
+            antes_da_saida("echo \"conferido: $canal ${canal} ${#canal} ${canal:-x}\""),
+        ] {
+            assert_ne!(texto, ACAO);
+            assert_eq!(conferir_a_acao(&texto), Vec::<String>::new(), "{texto}");
+        }
+        assert_eq!(conferir_a_acao(ACAO), Vec::<String>::new());
+        // As peças: o nome inteiro, fora da expansão.
+        assert!(cita_o_nome("canal=x", "canal"));
+        assert!(cita_o_nome("x \"${canal:=y}\"", "canal"));
+        assert!(!cita_o_nome(
+            "x $canal ${canal} ${!canal} ${#canal}",
+            "canal"
+        ));
+        assert!(!cita_o_nome("x $canal_novo canais o_canal", "canal"));
     }
 
     /// O passo da ação como o texto de um bloco (no lote A13, o M2 do

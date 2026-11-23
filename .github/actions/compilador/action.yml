@@ -438,9 +438,13 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        # O canal sai do arquivo, nesta linha, e só a última escreve a saída:
+        # o `cargo xtask invariantes` confere que o nome `canal`, fora da
+        # expansão, só aparece nas duas, e o `GITHUB_OUTPUT`, só na última.
+        # Desde o lote A15.
         canal=$(python3 -I -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
         if ! [[ "$canal" =~ ^nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-          echo "::error file=rust-toolchain.toml::o canal '$canal' não é um nightly com data"
+          echo "::error file=rust-toolchain.toml::o valor '$canal' do channel não é um nightly com data"
           exit 1
         fi
         # O arquivo do commit, pelo git sem o ambiente do job — só o PATH, que
