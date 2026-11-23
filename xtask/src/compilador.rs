@@ -96,7 +96,9 @@
 //!     `.github/actions/compilador` depois de cada checkout, antes do cache
 //!     e de qualquer `cargo`, num passo sem `if:` nem `continue-on-error:`,
 //!     que a leitura lê inteiro ([`linhas_que_o_passo_nao_le`], desde o lote
-//!     A12); e o canal em toda chave de cache;
+//!     A12); e o canal em toda chave de cache — desde o lote A16, a
+//!     expressão com a saída da ação ([`CANAL_NA_CHAVE`]), e não o texto, e
+//!     o `id: compilador` no passo da ação;
 //!   - a ação do compilador ([`conferir_a_acao`]): desde o lote A14, a
 //!     forma que o runner lê, sem chave nem passo a mais, e o canal da saída
 //!     do passo que o confere ([`forma_da_acao`]); os passos que conferem,
@@ -2630,12 +2632,14 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
         // O passo da conferência roda sempre, e o job para com ela
         // reprovada; e a leitura dele falha fechada: a linha que ela não lê
         // pode ser, para o YAML, uma das chaves recusadas.
+        let mut sem_o_id = 0;
         for (i, _) in linhas
             .iter()
             .enumerate()
             .filter(|(_, l)| usa_a_acao_do_compilador(l))
         {
-            for c in chaves_do_item(&linhas, i) {
+            let chaves = chaves_do_item(&linhas, i);
+            for c in &chaves {
                 if CHAVES_FORA_DO_PASSO_DA_ACAO.contains(&c.chave) {
                     fora.push(format!(
                         "{nome}: `{}: {}` no passo da conferência do compilador — com um `if:`, \
@@ -2644,6 +2648,12 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
                         c.chave, c.valor
                     ));
                 }
+            }
+            if !chaves
+                .iter()
+                .any(|c| c.chave == "id" && sem_aspas(c.valor) == "compilador")
+            {
+                sem_o_id += 1;
             }
             for linha in linhas_que_o_passo_nao_le(&linhas, i) {
                 fora.push(format!(
@@ -2658,6 +2668,16 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
         }
         if nome.starts_with(".github/actions/") {
             continue;
+        }
+        // O `id: compilador` no próprio passo da ação (desde o lote A16): a
+        // chave de cache lê o canal de `steps.compilador`, e a contagem de
+        // baixo aceitava o `id` noutro passo.
+        for _ in 0..sem_o_id {
+            fora.push(format!(
+                "{nome}: o passo da conferência do compilador sem o `id: compilador` — a chave de \
+                 todo cache lê o canal de `steps.compilador`: com o `id` noutro passo, ela leva a \
+                 saída dele, e não o canal que a ação conferiu"
+            ));
         }
 
         // O que o job escolhe para os passos da ação (desde o lote A14): o
@@ -2737,10 +2757,13 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
                  cache lê o canal de `steps.compilador`"
             ));
         }
+        // O canal na chave pela expressão, e não pelo texto (desde o lote
+        // A16): `${{ 'steps.compilador.outputs.canal' }}` é um texto fixo.
         for chave in chaves_de_cache(&linhas) {
-            if !chave.contains("steps.compilador.outputs.canal") {
+            if !chave.contains(CANAL_NA_CHAVE) {
                 fora.push(format!(
-                    "{nome}: a chave de cache `{chave}` não leva o canal do compilador"
+                    "{nome}: a chave de cache `{chave}` não leva o canal do compilador \
+                     (`{CANAL_NA_CHAVE}`)"
                 ));
             }
         }
@@ -2939,6 +2962,30 @@ fn o_comeco_dos_jobs(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
     }
     fora
 }
+
+/// O canal do compilador numa chave de cache: a expressão com a saída da
+/// ação, como os workflows a escrevem ([`conferir_os_workflows`]).
+///
+/// # A expressão, e não o texto, desde o lote A16
+///
+/// A regra procurava o texto `steps.compilador.outputs.canal` na chave, e
+/// `${{ 'steps.compilador.outputs.canal' }}` — uma expressão que vale o
+/// próprio texto — passava: a chave levava um texto fixo, e não o canal, e
+/// um cache de outro compilador se restaurava pelo prefixo (o B2 do
+/// adversário do lote A15). O comentário com o texto já não valia (o lote
+/// A12). Outra grafia da mesma expressão — sem os espaços, com um padrão
+/// (`|| 'x'`) — reprova, com a forma na mensagem.
+///
+/// # O `id` no passo da ação, desde o lote A16
+///
+/// A expressão lê o canal de `steps.compilador`, e a regra contava as
+/// conferências e os `id: compilador` do workflow, sem os ligar: a ação sem
+/// o `id`, e um passo depois dela com `id: compilador` que escreve outro
+/// canal na saída dele, passavam — a chave levava o canal desse passo (o
+/// lote A16 o achou na revisão do patch do adversário). O passo que usa a
+/// ação tem o `id` ([`conferir_os_workflows`]); e o GitHub não aceita dois
+/// passos com o mesmo `id` num job.
+const CANAL_NA_CHAVE: &str = "${{ steps.compilador.outputs.canal }}";
 
 /// As chaves de cache de um workflow: as de `key:` e as de `restore-keys:`,
 /// numa linha ou num bloco `|` — as linhas mais recuadas que a chave,
@@ -8625,5 +8672,77 @@ jobs:
                 .iter()
                 .any(|f| f.contains("o canário roda em"))
         );
+    }
+
+    /// O canal na chave de cache pela expressão (o B2 do adversário do lote
+    /// A15): o texto `steps.compilador.outputs.canal` numa expressão
+    /// que o devolve — ou fora de uma — passava, e a chave levava um texto
+    /// fixo. Reprova agora, na chave e nas de restauração; e o passo da ação
+    /// sem o `id: compilador`, com o `id` noutro passo, também (o lote A16,
+    /// na revisão). A expressão passa, e os workflows do repositório também.
+    #[test]
+    fn adversario_a15_o_canal_na_chave_pela_expressao() {
+        let chave = "          key: testes-${{ steps.compilador.outputs.canal }}-";
+        assert_eq!(OFICIAL.matches(chave).count(), 1);
+        for (rotulo, novo) in [
+            (
+                "o texto numa expressão",
+                "          key: testes-${{ 'steps.compilador.outputs.canal' }}-",
+            ),
+            (
+                "o texto fora da expressão",
+                "          key: testes-steps.compilador.outputs.canal-",
+            ),
+            (
+                "a expressão com um padrão",
+                "          key: testes-${{ steps.compilador.outputs.canal || 'x' }}-",
+            ),
+        ] {
+            let texto = OFICIAL.replacen(chave, novo, 1);
+            assert_ne!(texto, OFICIAL, "{rotulo}");
+            let fora = um(CI, &texto);
+            assert!(
+                fora.len() == 1 && fora[0].contains("não leva o canal"),
+                "{rotulo}: {fora:?}"
+            );
+        }
+        let restauracao = OFICIAL.replacen(
+            "            video-${{ steps.compilador.outputs.canal }}-\n",
+            "            video-${{ 'steps.compilador.outputs.canal' }}-\n",
+            1,
+        );
+        assert_ne!(restauracao, OFICIAL);
+        assert_eq!(um(CI, &restauracao).len(), 1);
+        // O `id: compilador` noutro passo, que escreve outro canal na saída
+        // dele, e a ação sem o `id` (o lote A16, na revisão): a contagem
+        // passava; o passo da ação sem o `id` reprova, uma vez.
+        let passo = "        id: compilador\n        uses: ./.github/actions/compilador\n";
+        assert_eq!(OFICIAL.matches(passo).count(), 1);
+        let noutro = OFICIAL.replacen(
+            passo,
+            "        uses: ./.github/actions/compilador\n\n      - id: compilador\n        \
+             run: echo \"canal=nightly-2000-01-01\" >> \"$GITHUB_OUTPUT\"\n",
+            1,
+        );
+        assert_ne!(noutro, OFICIAL);
+        let fora = um(CI, &noutro);
+        assert!(
+            fora.len() == 1 && fora[0].contains("sem o `id: compilador`"),
+            "{fora:#?}"
+        );
+        for (nome, texto) in [
+            (CI, include_str!("../../.github/workflows/ci.yml")),
+            (
+                ".github/workflows/rede-principal.yml",
+                include_str!("../../.github/workflows/rede-principal.yml"),
+            ),
+        ] {
+            assert!(
+                !um(nome, texto)
+                    .iter()
+                    .any(|f| f.contains("não leva o canal") || f.contains("sem o `id: compilador`")),
+                "{nome}"
+            );
+        }
     }
 }
