@@ -64594,14 +64594,28 @@ fn conferir_depois_do_caso() -> Resultado {
 /// roda, confere o estado depois ([`conferir_depois_do_caso`]) e junta a
 /// conferência ao resultado — o caso que passa e deixa o estado mudado
 /// reprova. As contas provam que o laço chama a conferência
-/// ([`suite_o_executor_confere_depois_de_cada_caso`]); a junção, que ele
-/// usa o que ela diz ([`suite_o_laco_reprova_o_caso_que_a_conferencia_reprova`]).
+/// ([`suite_o_executor_confere_depois_de_cada_caso`]); a junção, que ela
+/// usa o que a conferência diz, e [`DENTRO_DE_RODAR_UM_CASO`], que o laço
+/// roda o caso por aqui
+/// ([`suite_o_laco_reprova_o_caso_que_a_conferencia_reprova`]).
 fn rodar_um_caso(f: fn() -> Resultado) -> Resultado {
     CASOS_COMECADOS.fetch_add(1, SeqCst);
+    DENTRO_DE_RODAR_UM_CASO.fetch_add(1, SeqCst);
     let resultado = f();
+    DENTRO_DE_RODAR_UM_CASO.fetch_sub(1, SeqCst);
     let devolvido = conferir_depois_do_caso();
     resultado.and(devolvido)
 }
+
+/// Quantas chamadas de [`rodar_um_caso`] estão com um caso rodando agora:
+/// uma enquanto o laço do executor roda um caso por ela, e duas no caso que
+/// o controle do laço roda por dentro. O controle do laço confere que ele
+/// mesmo está numa: um laço que não chamasse [`rodar_um_caso`] — e
+/// contasse o caso e chamasse a conferência por conta própria, jogando
+/// fora o que ela diz — passava no controle da conta, que conta as duas, e
+/// no do laço, que chama [`rodar_um_caso`] ele mesmo (o adversário da
+/// rodada 6).
+static DENTRO_DE_RODAR_UM_CASO: AtomicU64 = AtomicU64::new(0);
 
 /// O laço reprova o caso que a conferência reprova: um caso que passa e
 /// deixa o shift apertado, rodado pelo caminho do laço
@@ -64611,11 +64625,26 @@ fn rodar_um_caso(f: fn() -> Resultado) -> Resultado {
 /// especialista do lote ICACHE-4; o achado 4 do adversário da rodada 5). A
 /// rodada daqui conta um caso e uma conferência, e as duas contas continuam
 /// casando.
+///
+/// E o laço rodou este caso por [`rodar_um_caso`]
+/// ([`DENTRO_DE_RODAR_UM_CASO`]): o resto prova a função, e isto, que ela é
+/// o caminho do laço. Sem isto, um laço que não a chamasse, e chamasse a
+/// conferência por conta própria jogando fora o que ela diz, passava aqui
+/// e no controle da conta (o adversário da rodada 6).
 fn suite_o_laco_reprova_o_caso_que_a_conferencia_reprova() -> Resultado {
     fn passa_e_deixa_o_shift() -> Resultado {
         crate::teclado::esvaziar();
         crate::teclado::evento(42, true);
         Ok(())
+    }
+    let abertas = DENTRO_DE_RODAR_UM_CASO.load(SeqCst);
+    if abertas != 1 {
+        crate::log_error!(
+            "teste",
+            "o controle do laco rodou com {} chamada(s) de rodar_um_caso abertas",
+            abertas
+        );
+        return Err("o laco do executor nao rodou este caso por rodar_um_caso");
     }
     let rodado = rodar_um_caso(passa_e_deixa_o_shift);
     let solto = !crate::teclado::shift_apertado_de_teste();
