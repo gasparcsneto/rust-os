@@ -7,8 +7,9 @@
 # revisão. O `cargo xtask invariantes` confere, nos workflows e aqui, as
 # formas que as regras dele listam (`xtask/src/compilador.rs`, e o
 # inventário das guardas de texto, no README); uma mudança que escapa
-# delas — o script de um passo daqui, um passo de um workflow depois desta
-# ação, um nome montado em pedaços — é da revisão, e não da guarda. Desde
+# delas — um nome montado em pedaços, uma linha que a leitura toma por
+# comentário, um passo de um workflow depois desta ação, o script de um
+# passo daqui — é da revisão, e não da guarda. Desde
 # o lote A13, os passos daqui só têm as chaves que o `cargo xtask
 # invariantes` lê neles — o `name:`, o `id:`, o `shell:` e o `run:`, e, no
 # das invariantes, o `if:` da entrada e o `env:` com o toolchain fixado —,
@@ -36,22 +37,29 @@
 # leitura que falha fechada: o passo só tem o `name:`, o `id:`, o `uses:` e
 # o `with:` com as entradas, e uma linha dele que ela não lê reprova; e,
 # desde o lote A13, a leitura reprova no arquivo inteiro as quebras de
-# linha que só o YAML vê e, fora do conteúdo dos blocos, as formas que ela
-# não lê, em todo workflow e nesta ação — desde o lote A16, cada `.yml` e
-# `.yaml` de `.github/` que o git lista, pelo caminho como ele é —: um
-# checkout escrito numa delas não escapa da ordem; desde o lote A14, também
-# os espaços que o YAML não toma por espaço, os caracteres que ele não
-# imprime e um segundo documento; e, nos workflows oficiais, nenhum job tem
-# `container:` nem, desde o lote A15, `services:`; o `env:` do workflow e o
-# dos jobs só têm os nomes de uma lista fechada; nenhuma linha cita o
+# linha que só o YAML vê — pelos caracteres; desde o lote A17, também o
+# texto entre aspas duplas com uma `\`, cujo escape (o `\n`) o YAML lê — e,
+# fora do conteúdo dos blocos, as formas que ela não lê, em todo workflow e
+# nesta ação — desde o lote A16, cada `.yml` e `.yaml` de
+# `.github/workflows/` e de `.github/actions/` que o git lista, pelo caminho
+# como ele é —: um checkout escrito numa delas não escapa da ordem; a linha
+# que começa por `#`, ela a toma por comentário, também no conteúdo de um
+# bloco; desde o lote A14, também os espaços que o YAML não toma por espaço,
+# os caracteres que ele não imprime e um segundo documento; desde o lote
+# A17, a raiz do documento fora da coluna zero; e, nos workflows oficiais,
+# nenhum job tem `container:` nem, desde o lote A15, `services:`; o `env:`
+# do workflow e o dos jobs só têm os nomes de uma lista fechada; nenhuma
+# linha cita o
 # `GITHUB_ENV` nem, desde o lote A15, o `ACTIONS_ALLOW_UNSECURE_COMMANDS` e
 # os comandos `set-env` e `add-path` do runner, nas formas que ele lê
 # (depois do `::` ou do `##[`, em qualquer caixa); o checkout só tem o
 # `uses:` e o `name:`; desde o lote A15, as ações permitidas só nas versões
 # de uma lista — desde o lote A16, também no canário —, e os dois primeiros
 # passos de cada job são o checkout e esta ação; e, desde o lote A16, o
-# passo desta ação tem o `id: compilador`, e a chave de todo cache, a
-# expressão com a saída dele), em quatro passos:
+# passo desta ação tem o `id: compilador`, e a chave de todo cache tem a
+# expressão com a saída dele — desde o lote A17, entre as expressões que o
+# leitor de modelos do GitHub acha no valor que o YAML lê —; e, desde o
+# lote A17, o `on:` da CI tem o `push`, sem filtro), em quatro passos:
 #
 # 1. `ambiente`, em Python — o do sistema, `/usr/bin/python3`, e não o do
 #    PATH, que é o que ele confere —, antes de qualquer programa do
@@ -119,8 +127,8 @@
 #    comentário, que, num texto em várias linhas, o bash roda. O que ele
 #    não segue, pelo texto: o nome montado em pedaços, o texto executado (o
 #    `eval`, o `source`, outro `bash`) e o caminho do script — um `exit`,
-#    um `exec`, um heredoc ou um `trap` antes da linha da saída, que a
-#    pulariam e deixariam a saída vazia.
+#    um `exec`, um heredoc ou um `trap` antes da linha da saída, ou uma
+#    linha que continua nela, que a pulariam e deixariam a saída vazia.
 # 3. `executor`, em Python, com o toolchain fixado: o que o config do cargo
 #    faz rodar no lugar do que o toolchain rodaria, lido pela consulta do
 #    próprio cargo (`config get`), que lê todo arquivo de config que vale em
@@ -144,7 +152,11 @@
 #    conferências, antes do cache e de todo outro `cargo` do job. Nada do
 #    repositório roda antes dele — nem os testes do hospedeiro, nem os
 #    `build.rs` deles; e a formatação, que só lê o código, também vem
-#    depois —, e o cache, que vem depois, não lhe traz artefato nenhum.
+#    depois —; o cache vem depois dele; e o passo do ambiente recusa o
+#    arquivo do commit numa pasta `target` — desde o lote A17, em qualquer
+#    nível, e o `workspace` de um pacote, que levava a raiz do workspace e o
+#    `target/` dela para outra pasta: um rlib do commit chegou assim ao
+#    `xtask` das invariantes (o A1 do adversário do lote A16).
 #
 # Por quê: o `cargo xtask` é o `cargo run` do `xtask`, e o `cargo run` passa
 # o binário pelo executor. Um executor do repositório que respondesse

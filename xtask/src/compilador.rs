@@ -64,7 +64,8 @@
 //!   e não da guarda. Desde o lote A15, o texto daqui diz as regras, e não
 //!   o que elas garantiriam: três rodadas seguidas do adversário acharam o
 //!   texto dizendo mais do que o código fazia — e a rodada 8, seis frases
-//!   assim no texto do próprio lote A15, que o lote A16 corrigiu.
+//!   assim no texto do próprio lote A15, que o lote A16 corrigiu; e a
+//!   rodada 9, três do lote A16, que o lote A17 corrigiu.
 //!   - o canal tem data, é o mesmo nos dois arquivos, com as chaves do
 //!     oficial, e o `CLAUDE.md` o cita; não há outro `rust-toolchain` no
 //!     repositório;
@@ -82,8 +83,12 @@
 //!     espaço e os caracteres que ele não imprime
 //!     ([`quebras_que_a_leitura_nao_ve`]); fora do conteúdo dos blocos, as
 //!     formas que ela não lê ([`forma_que_a_leitura_nao_le`]), desde o lote
-//!     A13; e, desde o lote A14, um segundo documento
-//!     ([`marcadores_de_documento`]). A linha que começa por `#`, a leitura
+//!     A13; desde o lote A14, um segundo documento
+//!     ([`marcadores_de_documento`]); e, desde o lote A17, a raiz do
+//!     documento fora da coluna zero ([`raiz_fora_da_coluna_zero`]) e o
+//!     texto entre aspas duplas com uma `\`, cujo escape o YAML lê — o
+//!     `\n` é uma quebra de linha que a leitura, que confere os caracteres,
+//!     não via ([`escape_entre_aspas_duplas`]). A linha que começa por `#`, a leitura
 //!     a toma por comentário — também no conteúdo de um bloco, onde o YAML a
 //!     lê como texto e um heredoc do bash a roda —, e o que está nela fica
 //!     com a revisão; no passo `conferir` da ação, a regra do canal a lê,
@@ -103,12 +108,19 @@
 //!     que a leitura lê inteiro ([`linhas_que_o_passo_nao_le`], desde o lote
 //!     A12); e o canal em toda chave de cache — desde o lote A16, a
 //!     expressão com a saída da ação ([`CANAL_NA_CHAVE`]), e não o texto, e
-//!     o `id: compilador` no passo da ação;
+//!     o `id: compilador` no passo da ação; desde o lote A17, uma das
+//!     expressões que o leitor de modelos do GitHub acha no valor que o YAML
+//!     lê ([`o_canal_numa_expressao`]) — o texto dela num literal de outra
+//!     expressão, ou na linha crua de um texto entre aspas simples, não
+//!     conta —;
 //!   - a ação do compilador ([`conferir_a_acao`]): desde o lote A14, a
 //!     forma que o runner lê, sem chave nem passo a mais, e o canal da saída
 //!     do passo que o confere ([`forma_da_acao`]); os passos que conferem,
 //!     fora do cargo, o ambiente, o PATH, os `rust-toolchain`, os
-//!     artefatos, os links e os submódulos do commit e o que não é pasta no
+//!     artefatos — desde o lote A17, numa pasta `target` em qualquer nível,
+//!     e o `workspace` de um pacote num manifesto, que leva a raiz do
+//!     workspace e o `target/` dela para outra pasta —, os links e os
+//!     submódulos do commit e o que não é pasta no
 //!     caminho dos diretórios de saída — pelo `git` sem o ambiente do job,
 //!     desde o lote A14 —, o config do cargo e o das invariantes, cada um
 //!     com as marcas dele no script, só com as chaves que a leitura lê nele
@@ -128,13 +140,20 @@
 //!     no `with:` do primeiro passo do `steps:` dele que usa a ação
 //!     ([`as_invariantes_na_acao`]); e, desde o lote A16, a CI e o canário,
 //!     que essa regra e a de baixo acham pelo nome, existem
-//!     ([`workflows_que_faltam`]);
-//!   - o canário, o único que sobrepõe — ele testa o candidato —, não roda
-//!     nos pushes — desde o lote A16, só nos gatilhos de
-//!     [`GATILHOS_DO_CANARIO`], em toda forma do `on:` que a leitura lê —,
-//!     não usa a ação do cache, só usa as ações dele nas versões de
-//!     [`USOS_OFICIAIS`] (desde o lote A16), não publica proveniência e
-//!     repete os comandos do job de lints;
+//!     ([`workflows_que_faltam`]); e, desde o lote A17, o `on:` da CI tem
+//!     o `push`, sem filtro ([`a_ci_nos_pushes`]);
+//!   - o canário, o único que sobrepõe — ele testa o candidato —: desde o
+//!     lote A16, só os gatilhos de [`GATILHOS_DO_CANARIO`], nas formas do
+//!     `on:` da raiz que a leitura lê — o valor na linha, a lista em bloco,
+//!     também na coluna do `on:`, e as chaves do mapa —, e, desde o lote
+//!     A17, com o `on:` na coluna zero ([`gatilhos_fora_da_lista`]); não
+//!     usa a ação do cache e, desde o lote A17, tem o `cache-mode: none` na
+//!     raiz, sem outro num job ([`o_modo_do_cache_do_canario`]); só usa as
+//!     ações dele nas versões de [`USOS_OFICIAIS`] (desde o lote A16);
+//!     nenhuma linha dele cita o caminho da proveniência
+//!     (`target/proveniencia`), e, desde o lote A17, a publicação dele é só
+//!     a pasta dos registros ([`a_publicacao_do_canario`]); e repete os
+//!     comandos do job de lints;
 //! - **no `cargo xtask compilador`** ([`relatar`]): o canal, o toolchain
 //!   ativo, o `rustc -Vv` completo, o `cargo -V` e os desvios — o que todo
 //!   relatório de validação cita.
@@ -1664,8 +1683,9 @@ pub(crate) fn conferir_o_canal() -> Result<ExitCode, String> {
     }
 }
 
-/// A definição da CI — `workflows`, cada `.yml` e `.yaml` de `.github/` que
-/// o git lista, com o texto ([`da_definicao_da_ci`]) — pelas regras de
+/// A definição da CI — `workflows`, cada `.yml` e `.yaml` de
+/// `.github/workflows/` e de `.github/actions/` que o git lista, com o texto
+/// ([`da_definicao_da_ci`]) — pelas regras de
 /// `cargo xtask invariantes` que a leem: as dos workflows
 /// ([`conferir_os_workflows`]); a da ação do compilador, que tem de estar lá
 /// ([`conferir_a_acao`]); e, desde o lote A16, a da CI e a do canário, que
@@ -2580,9 +2600,11 @@ fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str>
 /// pasta da ação escapavam delas (o M1 e o M2 do adversário do lote A14).
 /// Cada regra pega as formas que ela lê; o resto da definição da CI é da
 /// revisão. O canário
-/// sobrepõe, mas não roda nos pushes, não usa a ação do cache nem publica a
-/// proveniência, e, desde o lote A16, só usa as ações dele nas versões de
-/// [`USOS_OFICIAIS`]. As ações locais seguem a leitura do arquivo
+/// sobrepõe, mas só nos gatilhos da lista dele, não usa a ação do cache —
+/// e, desde o lote A17, tem o `cache-mode: none` —, nenhuma linha dele cita
+/// o caminho da proveniência — e, desde o lote A17, a publicação dele é só a
+/// pasta dos registros —, e, desde o lote A16, só usa as ações dele nas
+/// versões de [`USOS_OFICIAIS`]. As ações locais seguem a leitura do arquivo
 /// inteiro, abaixo,
 /// e as regras dos workflows oficiais que leem o texto de cada linha — as
 /// ações permitidas, as sobreposições, a escrita num `rust-toolchain` e a
@@ -2611,8 +2633,12 @@ fn linhas_que_o_passo_nao_le<'a>(linhas: &[Linha<'a>], i: usize) -> Vec<&'a str>
 /// A linha que começa por `#`, a leitura a toma por comentário, também no
 /// conteúdo de um bloco, onde o YAML a lê como texto: o que está nela fica
 /// com a revisão (o "O que fica" do lote A15) — no passo `conferir` da ação,
-/// a regra do canal lê toda linha, desde o lote A16. E os arquivos lidos
-/// são os `.yml` e os `.yaml` de `.github/` que o git lista
+/// a regra do canal lê toda linha, desde o lote A16. Desde o lote A17,
+/// também a raiz do documento fora da coluna zero
+/// ([`raiz_fora_da_coluna_zero`]) e o texto entre aspas duplas com uma `\`
+/// ([`escape_entre_aspas_duplas`]): a leitura confere os caracteres, e não
+/// os escapes que o YAML lê. E os arquivos lidos são os `.yml` e os `.yaml`
+/// de `.github/workflows/` e de `.github/actions/` que o git lista
 /// ([`da_definicao_da_ci`]): desde o lote A16, pelo caminho como ele é.
 fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
     let mut fora = Vec::new();

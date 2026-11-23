@@ -2900,23 +2900,27 @@ pendência #298.
   - a lista dos arquivos do repositório é a do `git ls-files -z`: sem o
     `-z`, o git punha entre aspas o caminho com um acento, e um workflow
     `publicação.yml`, uma ação em `preparação/` ou a CI renomeada para
-    `integração.yml` não passavam por regra nenhuma; um caminho que não é
-    UTF-8 reprova, e a extensão do workflow vale em qualquer caixa;
+    `integração.yml` não passavam por regra nenhuma dos workflows; um
+    caminho que não é UTF-8 reprova, e a extensão do workflow vale em
+    qualquer caixa;
   - as ações do canário só nas versões da lista dos workflows oficiais: o
     cache do GitHub é do ramo, e não do workflow — o canário grava no do
-    ramo padrão, que os jobs da CI restauram —, e toda ação JavaScript
-    recebe o token do job;
+    ramo em que roda — o padrão, no agendamento, ou o disparado —, que os
+    jobs da CI restauram —, e toda ação JavaScript recebe o token do job;
   - a CI e o canário, que a regra das invariantes no job de lints e a da
     paridade acham pelo nome, existem — a CI renomeada sem a entrada das
     invariantes passava —, e as regras que leem a definição da CI ficam
     numa função sem E/S, que um teste chama;
   - os gatilhos do canário numa lista fechada — o agendamento e o disparo
-    manual —, em toda forma do `on:`: a lista em bloco (`- push`), também
-    na coluna do `on:`, e o `workflow_run` passavam;
-  - o canal na chave de cache pela expressão, e não pelo texto — `${{
-    'steps.compilador.outputs.canal' }}` passava —, lida do passo da ação,
-    que tem o `id: compilador`: o `id` noutro passo, que escreve outro
-    canal na saída dele, passava;
+    manual —, nas formas do `on:` da raiz que a leitura lê — o valor na
+    linha, a lista em bloco, também na coluna do `on:`, e as chaves do mapa
+    —: a lista em bloco (`- push`) e o `workflow_run` passavam;
+  - a expressão do canal na chave de cache — `${{
+    'steps.compilador.outputs.canal' }}` passava; até o lote A17, a regra
+    procurava o texto da expressão na linha, e um literal de outra
+    expressão com ele passava —, lida do passo da ação, que tem o
+    `id: compilador`: o `id` noutro passo, que escreve outro canal na saída
+    dele, passava;
   - no passo `conferir` da ação, a linha da leitura aparece uma vez, a da
     saída é a última, nenhuma linha define uma função ou um apelido, nem
     tem o `enable`, e a regra lê toda linha, as de comentário inclusive: a
@@ -2937,8 +2941,9 @@ pendência #298.
   passo `conferir`, o que a regra do canal não segue pelo texto — o nome
   montado em pedaços, o texto executado (o `eval`, o `source`, outro
   `bash`) e o caminho do script: um `exit`, um `exec`, um heredoc ou um
-  `trap` antes da linha da saída, que a deixariam vazia —; o conteúdo do
-  cache, que os jobs restauram de outra execução; e as formas novas do
+  `trap` antes da linha da saída, ou uma linha que continua nela, que a
+  deixariam vazia —; o conteúdo do cache, que os jobs restauram de outra
+  execução; e as formas novas do
   GitHub — o `cache-mode`, o lockfile das dependências, o `$/` —, que
   pedem uma decisão de um lote com um run da CI. Sete testes novos no
   hospedeiro e um ajustado, e as mutações do lote (*As do lote A16*, no
@@ -2992,6 +2997,69 @@ pendência #298.
   conta do kernel não depende da linha —; e a ordem dos `tlbi` num
   processador de verdade. Nenhum teste novo no hospedeiro; as mutações do
   lote ([README](../README.md#testes)).
+
+  Depois do lote ICACHE-8, o lote A17, [B], fez os achados do adversário da
+  rodada 9 sobre o lote A16 — o `target` de outro workspace, alto; a raiz
+  recuada do canário, o escape num texto entre aspas duplas e o canal num
+  literal de outra expressão, baixos —, o I3 do `main.rs`, a regra do
+  `cache-mode: none` do canário, a falha do canário no run 5 e os itens do
+  revisor da rodada 9 sobre o texto do lote A16, na guarda do compilador,
+  nos testes da ação e no texto, sem autoridade, regra de acesso,
+  registro, identidade, persistência ou semântica de auditoria novos. O
+  texto segue o princípio do lote A15, e três frases do lote A16, que os
+  achados desmentem, foram corrigidas no lugar. As regras novas:
+  - o passo do ambiente da ação recusa o arquivo do commit em toda pasta
+    `target`, em qualquer nível, e o `workspace` de um pacote em todo
+    manifesto — também na tabela antiga, `[project]`: o `Cargo.toml` da
+    raiz como um pacote com `workspace = "zz"` levava a raiz do workspace,
+    e o `target/` dela, para `zz/`, fora dos diretórios de build, e, num
+    brinquedo, um rlib do commit em `zz/target/` — de uma dependência do
+    registro sem dependências, com as marcas do cargo dela — chegou ao
+    `xtask` das invariantes, que respondeu por elas;
+  - a leitura reprova a raiz do documento fora da coluna zero, em todo
+    workflow e ação, e o canário sem o `on:` na coluna zero: o canário
+    recuado, com um `push:`, passava;
+  - a leitura reprova o texto entre aspas duplas com uma `\`: o `\n` é uma
+    quebra de linha para o YAML, e a chave de restauração
+    `"lints-${{ … }}-\nlints-"` dava ao `actions/cache` uma segunda chave
+    sem o canal;
+  - a chave de todo cache tem a expressão do canal entre as que o leitor de
+    modelos do GitHub acha no valor que o YAML lê: `${{ '${{
+    steps.compilador.outputs.canal }}' }}` tinha o texto, e é um literal;
+  - o canário tem o `cache-mode: none` na raiz, e nenhum job dele o troca
+    — o GitHub aceitou a chave no run 5; a documentação diz que o modo vale
+    pelo token de cache do job, e isso não se rodou —, e publica só a pasta
+    dos registros;
+  - o `on:` da CI tem o `push`, sem filtro: a CI só no disparo manual
+    passava;
+  - a regra das variáveis do cargo na CI lê o `.yml` e o `.yaml` de
+    `.github/` em qualquer caixa;
+  - os testes que rodam a ação instalam o toolchain oficial uma vez só,
+    antes da primeira ação: no canário, os oito o instalavam ao mesmo tempo
+    no mesmo `RUSTUP_HOME`, e reprovavam com os erros do rustup — o mesmo
+    pedido, em oito processos num `RUSTUP_HOME` novo, reprovou sete vezes em
+    oito, em cada uma de duas rodadas; e o caso do toolchain oficial no PATH
+    tomava o `bin` do cargo que compilou o teste, o do candidato no canário;
+  - os falsos positivos das regras do lote A16 reprovam de propósito, nos
+    testes, e a mensagem diz a linha ou o caminho;
+  - o texto: as frases do lote A16 que os achados desmentem, e os itens do
+    revisor da rodada 9 sobre o lote A16, aqui, no `docs/SEGURANCA.md`, no
+    cabeçalho da ação e no README
+    ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)).
+
+  Fica, com a revisão: o que ficava do lote A16; o `if:` de um job inteiro
+  da CI, que tiraria as invariantes dela como o `on:` sem o `push`, e o
+  `[skip ci]` na mensagem de um commit, que, pela documentação do GitHub,
+  tira os workflows do `push` daquele push; a cópia de um registro para a
+  pasta dos registros do canário, por um glob ou por um nome em pedaços; o
+  `cache-mode` dos workflows oficiais; e os cinco falsos positivos, que
+  falham fechados. O efeito no GitHub do achado alto — o checkout e o cargo
+  do runner, com as marcas montadas no `CARGO_HOME` dele, que o fingerprint
+  de uma dependência do registro leva — e dos três baixos vem da fonte do
+  runner, da documentação e dos leitores de YAML, e não de um run. Dez
+  testes novos no hospedeiro e oito ajustados, e as mutações do lote (*As do
+  lote A17*, no
+  [README](../README.md#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
 
 ### I7
 

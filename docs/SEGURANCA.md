@@ -163,7 +163,12 @@ pontos onde acontece — não num canal paralelo:
   `core` e o `alloc` que as macros da lista chamam, os de verdade (o lote
   A9) — nenhuma dependência direta do kernel com a biblioteca de outro
   nome que o do pacote (o lote A10) —; e o `cargo xtask` que roda as
-  guardas na CI, o de verdade. A raiz da confiança é a definição da CI — os
+  guardas na CI, o compilado da árvore do commit — sem artefato do commit
+  numa pasta `target`, que o cargo tomaria pelo que compilou: desde o lote
+  A17, em qualquer nível, e sem o `workspace` de um pacote, que levava a
+  raiz do workspace e o `target/` dela para outra pasta, por onde um rlib
+  do commit chegou ao `xtask` das invariantes (o A1 do adversário do lote
+  A16). A raiz da confiança é a definição da CI — os
   workflows e as ações —, e quem a protege é a revisão; abaixo dela, a ação
   que confere o compilador recusa, antes de todo `cargo` que compila ou
   roda, um executor ou um apelido do cargo que o trocassem (o lote A9), e,
@@ -171,7 +176,9 @@ pontos onde acontece — não num canal paralelo:
   entrada relativa ou do repositório, as casas do cargo e do rustup dentro
   dele, um `rust-toolchain` fora dos dois oficiais ou com `path`, um
   manifesto com `cargo-features` ou um perfil com `rustflags` ou
-  `codegen-backend`, um arquivo do commit num diretório de saída — e,
+  `codegen-backend`, um arquivo do commit num diretório de saída —
+  desde o lote A17, numa pasta `target` em qualquer nível, e o `workspace`
+  de um pacote — e,
   desde o lote A12, um link no commit ou no caminho de um diretório de
   saída, por onde os arquivos do commit chegavam a um `target` sem a regra
   os ver, e, desde o lote A13, um submódulo no commit ou o que não é pasta
@@ -195,9 +202,13 @@ pontos onde acontece — não num canal paralelo:
   YAML lê como `if:`, reprova —, e o comentário do fim de uma linha sai do
   valor que ela compara; e, desde o lote A13 — com o que o lote A14
   acrescentou, abaixo —, a leitura reprova, no arquivo inteiro, em todo
-  workflow e ação — desde o lote A16, cada `.yml` e `.yaml` de `.github/`
-  que o git lista, pelo caminho como ele é —, as quebras de linha que só
-  o YAML vê e, fora do conteúdo dos blocos, as formas que ela não lê, e os
+  workflow e ação — desde o lote A16, cada `.yml` e `.yaml` de
+  `.github/workflows/` e de `.github/actions/` que o git lista, pelo
+  caminho como ele é —, as quebras de linha que só o YAML vê — pelos
+  caracteres: o escape que o YAML lê num texto entre aspas duplas, o `\n`,
+  ela não via, e o lote A17 o recusa — e, fora do conteúdo dos blocos, as
+  formas que ela não lê — a linha que começa por `#`, ela a toma por
+  comentário, também no conteúdo de um bloco —, e os
   passos da própria ação só têm as chaves que ela lê neles, sem `if:`,
   `continue-on-error:` nem `env:` a mais. Desde o lote A14, a leitura
   reprova também os espaços que o YAML não toma por espaço,
@@ -224,15 +235,25 @@ pontos onde acontece — não num canal paralelo:
   fora dela —; as versões das ações também no canário, que grava no cache
   do ramo, que os jobs da CI restauram; a CI e o canário achados pelo
   nome — a falta de cada um reprova —; os gatilhos do canário numa lista
-  fechada, o agendamento e o disparo manual; o canal na chave de cache
-  pela expressão, lida do passo da ação, que tem o `id: compilador`; e, no
+  fechada, o agendamento e o disparo manual; a expressão do canal na chave
+  de cache, lida do passo da ação, que tem o `id: compilador`; e, no
   passo `conferir`, a linha da leitura uma vez, a da saída por último,
   nenhuma função, apelido nem `enable`, e as linhas de comentário lidas
-  também — num texto em várias linhas, o bash as roda. Essas são as
+  também — num texto em várias linhas, o bash as roda. A rodada 9 achou o
+  que essas regras não viam, e o lote A17 as estendeu: o passo do ambiente
+  da ação recusa o arquivo do commit em toda pasta `target`, em qualquer
+  nível, e o `workspace` de um pacote; a leitura reprova a raiz do
+  documento fora da coluna zero e o texto entre aspas duplas com uma `\`;
+  a chave de todo cache tem a expressão do canal entre as que o leitor de
+  modelos do GitHub acha no valor que o YAML lê — o texto dela num literal
+  de outra expressão não conta —; o `on:` da CI tem o `push`, sem filtro; e
+  o canário tem o `cache-mode: none` na raiz, sem outro num job, e publica
+  só a pasta dos registros. Essas são as
   regras da guarda, uma a
   uma no inventário do README; a definição da CI é a raiz da confiança, e
-  uma mudança que escapa delas — um nome montado em pedaços, um passo
-  depois da ação, o script da ação — é da revisão, e não da guarda. O que
+  uma mudança que escapa delas — um nome montado em pedaços, uma linha que
+  a leitura toma por comentário, um passo depois da ação, o script da ação
+  — é da revisão, e não da guarda. O que
   as guardas de texto do
   `xtask` não fecham — quem escreve no kernel para contorná-las de
   propósito — e a definição da CI ficam com a revisão ([README](../README.md#as-guardas-de-texto-o-que-elas-cobrem)).
