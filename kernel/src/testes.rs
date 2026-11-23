@@ -64383,7 +64383,9 @@ const PARTE_DA_SUITE: Option<&str> = option_env!("DUKE_PARTE_DA_SUITE");
 ///
 /// O anúncio do começo diz a parte e quantos casos ela roda, e o placar do
 /// fim conta os que rodaram: o `xtask` confere os dois contra a parte que
-/// pediu, e um ELF de outra compilação não passa por ali.
+/// pediu, e um ELF de outra compilação não passa por ali. E, antes do
+/// placar, a conta do laço — os casos e os que reprovaram — casa com a de
+/// [`rodar_um_caso`] ([`CASOS_DE_FORA`]), ou a suíte reprova.
 pub fn executar_todos() -> ! {
     let parte = match PARTE_DA_SUITE.map(protocolo::partes::Parte::ler) {
         None => None,
@@ -64492,6 +64494,28 @@ pub fn executar_todos() -> ! {
                 crate::serial_println!("  {:<42} FALHOU -- {}", caso.nome, motivo);
             }
         }
+    }
+
+    // A conta de `rodar_um_caso`, e não a do laço: cada caso que o laço
+    // contou passou por ela, e ela reprovou os mesmos que o laço — ver
+    // [`CASOS_DE_FORA`]. O placar, o código de saída e as linhas de cada
+    // caso vêm todos do laço: um que jogasse fora o resultado dela, não
+    // somasse a falha ou rodasse um caso por fora dela daria o placar
+    // cheio e o código do sucesso.
+    let de_fora = CASOS_DE_FORA.load(SeqCst);
+    let reprovados_de_fora = REPROVADOS_DE_FORA.load(SeqCst);
+    if de_fora != rodou as u64 || reprovados_de_fora != falhas as u64 {
+        crate::serial_println!("-----------------------------------------------------");
+        crate::serial_println!(
+            "  o laco contou {} caso(s) e {} reprovado(s); rodar_um_caso, {} e {}",
+            rodou,
+            falhas,
+            de_fora,
+            reprovados_de_fora
+        );
+        crate::serial_println!("=====================================================");
+        crate::serial_println!();
+        crate::qemu::encerrar(crate::qemu::Resultado::Falha);
     }
 
     // O placar conta os casos que rodaram — a fatia e a cauda, numa parte —,
@@ -65267,15 +65291,43 @@ fn conferir_depois_do_caso() -> Resultado {
 /// ([`suite_o_executor_confere_depois_de_cada_caso`]); a junção, que ela
 /// usa o que a conferência diz, e [`DENTRO_DE_RODAR_UM_CASO`], que o laço
 /// roda o caso por aqui
-/// ([`suite_o_laco_reprova_o_caso_que_a_conferencia_reprova`]).
+/// ([`suite_o_laco_reprova_o_caso_que_a_conferencia_reprova`]). E conta o
+/// caso de fora e o veredito dela ([`CASOS_DE_FORA`]), que o laço confere
+/// contra a conta dele.
 fn rodar_um_caso(f: fn() -> Resultado) -> Resultado {
     CASOS_COMECADOS.fetch_add(1, SeqCst);
-    DENTRO_DE_RODAR_UM_CASO.fetch_add(1, SeqCst);
+    let de_fora = DENTRO_DE_RODAR_UM_CASO.fetch_add(1, SeqCst) == 0;
     let resultado = f();
     DENTRO_DE_RODAR_UM_CASO.fetch_sub(1, SeqCst);
     let devolvido = conferir_depois_do_caso();
-    resultado.and(devolvido)
+    let resultado = resultado.and(devolvido);
+    if de_fora {
+        CASOS_DE_FORA.fetch_add(1, SeqCst);
+        if resultado.is_err() {
+            REPROVADOS_DE_FORA.fetch_add(1, SeqCst);
+        }
+    }
+    resultado
 }
+
+/// Os casos que [`rodar_um_caso`] rodou chamada de fora de outro caso — os
+/// do laço do executor; o que o controle do laço roda por dentro não conta
+/// —, e, em [`REPROVADOS_DE_FORA`], quantos deles ela reprovou: a conta
+/// dela, que o laço confere contra a dele antes do placar
+/// ([`executar_todos`]).
+///
+/// O placar, o código de saída e as linhas de cada caso vêm do laço, e
+/// nenhum controle de dentro da suíte vê o veredito dele: o laço que
+/// jogasse fora o resultado inteiro de `rodar_um_caso` — o caso que falha
+/// dito `ok` e contado como passado — passava nos controles e no `cargo
+/// xtask test` (o que o lote ICACHE-7 deixou de fora; o adversário do
+/// kernel da rodada 9 o confirmou). Com as duas contas ele reprova, e
+/// também o que diz `FALHOU` e não soma a falha, e o laço partido que roda
+/// um caso — a cauda — por fora de `rodar_um_caso`.
+static CASOS_DE_FORA: AtomicU64 = AtomicU64::new(0);
+
+/// Ver [`CASOS_DE_FORA`].
+static REPROVADOS_DE_FORA: AtomicU64 = AtomicU64::new(0);
 
 /// Quantas chamadas de [`rodar_um_caso`] estão com um caso rodando agora:
 /// uma enquanto o laço do executor roda um caso por ela, e duas no caso que
