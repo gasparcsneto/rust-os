@@ -1665,13 +1665,13 @@ pub(crate) fn conferir_o_canal() -> Result<ExitCode, String> {
              chaves do oficial, e no CLAUDE.md; nenhum outro, nenhuma troca no config do cargo nem \
              no xtask — nem um executor, nem um apelido além do oficial, e o config de cada \
              diretório de build na lista —; os workflows oficiais só com as ações permitidas, \
-             conferindo o compilador depois de cada checkout, com o canal na chave de todo cache, \
-             e a ação do compilador com os passos de fora do cargo — o ambiente, o PATH e os \
-             rust-toolchain, o canal fixado, o executor — e o das invariantes, que o job de lints \
-             liga antes de todo outro `cargo`; e o canário, o único que sobrepõe, só no \
-             agendamento e no disparo manual, sem a ação do cache e com o `cache-mode: none`, com \
-             as versões da lista, publicando só a pasta dos registros, e com os comandos do job de \
-             lints",
+             conferindo o compilador depois de cada checkout, com a expressão do canal na chave \
+             de todo cache, e a ação do compilador com os passos de fora do cargo — o ambiente, o \
+             PATH e os rust-toolchain, o canal fixado, o executor — e o das invariantes, que o job \
+             de lints liga antes de todo outro `cargo`; e o canário, o único que sobrepõe, só com \
+             os gatilhos da lista no `on:` da raiz — o agendamento e o disparo manual —, sem a \
+             ação do cache e com o `cache-mode: none`, com as versões da lista, publicando só a \
+             pasta dos registros, e com os comandos do job de lints",
             canal.as_deref().unwrap_or("")
         );
         Ok(ExitCode::SUCCESS)
