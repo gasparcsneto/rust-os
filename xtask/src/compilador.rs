@@ -2868,9 +2868,12 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
             ));
         }
         // O canal na chave pela expressão, e não pelo texto (desde o lote
-        // A16): `${{ 'steps.compilador.outputs.canal' }}` é um texto fixo.
+        // A16): `${{ 'steps.compilador.outputs.canal' }}` é um texto fixo — e,
+        // desde o lote A17, a expressão como o leitor de modelos do GitHub a
+        // acha no valor que o YAML lê, e não o texto contido na linha
+        // ([`o_canal_numa_expressao`]).
         for chave in chaves_de_cache(&linhas) {
-            if !chave.contains(CANAL_NA_CHAVE) {
+            if !o_canal_numa_expressao(&chave) {
                 fora.push(format!(
                     "{nome}: a chave de cache `{chave}` não leva o canal do compilador \
                      (`{CANAL_NA_CHAVE}`)"
@@ -3108,10 +3111,72 @@ fn o_comeco_dos_jobs(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
 /// passos com o mesmo `id` num job.
 const CANAL_NA_CHAVE: &str = "${{ steps.compilador.outputs.canal }}";
 
+/// Uma das expressões de `chave` — o valor que o YAML lê
+/// ([`chaves_de_cache`]) — é [`CANAL_NA_CHAVE`], com as expressões achadas
+/// como o leitor de modelos do GitHub as acha: do `${{` ao primeiro `}}` fora
+/// de um texto entre aspas simples (o `TemplateReader` do runner, que alterna
+/// as aspas a cada `'` — o `''` de dentro de um texto, duas vezes).
+///
+/// # Por quê, desde o lote A17
+///
+/// A regra procurava o texto da expressão na chave, e
+/// `${{ '${{ steps.compilador.outputs.canal }}' }}` o tem: é uma expressão
+/// só, um literal que vale o próprio texto — a chave levava um texto fixo,
+/// como no B2 do adversário do lote A15 (o B3 do adversário do lote A16; o
+/// efeito no GitHub vem da fonte do runner, e não de um run). E o leitor
+/// acha as expressões no valor que o YAML lê: num texto entre aspas
+/// simples, o `''` é uma aspa só, que o leitor alterna uma vez e a linha
+/// crua, duas — `'${{ ''}}${{ steps.compilador.outputs.canal }}'' }}'` tinha
+/// a expressão do canal para a leitura da linha, e um literal para o leitor
+/// (o lote A17 o achou na revisão do patch do adversário).
+fn o_canal_numa_expressao(chave: &str) -> bool {
+    let mut resto = chave;
+    while let Some(i) = resto.find("${{") {
+        let depois = &resto[i + 3..];
+        let b = depois.as_bytes();
+        let mut aspas = false;
+        let mut fim = None;
+        for j in 0..b.len() {
+            if b[j] == b'\'' {
+                aspas = !aspas;
+            } else if !aspas && j > 0 && b[j] == b'}' && b[j - 1] == b'}' {
+                fim = Some(j);
+                break;
+            }
+        }
+        let Some(fim) = fim else {
+            return false;
+        };
+        if format!("${{{{{}}}}}", &depois[..fim - 1]) == CANAL_NA_CHAVE {
+            return true;
+        }
+        resto = &depois[fim + 1..];
+    }
+    false
+}
+
+/// O valor de YAML de uma linha — `valor`, sem o comentário — como o YAML o
+/// lê: o texto entre aspas simples que fecha no fim, sem elas e com o `''`
+/// de dentro como uma aspa; o entre aspas duplas, sem elas — com uma `\`, a
+/// leitura já o recusa ([`escape_entre_aspas_duplas`]) —; e o resto, como
+/// está. Desde o lote A17 ([`o_canal_numa_expressao`]).
+fn valor_do_yaml(valor: &str) -> std::borrow::Cow<'_, str> {
+    match valor.as_bytes().first() {
+        Some(b'\'') if fim_das_aspas(valor) == Some(valor.len()) && valor.len() >= 2 => {
+            std::borrow::Cow::Owned(valor[1..valor.len() - 1].replace("''", "'"))
+        }
+        Some(b'"') if fim_das_aspas(valor) == Some(valor.len()) && valor.len() >= 2 => {
+            std::borrow::Cow::Borrowed(&valor[1..valor.len() - 1])
+        }
+        _ => std::borrow::Cow::Borrowed(valor),
+    }
+}
+
 /// As chaves de cache de um workflow: as de `key:` e as de `restore-keys:`,
-/// numa linha ou num bloco `|` — as linhas mais recuadas que a chave,
-/// mesmo depois de uma vazia.
-fn chaves_de_cache<'a>(linhas: &[Linha<'a>]) -> Vec<&'a str> {
+/// numa linha — o valor como o YAML o lê ([`valor_do_yaml`], desde o lote
+/// A17) — ou num bloco `|` — as linhas mais recuadas que a chave, mesmo
+/// depois de uma vazia.
+fn chaves_de_cache<'a>(linhas: &[Linha<'a>]) -> Vec<std::borrow::Cow<'a, str>> {
     let mut chaves = Vec::new();
     let mut bloco: Option<usize> = None;
     for l in linhas {
@@ -3120,7 +3185,7 @@ fn chaves_de_cache<'a>(linhas: &[Linha<'a>]) -> Vec<&'a str> {
                 continue;
             }
             if l.recuo > recuo {
-                chaves.push(l.texto);
+                chaves.push(std::borrow::Cow::Borrowed(l.texto));
                 continue;
             }
             bloco = None;
@@ -3131,7 +3196,7 @@ fn chaves_de_cache<'a>(linhas: &[Linha<'a>]) -> Vec<&'a str> {
             if valor.starts_with(['|', '>']) {
                 bloco = Some(l.recuo);
             } else {
-                chaves.push(valor);
+                chaves.push(valor_do_yaml(valor));
             }
         }
     }
@@ -9578,9 +9643,16 @@ jobs:
     /// O canal na chave de cache pela expressão (o B2 do adversário do lote
     /// A15): o texto `steps.compilador.outputs.canal` numa expressão
     /// que o devolve — ou fora de uma — passava, e a chave levava um texto
-    /// fixo. Reprova agora, na chave e nas de restauração; e o passo da ação
-    /// sem o `id: compilador`, com o `id` noutro passo, também (o lote A16,
-    /// na revisão). A expressão passa, e os workflows do repositório também.
+    /// fixo. Reprovam agora o texto numa expressão, o texto fora dela e a
+    /// expressão com um padrão, na chave, e o texto numa expressão, na de
+    /// restauração; e o passo da ação sem o `id: compilador`, com o `id`
+    /// noutro passo, também (o lote A16, na revisão). Desde o lote A17 (o B3
+    /// do adversário do lote A16), também o texto da expressão num literal de
+    /// outra, na chave e na de restauração, e a chave entre aspas simples
+    /// cujo `''` a linha crua lia como duas aspas; e as expressões como o
+    /// leitor de modelos do GitHub as acha e o valor como o YAML o lê, pelas
+    /// formas. A expressão passa, também numa chave entre aspas, e os
+    /// workflows do repositório também.
     #[test]
     fn adversario_a15_o_canal_na_chave_pela_expressao() {
         let chave = "          key: testes-${{ steps.compilador.outputs.canal }}-";
@@ -9598,6 +9670,14 @@ jobs:
                 "a expressão com um padrão",
                 "          key: testes-${{ steps.compilador.outputs.canal || 'x' }}-",
             ),
+            (
+                "o texto da expressão num literal de outra (o B3 do lote A16)",
+                "          key: testes-${{ '${{ steps.compilador.outputs.canal }}' }}-",
+            ),
+            (
+                "o texto da expressão num literal com aspas dentro",
+                "          key: testes-${{ 'a''${{ steps.compilador.outputs.canal }}' }}-",
+            ),
         ] {
             let texto = OFICIAL.replacen(chave, novo, 1);
             assert_ne!(texto, OFICIAL, "{rotulo}");
@@ -9607,6 +9687,33 @@ jobs:
                 "{rotulo}: {fora:?}"
             );
         }
+        // O valor como o YAML o lê (o lote A17, na revisão do patch do
+        // adversário): entre aspas simples, o `''` é uma aspa só, e a linha
+        // crua tinha a expressão do canal onde o leitor do GitHub tem um
+        // literal. Reprova; a chave entre aspas, simples ou duplas, com a
+        // expressão, passa.
+        let linha = "          key: testes-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock') }}\n";
+        assert_eq!(OFICIAL.matches(linha).count(), 1);
+        let aninhada = OFICIAL.replacen(
+            linha,
+            "          key: '${{ ''}}${{ steps.compilador.outputs.canal }}'' }}-${{ hashFiles(''**/Cargo.lock'') }}'\n",
+            1,
+        );
+        let fora = um(CI, &aninhada);
+        assert!(
+            fora.len() == 1 && fora[0].contains("não leva o canal"),
+            "{fora:?}"
+        );
+        for passa in [
+            "          key: 'testes-${{ steps.compilador.outputs.canal }}-${{ hashFiles(''**/Cargo.lock'') }}'\n",
+            "          key: \"testes-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock') }}\"\n",
+        ] {
+            assert_eq!(
+                um(CI, &OFICIAL.replacen(linha, passa, 1)),
+                Vec::<String>::new(),
+                "{passa}"
+            );
+        }
         let restauracao = OFICIAL.replacen(
             "            video-${{ steps.compilador.outputs.canal }}-\n",
             "            video-${{ 'steps.compilador.outputs.canal' }}-\n",
@@ -9614,6 +9721,36 @@ jobs:
         );
         assert_ne!(restauracao, OFICIAL);
         assert_eq!(um(CI, &restauracao).len(), 1);
+        let aninhada = OFICIAL.replacen(
+            "            video-${{ steps.compilador.outputs.canal }}-\n",
+            "            video-${{ '${{ steps.compilador.outputs.canal }}' }}-\n",
+            1,
+        );
+        assert_ne!(aninhada, OFICIAL);
+        assert_eq!(um(CI, &aninhada).len(), 1);
+        // As expressões como o leitor de modelos do GitHub as acha.
+        for (chave, tem) in [
+            ("x-${{ steps.compilador.outputs.canal }}-y", true),
+            (
+                "${{ hashFiles('a}}b') }}-${{ steps.compilador.outputs.canal }}",
+                true,
+            ),
+            ("${{ '${{ steps.compilador.outputs.canal }}' }}", false),
+            ("${{ 'b}}${{ steps.compilador.outputs.canal }}' }}", false),
+            ("${{ steps.compilador.outputs.canal", false),
+            ("x-${{ steps.compilador.outputs.canal }}}-y", true),
+        ] {
+            assert_eq!(o_canal_numa_expressao(chave), tem, "{chave}");
+        }
+        // O valor como o YAML o lê.
+        for (valor, lido) in [
+            ("'a''b'", "a'b"),
+            ("\"a'b\"", "a'b"),
+            ("a''b", "a''b"),
+            ("'a", "'a"),
+        ] {
+            assert_eq!(valor_do_yaml(valor), lido, "{valor}");
+        }
         // O `id: compilador` noutro passo, que escreve outro canal na saída
         // dele, e a ação sem o `id` (o lote A16, na revisão): a contagem
         // passava; o passo da ação sem o `id` reprova, uma vez.
