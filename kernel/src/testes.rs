@@ -64713,14 +64713,24 @@ fn anotar_as_pessoas(quando: &str) {
 /// O executor confere a política em vigor que cada caso devolve
 /// ([`estado_da_suite_devolvido`]): cada mudança, uma de cada vez — um papel
 /// a mais, as permissões de um papel, a taxa de um papel, o papel da
-/// serial, os apertos, o local, o papel de um serviço, o remoto e um
-/// quórum —, reprova, e o executor põe de volta a do começo. O
+/// serial, os apertos, o local, o papel de um serviço, o remoto, um
+/// quórum, e, de dentro de um papel, os recursos, os processos, as cotas de
+/// mensagens, a cota do armazém, os editores, os domínios e as inclusões
+/// —, reprova, e o executor põe de volta a do começo. O
 /// controle positivo da conferência que o adversário do lote ICACHE-3 pediu
-/// (o achado 2). As oito mudanças que não mudam o número de papéis são a
+/// (o achado 2). As mudanças que não mudam o número de papéis são a
 /// guarda de uma comparação reduzida às contas, que passaria pela primeira;
-/// e as quatro últimas, a de uma comparação reduzida aos campos que as
-/// outras mudam — os papéis, a serial e os apertos —, que passaria por
-/// elas (o achado 5 do adversário da rodada 5).
+/// o local, o serviço, o remoto e o quórum, a de uma comparação reduzida aos
+/// campos que as cinco primeiras mudam — os papéis, a serial e os apertos
+/// —, que passaria por eles (o achado 5 do adversário da rodada 5); e as
+/// sete de dentro de um papel, a de uma comparação que visse de cada papel
+/// só o nome, as permissões escritas nele e a taxa (o achado 4 do
+/// adversário da rodada 6). O
+/// nome de um papel que já existe fica sem mudança própria: ele está em
+/// todas as linhas do papel e nas que o citam, e trocá-lo é reescrever a
+/// política inteira; a comparação de hoje é a `PartialEq` da política, que
+/// o vê. No fim, o controle põe a do começo ele mesmo: uma comparação que
+/// não visse a última mudança a deixaria em vigor para os casos seguintes.
 ///
 /// O controle chama a conferência ele mesmo: prova a função, e não que o
 /// laço do executor a chama depois de cada caso — isso é
@@ -64811,6 +64821,57 @@ fn suite_o_executor_ve_e_devolve_a_politica_em_vigor() -> Resultado {
                 alloc::string::String::from("quorum system.update 3 3")
             })?,
         ),
+        // Os campos de dentro de um papel, um de cada vez: o número de
+        // papéis, as permissões e as linhas de fora do papel ficam como
+        // estão (o achado 4 do adversário da rodada 6).
+        (
+            "os recursos de um papel",
+            com_a_linha(
+                &|l| {
+                    l.starts_with("recurso ")
+                        && l.split_ascii_whitespace().nth(2) == Some("fs.read")
+                },
+                &|l| alloc::format!("{l} /controle-da-suite"),
+            )?,
+        ),
+        (
+            "os processos de um papel",
+            com_a_linha(&|l| l.starts_with("processos "), &mais_um)?,
+        ),
+        (
+            "as cotas de mensagens de um papel",
+            com_a_linha(&|l| l.starts_with("mensagens "), &mais_um)?,
+        ),
+        (
+            "a cota do armazem de um papel",
+            com_a_linha(&|l| l.starts_with("armazem "), &mais_um)?,
+        ),
+        (
+            "os editores de um papel",
+            com_a_linha(&|l| l.starts_with("editores "), &|l| {
+                alloc::format!("{l} controle-da-suite")
+            })?,
+        ),
+        (
+            "os dominios de um papel",
+            com_a_linha(&|l| l.starts_with("dominios "), &|l| {
+                alloc::format!("{l} controle-da-suite")
+            })?,
+        ),
+        // A inclusão vai num papel que não inclui nada e não é o incluído:
+        // o `observador` incluindo a si mesmo é um ciclo, que a leitura
+        // recusa.
+        (
+            "as inclusoes de um papel",
+            com_a_linha(
+                &|l| {
+                    l.starts_with("papel ")
+                        && !l.contains(" @")
+                        && l.split_ascii_whitespace().nth(1) != Some("observador")
+                },
+                &|l| alloc::format!("{l} @observador"),
+            )?,
+        ),
     ];
     let esperado: Resultado = Err("o caso deixou a politica em vigor mudada");
     let mut falhas: alloc::vec::Vec<&'static str> = alloc::vec::Vec::new();
@@ -64831,6 +64892,9 @@ fn suite_o_executor_ve_e_devolve_a_politica_em_vigor() -> Resultado {
             falhas.push(qual);
         }
     }
+    // A do começo, posta pelo controle: uma comparação que não visse a
+    // última mudança a deixaria em vigor para os casos seguintes.
+    crate::autorizacao::trocar_politica(comeco);
     let o_da_suite = estado_da_suite_devolvido();
     if !falhas.is_empty() {
         crate::log_error!("teste", "o executor nao viu, ou nao devolveu: {:?}", falhas);
@@ -65073,25 +65137,36 @@ fn suite_o_executor_confere_depois_de_cada_caso() -> Resultado {
 /// A impressão do registro vê cada campo dele, e o executor o devolve: o
 /// papel, a chave, o nome e a origem de um agente; uma lápide; a ordem dos
 /// administradores, e o nome, o papel, a revogação e a assinatura de um
-/// deles; as fontes de hora e os editores — cada um mudado e devolvido antes
+/// deles; as fontes de hora e os editores; e, um nível abaixo, a chave de um
+/// administrador, a chave e o nome de um editor, o conteúdo das fontes de
+/// hora e o de uma lápide — cada um mudado e devolvido antes
 /// do seguinte. O controle de antes só registra um administrador — a conta
 /// deles muda —, e uma impressão reduzida às contas passaria nele (o achado
 /// 4 do adversário do lote ICACHE-3). As cinco mudanças do lote ICACHE-4 —
 /// o papel de um agente, a lápide, a ordem, as fontes e os editores —
 /// deixavam passar uma impressão reduzida aos campos que elas mudam; as
-/// outras sete são a guarda dela (o achado 5 do adversário da rodada 5).
+/// sete seguintes são a guarda dela (o achado 5 do adversário da rodada 5).
+/// E essas doze deixavam passar uma impressão sem a chave dos
+/// administradores — a ordem também muda os nomes —, com só a conta dos
+/// editores e das lápides e só o "tem ou não tem" das fontes; as cinco
+/// últimas são a guarda dela (o achado 4 do adversário da rodada 6).
 ///
 /// Cada mudança mexe só no campo dela: a de um agente troca o registro de
 /// agentes por um igual com só aquele campo mudado
-/// (`identidade::restaurar_agentes`); a do nome, do papel e da assinatura
-/// de um administrador, o grupo por um igual
+/// (`identidade::restaurar_agentes`); a da chave, do nome, do papel e da
+/// assinatura de um administrador, o grupo por um igual
 /// (`identidade::substituir_administradores_de_teste`), e o grupo trocado
-/// por ele mesmo não muda a impressão — o controle o confere antes; e a
-/// revogação põe a lápide do primeiro e a esquece logo depois: a marca dele
-/// fica, e a lista das lápides volta a ser a do começo, vazia — o controle
-/// também o confere. A lápide anula as mensagens vivas da credencial, como
-/// em `persistencia: a lapide vence a imagem`; a suíte não tem nenhuma de um
-/// administrador da imagem.
+/// por ele mesmo não muda a impressão — o controle o confere antes; a de um
+/// editor, a lista dos editores da imagem por uma igual
+/// (`identidade::trocar_editores_de_teste`); a das fontes, o registro da
+/// imagem por um refeito pelo texto com as mesmas fontes e outra incerteza
+/// — e refeito com a de antes ele sai igual ao da imagem, o que confere o
+/// texto —; a revogação põe a lápide do primeiro e a esquece logo depois: a
+/// marca dele fica, e a lista das lápides volta a ser a do começo, vazia —
+/// o controle também o confere —; e o conteúdo de uma lápide troca uma pela
+/// outra, e confere contra o registro com a primeira. A lápide anula as
+/// mensagens vivas da credencial, como em `persistencia: a lapide vence a
+/// imagem`; a suíte não tem nenhuma de um administrador da imagem.
 ///
 /// O controle chama a conferência ele mesmo: prova a função, e não que o
 /// laço do executor a chama depois de cada caso — isso é
@@ -65113,29 +65188,35 @@ fn suite_a_impressao_do_registro_ve_cada_campo() -> Resultado {
     }
     let grupo = crate::identidade::grupo_de_administradores();
     let primeiro = grupo.first().ok_or("a imagem nao tem administrador")?;
-    // O grupo com o primeiro administrador trocado pelo nome, o papel e a
-    // assinatura dados, e os outros como estão.
-    let com_o_primeiro = |nome: &str, papel: &str, assinatura: Option<[u8; 32]>| {
-        let membros: alloc::vec::Vec<MembroDeTeste> = grupo
-            .iter()
-            .enumerate()
-            .map(|(i, a)| {
-                if i == 0 {
-                    (a.chave, nome, papel, assinatura)
-                } else {
-                    (
-                        a.chave,
-                        a.nome.as_str(),
-                        a.papel.as_deref().unwrap_or(""),
-                        a.assinatura,
-                    )
-                }
-            })
-            .collect();
-        crate::identidade::substituir_administradores_de_teste(&membros);
-    };
+    // O grupo com o primeiro administrador trocado pela chave, o nome, o
+    // papel e a assinatura dados, e os outros como estão.
+    let com_o_primeiro =
+        |chave: [u8; 32], nome: &str, papel: &str, assinatura: Option<[u8; 32]>| {
+            let membros: alloc::vec::Vec<MembroDeTeste> = grupo
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    if i == 0 {
+                        (chave, nome, papel, assinatura)
+                    } else {
+                        (
+                            a.chave,
+                            a.nome.as_str(),
+                            a.papel.as_deref().unwrap_or(""),
+                            a.assinatura,
+                        )
+                    }
+                })
+                .collect();
+            crate::identidade::substituir_administradores_de_teste(&membros);
+        };
     let papel_do_primeiro = primeiro.papel.as_deref().unwrap_or("");
-    com_o_primeiro(&primeiro.nome, papel_do_primeiro, primeiro.assinatura);
+    com_o_primeiro(
+        primeiro.chave,
+        &primeiro.nome,
+        papel_do_primeiro,
+        primeiro.assinatura,
+    );
     let o_grupo_por_ele_mesmo = crate::identidade::impressao_do_registro_de_teste() == comeco;
     registro_da_imagem();
     if !o_grupo_por_ele_mesmo {
@@ -65147,6 +65228,51 @@ fn suite_a_impressao_do_registro_ve_cada_campo() -> Resultado {
         mudar(&mut lista[0]);
         crate::identidade::restaurar_agentes(&lista);
     };
+    // Os editores da imagem — a troca devolve os de antes, e eles voltam
+    // logo —, e a lista deles com o primeiro mudado por `mudar`.
+    let editores = crate::identidade::trocar_editores_de_teste(alloc::vec::Vec::new());
+    let _ = crate::identidade::trocar_editores_de_teste(editores.clone());
+    if editores.is_empty() {
+        return Err("a imagem nao tem editor");
+    }
+    let com_o_editor = |mudar: &dyn Fn(&mut crate::identidade::Editor)| {
+        let mut lista = editores.clone();
+        mudar(&mut lista[0]);
+        let _ = crate::identidade::trocar_editores_de_teste(lista);
+    };
+    // O registro de fontes de hora da imagem, refeito pelo texto com as
+    // mesmas fontes, o quórum `q` e a incerteza dada. O quórum não sai do
+    // registro: o que o refaz igual é o dele — e refazê-lo igual confere o
+    // texto. A outra incerteza muda o conteúdo, e não as fontes.
+    let fontes = crate::identidade::fontes_de_hora().ok_or("a imagem nao tem fontes de hora")?;
+    let refeito = |q: u64, incerteza_s: u64| -> Option<hora::registro::Registro> {
+        let mut texto = alloc::string::String::new();
+        for f in fontes.fontes() {
+            texto.push_str(&alloc::format!(
+                "fonte {} {} {}{}\n",
+                f.nome(),
+                f.destino(),
+                hora::registro::PREFIXO_DA_CHAVE,
+                sigilo::hex(f.chave())
+            ));
+        }
+        let salto_s = fontes.parametros().salto_maximo_ms / 1000;
+        texto.push_str(&alloc::format!(
+            "quorum {q}\nsalto {salto_s}\nincerteza {incerteza_s}\n"
+        ));
+        hora::registro::Registro::ler(&texto).ok()
+    };
+    let incerteza_s = fontes.parametros().teto_da_incerteza_ms / 1000;
+    let quorum = (hora::registro::MENOR_QUORUM..=hora::registro::MAIS_FONTES as u64)
+        .find(|&q| refeito(q, incerteza_s) == Some(*fontes))
+        .ok_or("o registro de fontes de hora da imagem nao se refaz pelo texto")?;
+    let outra_incerteza = if incerteza_s < hora::registro::MAIOR_INCERTEZA_S {
+        incerteza_s + 1
+    } else {
+        incerteza_s - 1
+    };
+    let outras_fontes = refeito(quorum, outra_incerteza)
+        .ok_or("as fontes de hora mudadas pelo controle nao se leem")?;
     let esperado: Resultado = Err("o caso deixou o registro de identidade mudado");
     let mut falhas: alloc::vec::Vec<&'static str> = alloc::vec::Vec::new();
     let mut conferir = |qual: &'static str, mudar: &dyn Fn()| {
@@ -65205,20 +65331,26 @@ fn suite_a_impressao_do_registro_ve_cada_campo() -> Resultado {
     });
     conferir("o nome de um administrador", &|| {
         com_o_primeiro(
+            primeiro.chave,
             "administrador-de-controle",
             papel_do_primeiro,
             primeiro.assinatura,
         );
     });
     conferir("o papel de um administrador", &|| {
-        com_o_primeiro(&primeiro.nome, "papel-de-controle", primeiro.assinatura);
+        com_o_primeiro(
+            primeiro.chave,
+            &primeiro.nome,
+            "papel-de-controle",
+            primeiro.assinatura,
+        );
     });
     conferir("a assinatura de um administrador", &|| {
         let outra = match primeiro.assinatura {
             Some(_) => None,
             None => Some([0x5a; 32]),
         };
-        com_o_primeiro(&primeiro.nome, papel_do_primeiro, outra);
+        com_o_primeiro(primeiro.chave, &primeiro.nome, papel_do_primeiro, outra);
     });
     conferir("a revogacao de um administrador", &|| {
         crate::identidade::aplicar_lapide(&primeiro.chave);
@@ -65230,6 +65362,45 @@ fn suite_a_impressao_do_registro_ve_cada_campo() -> Resultado {
     conferir("os editores", &|| {
         let _ = crate::identidade::trocar_editores_de_teste(alloc::vec::Vec::new());
     });
+    // Um nível abaixo: um campo de dentro, com as contas e a ordem iguais (o
+    // achado 4 do adversário da rodada 6).
+    conferir("a chave de um administrador", &|| {
+        com_o_primeiro(
+            [0x6b; 32],
+            &primeiro.nome,
+            papel_do_primeiro,
+            primeiro.assinatura,
+        );
+    });
+    conferir("a chave de um editor", &|| {
+        com_o_editor(&|e| e.chave = [0x6b; 32]);
+    });
+    conferir("o nome de um editor", &|| {
+        com_o_editor(&|e| e.nome = alloc::string::String::from("editor-de-controle"));
+    });
+    conferir("o conteudo das fontes de hora", &|| {
+        let _ = crate::identidade::trocar_fontes_de_hora_de_teste(Some(outras_fontes));
+    });
+    // O conteúdo de uma lápide: uma trocada por outra, com a conta igual. A
+    // referência é o registro com a primeira, e não o do começo, sem lápide
+    // nenhuma — contra ele, qualquer lápide muda a conta.
+    crate::identidade::aplicar_lapide(&[0x5a; 32]);
+    let com_uma = crate::identidade::impressao_do_registro_de_teste();
+    crate::identidade::esquecer_lapides_de_teste();
+    crate::identidade::aplicar_lapide(&[0xa5; 32]);
+    let mudou = crate::identidade::impressao_do_registro_de_teste() != com_uma;
+    let visto = estado_da_suite_devolvido();
+    let devolvido = crate::identidade::impressao_do_registro_de_teste() == comeco;
+    if !mudou || visto != esperado || !devolvido {
+        crate::log_error!(
+            "teste",
+            "o conteudo de uma lapide: mudou {}, visto {:?}, devolvido {}",
+            mudou,
+            visto,
+            devolvido
+        );
+        falhas.push("o conteudo de uma lapide");
+    }
     let o_da_suite = estado_da_suite_devolvido();
     if !falhas.is_empty() {
         crate::log_error!(
