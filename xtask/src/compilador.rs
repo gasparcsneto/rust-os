@@ -65,7 +65,9 @@
 //!   [`ACOES_OFICIAIS`], não sobrepõem o toolchain — nem, desde o lote A14,
 //!   o escolhem pelo job: nenhum `container:`, o `env:` do workflow e o dos
 //!   jobs numa lista fechada, nenhum `GITHUB_ENV`, e o checkout só do
-//!   commit ([`o_que_o_job_escolhe`]) — e conferem o compilador
+//!   commit ([`o_que_o_job_escolhe`]); e, desde o lote A15, nem os comandos
+//!   do runner que escrevem nele ([`COMANDOS_DO_RUNNER`]) — e conferem o
+//!   compilador
 //!   — a ação `.github/actions/compilador`, num passo sem `if:` nem
 //!   `continue-on-error:`, que, desde o lote A12, a leitura lê inteiro e
 //!   falha fechada ([`linhas_que_o_passo_nao_le`]) — depois de cada
@@ -368,7 +370,19 @@ const COMPILADO_COM: &str = env!("XTASK_RUSTC_COMMIT");
 /// A14, o `GITHUB_ENV`, que põe uma variável no ambiente dos passos
 /// seguintes — num passo antes da ação, no dos passos dela —, por fora da
 /// lista fechada do `env:` dos jobs ([`VARIAVEIS_DOS_JOBS`]).
-const SOBREPOSICOES: [&str; 25] = [
+///
+/// # Os comandos do runner, desde o lote A15
+///
+/// O `GITHUB_ENV` e o `GITHUB_PATH` têm outro nome: os comandos `set-env` e
+/// `add-path`, que o runner aceita na saída de um passo cujo contexto `env`
+/// tem o `ACTIONS_ALLOW_UNSECURE_COMMANDS` — e o contexto `env` de um passo
+/// tem o `env:` dele (o `StepsRunner` e o `SetEnvCommandExtension` do
+/// runner). Com essa linha no `env:` de um passo, um `echo` punha uma
+/// variável — o `BASH_ENV`, o `LD_PRELOAD` — no ambiente de todo passo
+/// seguinte, ou uma pasta na frente do PATH deles (o M1 do adversário do
+/// lote A14). O nome entra aqui; os dois comandos, em
+/// [`COMANDOS_DO_RUNNER`], nas formas que o runner lê.
+const SOBREPOSICOES: [&str; 26] = [
     "RUSTUP_TOOLCHAIN",
     "RUSTUP_HOME",
     "CARGO_HOME",
@@ -393,8 +407,28 @@ const SOBREPOSICOES: [&str; 25] = [
     "rustup toolchain",
     "GITHUB_PATH",
     "GITHUB_ENV",
+    "ACTIONS_ALLOW_UNSECURE_COMMANDS",
     ".cargo/config",
 ];
+
+/// Os comandos do runner que escrevem no ambiente ou no PATH dos passos
+/// seguintes, como o `GITHUB_ENV` e o `GITHUB_PATH` ([`SOBREPOSICOES`]): a
+/// regra os procura nas duas formas que o runner lê na saída de um passo — a
+/// `::set-env …::` e a antiga, `##[set-env …]` — e em qualquer caixa
+/// ([`comando_do_runner`]), nos workflows oficiais, nas ações locais e na
+/// ação do compilador.
+///
+/// # As formas e a caixa, desde o lote A15
+///
+/// O adversário do lote A14 os pôs nas sobreposições como `::set-env` e
+/// `::add-path`. A fonte do runner lê também a forma antiga — o
+/// `ActionCommand.TryParse`, que acha o `##[` em qualquer lugar da linha —,
+/// e compara o nome do comando sem a caixa (os comandos registrados num
+/// conjunto `OrdinalIgnoreCase`): `##[set-env name=BASH_ENV;]…` e
+/// `::SET-ENV name=BASH_ENV::…` escapavam do texto da regra. O comando só
+/// roda com o `ACTIONS_ALLOW_UNSECURE_COMMANDS` no contexto `env` do passo,
+/// e esse nome, as sobreposições o recusam: esta regra é a segunda.
+const COMANDOS_DO_RUNNER: [&str; 2] = ["set-env", "add-path"];
 
 /// As ações que um workflow oficial pode usar: o checkout, o cache, a
 /// publicação de artefatos e a conferência do compilador. Outra — uma que
@@ -1988,6 +2022,20 @@ fn nome_da_acao(valor: &str) -> &str {
     valor.split('@').next().unwrap_or(valor)
 }
 
+/// O comando do runner de [`COMANDOS_DO_RUNNER`] que `texto` cita — depois
+/// do `::` ou do `##[`, comparado sem a caixa —, ou nenhum. A comparação é
+/// pelas maiúsculas do Unicode, e não só as do ASCII: o `ſ` (U+017F) é o `S`
+/// maiúsculo, e uma comparação sem a caixa pode tomá-lo pelo `s`.
+fn comando_do_runner(texto: &str) -> Option<&'static str> {
+    let maiusculo = texto.to_uppercase();
+    COMANDOS_DO_RUNNER.iter().copied().find(|comando| {
+        let comando = comando.to_uppercase();
+        ["::", "##["]
+            .iter()
+            .any(|prefixo| maiusculo.contains(&format!("{prefixo}{comando}")))
+    })
+}
+
 /// A linha usa a ação do compilador: `uses: ./.github/actions/compilador`,
 /// também como a primeira chave de um item (`- uses: …`).
 fn usa_a_acao_do_compilador(l: &Linha<'_>) -> bool {
@@ -2350,6 +2398,15 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
             if let Some(p) = SOBREPOSICOES.iter().find(|p| l.texto.contains(*p)) {
                 fora.push(format!(
                     "{nome}: `{}` — `{p}` sobrepõe o compilador do {TOOLCHAIN_DA_RAIZ}",
+                    l.texto
+                ));
+            }
+            // Os comandos do runner, nas formas que ele lê (desde o lote A15).
+            if let Some(c) = comando_do_runner(l.texto) {
+                fora.push(format!(
+                    "{nome}: `{}` — o comando `{c}` do runner (`::{c}`, `##[{c}`, em qualquer \
+                     caixa) escreve, como o `GITHUB_ENV` e o `GITHUB_PATH`, no ambiente ou no PATH \
+                     dos passos seguintes",
                     l.texto
                 ));
             }
@@ -2761,8 +2818,10 @@ fn forma_da_acao(linhas: &[Linha<'_>]) -> (Vec<String>, Vec<(String, usize)>) {
 /// ([`DIRETORIOS_DOS_BUILDS`]); no do executor, as formas dos rustflags de
 /// [`FORMAS_DOS_RUSTFLAGS`] e as tabelas de [`TABELAS_DO_CONFIG`]; a entrada
 /// `invariantes`, e o passo das invariantes só com ela, no toolchain fixado
-/// pelo canal; e a ação não escreve no ambiente dos passos seguintes — o
-/// `GITHUB_ENV`, o `GITHUB_PATH` —, que nenhuma regra dos workflows lê nela.
+/// pelo canal; e nenhuma linha dela cita o `GITHUB_ENV` nem o `GITHUB_PATH`
+/// — nem, desde o lote A15, os comandos de [`COMANDOS_DO_RUNNER`], nas
+/// formas que o runner lê ([`comando_do_runner`]) —, que escrevem no
+/// ambiente dos passos seguintes, e que nenhuma regra dos workflows lê nela.
 ///
 /// # Por quê, desde o lote A9
 ///
@@ -2908,10 +2967,16 @@ fn conferir_a_acao(texto: &str) -> Vec<String> {
         ));
     }
     for l in &linhas {
-        if l.texto.contains("GITHUB_ENV") || l.texto.contains("GITHUB_PATH") {
+        // Desde o lote A15, também os comandos do runner que escrevem nele,
+        // nas formas que ele lê ([`comando_do_runner`]).
+        if l.texto.contains("GITHUB_ENV")
+            || l.texto.contains("GITHUB_PATH")
+            || comando_do_runner(l.texto).is_some()
+        {
             fora.push(format!(
-                "{ACAO_DO_COMPILADOR}: `{}` — a ação do compilador não escreve no ambiente dos \
-                 passos seguintes",
+                "{ACAO_DO_COMPILADOR}: `{}` — a ação do compilador não cita o `GITHUB_ENV`, o \
+                 `GITHUB_PATH` nem os comandos `set-env` e `add-path` do runner, que escrevem no \
+                 ambiente dos passos seguintes",
                 l.texto
             ));
         }
@@ -6593,6 +6658,144 @@ jobs:
         ] {
             assert!(marcadores_de_documento(&linhas_de_codigo(texto)).is_empty());
         }
+    }
+
+    /// Os comandos do runner, o `GITHUB_ENV` e o `GITHUB_PATH` por outro nome
+    /// (o M1 do adversário do lote A14): o `ACTIONS_ALLOW_UNSECURE_COMMANDS`
+    /// no `env:` de um passo — antes da ação, ou depois dela —, e o
+    /// `::set-env` e o `::add-path` num `run:`, punham uma variável ou uma
+    /// pasta do PATH no ambiente de todo passo seguinte, por fora da lista
+    /// fechada do `env:` dos jobs, e passavam. Cada um reprova, com a linha,
+    /// também numa ação local — e, na revisão do lote A15, também nas formas
+    /// que o runner lê e o texto do patch não via: a antiga (`##[set-env …]`)
+    /// e outra caixa, também a do `ſ` —; e, na ação do compilador, os dois
+    /// comandos, em toda forma. Os outros comandos (`::set-output`,
+    /// `::add-mask`, `::error`) e o nome sem o prefixo passam, e os workflows
+    /// do repositório também.
+    #[test]
+    fn adversario_a14_os_comandos_do_runner_sao_o_github_env_por_outro_nome() {
+        let checkout = "      - uses: actions/checkout@v4\n";
+        assert_eq!(OFICIAL.matches(checkout).count(), 1);
+        let fim = "        run: cargo xtask test\n";
+        assert_eq!(OFICIAL.matches(fim).count(), 1);
+        let set_env = "o comando `set-env` do runner";
+        let add_path = "o comando `add-path` do runner";
+        let antes = OFICIAL.replacen(
+            checkout,
+            &format!(
+                "{checkout}      - env:\n          ACTIONS_ALLOW_UNSECURE_COMMANDS: true\n        \
+                 run: echo \"::set-env name=BASH_ENV::./x.sh\"\n"
+            ),
+            1,
+        );
+        // Um passo depois da ação, com a linha no bloco do `run:` — num
+        // escalar simples, o ` #` começaria um comentário do YAML.
+        let depois = |linha: &str| format!("{OFICIAL}      - run: |\n          {linha}\n");
+        let casos: Vec<(&str, String, &str)> = vec![
+            (
+                "o env de um passo antes da ação",
+                antes.clone(),
+                "`ACTIONS_ALLOW_UNSECURE_COMMANDS: true` — `ACTIONS_ALLOW_UNSECURE_COMMANDS` sobrepõe",
+            ),
+            ("o set-env antes da ação", antes, set_env),
+            (
+                "o env de um passo depois da ação",
+                OFICIAL.replacen(
+                    fim,
+                    &format!(
+                        "{fim}        env:\n          ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'\n"
+                    ),
+                    1,
+                ),
+                "`ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'` — `ACTIONS_ALLOW_UNSECURE_COMMANDS` sobrepõe",
+            ),
+            (
+                "o add-path num run",
+                depois("echo \"::add-path::/tmp/ferramentas\""),
+                add_path,
+            ),
+            (
+                "o set-env na forma antiga",
+                depois("echo \"##[set-env name=BASH_ENV;]./x.sh\""),
+                set_env,
+            ),
+            (
+                "o add-path na forma antiga, no meio da linha",
+                depois("echo \"x ##[add-path]/tmp/ferramentas\""),
+                add_path,
+            ),
+            (
+                "o set-env em maiúsculas",
+                depois("echo \"::SET-ENV name=BASH_ENV::./x.sh\""),
+                set_env,
+            ),
+            (
+                "o add-path em outra caixa",
+                depois("echo \"::Add-Path::/tmp/ferramentas\""),
+                add_path,
+            ),
+            (
+                "o set-env com o ſ",
+                depois("echo \"::\u{17f}et-env name=BASH_ENV::./x.sh\""),
+                set_env,
+            ),
+        ];
+        let mut cegos = Vec::new();
+        for (rotulo, texto, esperado) in &casos {
+            assert_ne!(texto, OFICIAL, "{rotulo}");
+            let fora = um(CI, texto);
+            if !fora.iter().any(|f| f.contains(*esperado)) {
+                cegos.push(format!("{rotulo}: {fora:#?}"));
+            }
+        }
+        assert!(cegos.is_empty(), "{cegos:#?}");
+        // Passam: os outros comandos do runner, e o nome sem o prefixo.
+        for linha in [
+            "echo \"::set-output name=x::y\"",
+            "echo \"::add-mask::x\"",
+            "echo \"::error::o set-env e o add-path estão desligados\"",
+        ] {
+            assert_eq!(um(CI, &depois(linha)), Vec::<String>::new(), "{linha}");
+        }
+        // Numa ação local, as mesmas regras.
+        let local = "runs:\n  using: composite\n  steps:\n    - run: echo \"::set-env name=X::y\"\n      \
+                     shell: bash\n      env:\n        ACTIONS_ALLOW_UNSECURE_COMMANDS: true\n";
+        let fora = um(".github/actions/outra/action.yml", local);
+        for esperado in [set_env, "`ACTIONS_ALLOW_UNSECURE_COMMANDS` sobrepõe"] {
+            assert!(
+                fora.iter().any(|f| f.contains(esperado)),
+                "{esperado}: {fora:#?}"
+            );
+        }
+        // Na ação do compilador, os dois comandos, em toda forma.
+        let ultima = "        echo \"canal=$canal\" >> \"$GITHUB_OUTPUT\"\n";
+        assert_eq!(ACAO.matches(ultima).count(), 1);
+        for comando in [
+            "echo \"::set-env name=BASH_ENV::x\"",
+            "echo \"::add-path::/tmp/x\"",
+            "echo \"##[set-env name=BASH_ENV;]x\"",
+            "echo \"::ADD-PATH::/tmp/x\"",
+        ] {
+            let acao = ACAO.replacen(ultima, &format!("{ultima}        {comando}\n"), 1);
+            let fora = conferir_a_acao(&acao);
+            assert!(
+                fora.iter().any(|f| f.contains(
+                    "a ação do compilador não cita o `GITHUB_ENV`, o `GITHUB_PATH` nem os comandos"
+                )),
+                "{comando}: {fora:#?}"
+            );
+        }
+        // Os workflows do repositório passam.
+        for (nome, texto) in [
+            (CI, include_str!("../../.github/workflows/ci.yml")),
+            (
+                ".github/workflows/rede-principal.yml",
+                include_str!("../../.github/workflows/rede-principal.yml"),
+            ),
+        ] {
+            assert_eq!(um(nome, texto), Vec::<String>::new(), "{nome}");
+        }
+        assert_eq!(conferir_a_acao(ACAO), Vec::<String>::new());
     }
 
     /// O passo da ação como o texto de um bloco (no lote A13, o M2 do
