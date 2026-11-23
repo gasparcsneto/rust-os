@@ -19481,7 +19481,7 @@ parte 2/3, com 53,5.
 A CI 548 (`3991a87`, o lote A16) passou verde, 48 de 48, na primeira
 tentativa, em 73,2 minutos e 1135 de máquina. As regras novas do lote — a
 leitura pelo caminho como o git o tem, as versões e os gatilhos do
-canário, a CI e o canário pelo nome, o canal na chave pela expressão e o
+canário, a CI e o canário pelo nome, o canal na chave de cache e o
 passo da conferência lido em toda linha — passaram contra os workflows de
 verdade: no job de lints, a ação com as invariantes levou 61 s, e nos
 outros 47 jobs, de 15 a 23 s. O ARM em release, 1068 de 1068. O holdover
@@ -19509,14 +19509,31 @@ atrás dessa falha, um deles tomava o cargo do candidato pelo
 
 A CI 550 (`9704b45`, o lote ICACHE-8) passou verde, 48 de 48, na primeira
 tentativa, em 79,8 minutos e 1158 de máquina. A conferência nova das duas
-contas do laço rodou no fim de toda suíte e passou em todas: as seis partes
-de depuração, os dois `resto`, o release das duas arquiteturas, os quatro
-jobs do virtio-gpu e os dois do iniciador do ARM, que o lote não tinha
-rodado — o ARM em release, 1068 de 1068. O holdover da bancada de tempo, na
-parte 3/3: o x86 a -128 ppm (2057 s em 2057) e o ARM a -7 ppm (2056 s em
-2056), os dois dentro da guarda. O último job foi o dos fluxos entre
-dispositivos (mesma arquitetura), que esperou 44,0 minutos na fila e rodou
-30,9; o maior, a persistência do x86, parte 1/3, com 51,1.
+contas do laço rodou no fim de toda suíte e passou nas catorze: as seis
+partes de depuração, o release das duas arquiteturas, os quatro jobs do
+virtio-gpu e os dois do iniciador do ARM, que o lote não tinha rodado — o
+ARM em release, 1068 de 1068. Os dois `resto` não rodam a suíte: as
+fumaças, as imagens ELF e o iniciador do x86, com o kernel de produção. O
+holdover da bancada de tempo, na parte 3/3: o x86 a -128 ppm (2057 s em
+2057) e o ARM a -7 ppm (2056 s em 2056), os dois dentro da guarda. O
+último job foi o dos fluxos entre dispositivos (mesma arquitetura), que
+esperou 44,0 minutos na fila e rodou 30,9; o maior, a persistência do x86,
+parte 1/3, com 51,1.
+
+A CI 551 (`ab6db86`, o lote A17) passou verde, 48 de 48, na primeira
+tentativa, em 66,5 minutos e 1104 de máquina. As regras novas do lote — a
+pasta `target` em qualquer nível e o `workspace` de um pacote, a raiz na
+coluna zero, o escape entre aspas duplas, o canal numa expressão, o
+`cache-mode: none` do canário, o `push` da CI e a publicação do canário —
+passaram contra os workflows de verdade: no job de lints, a ação com as
+invariantes levou 74 s, e nos outros 47 jobs, de 14 a 23 s. O ARM em
+release, 1068 de 1068. O holdover da bancada de tempo, na parte 3/3: o x86
+a -136 ppm (2057 s em 2057) e o ARM a -9 ppm (2056 s em 2056), os dois
+dentro da guarda. O último job foi o do iniciador do ARM, parte 2/2, que
+esperou 23,3 minutos na fila e rodou 42,1; o maior, a bancada de tempo do
+ARM, parte 3/3, com 47,7. O canário disparado no mesmo commit passou
+verde, em 20 minutos: o passo dos testes, que reprovava no run 5, passou
+com a instalação do oficial uma vez só.
 
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na
