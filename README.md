@@ -19450,6 +19450,17 @@ toolchain oficial, que no canário não está instalado antes deles, e,
 atrás dessa falha, um deles tomava o cargo do candidato pelo
 `env!("CARGO")`.
 
+A CI 550 (`9704b45`, o lote ICACHE-8) passou verde, 48 de 48, na primeira
+tentativa, em 79,8 minutos e 1158 de máquina. A conferência nova das duas
+contas do laço rodou no fim de toda suíte e passou em todas: as seis partes
+de depuração, os dois `resto`, o release das duas arquiteturas, os quatro
+jobs do virtio-gpu e os dois do iniciador do ARM, que o lote não tinha
+rodado — o ARM em release, 1068 de 1068. O holdover da bancada de tempo, na
+parte 3/3: o x86 a -128 ppm (2057 s em 2057) e o ARM a -7 ppm (2056 s em
+2056), os dois dentro da guarda. O último job foi o dos fluxos entre
+dispositivos (mesma arquitetura), que esperou 44,0 minutos na fila e rodou
+30,9; o maior, a persistência do x86, parte 1/3, com 51,1.
+
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na
 508 e 58 na 509 —, e o que sobra até o piso é a ordem da fila, que não se
