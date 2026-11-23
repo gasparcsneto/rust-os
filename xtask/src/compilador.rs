@@ -2098,6 +2098,19 @@ fn sem_comentario(valor: &str) -> &str {
 /// YAML lê como texto. A leitura do passo da ação já falhava fechada (o lote
 /// A12); esta é a mesma regra no arquivo inteiro (o M3 do adversário do lote
 /// A12).
+///
+/// # O escape num texto entre aspas duplas, desde o lote A17
+///
+/// A regra recusava o escape na chave, e não no valor: num texto entre aspas
+/// duplas, o YAML lê o `\n` como uma quebra de linha e o `\x52` como um `R`,
+/// e a leitura por linhas lê as letras. A chave de restauração
+/// `"lints-${{ steps.compilador.outputs.canal }}-\nlints-"` tinha o canal
+/// para a regra das chaves de cache, e são duas para o `actions/cache` — a
+/// segunda, sem o canal, restaura o cache de qualquer compilador (o B2 do
+/// adversário do lote A16; o PyYAML e o Psych leem as duas). O texto entre
+/// aspas duplas com uma `\`, no valor de uma chave ou num item, reprova
+/// ([`escape_entre_aspas_duplas`]); o entre aspas simples, que não tem
+/// escape, e o sem `\`, passam.
 fn forma_que_a_leitura_nao_le(texto: &str) -> Option<&'static str> {
     let mut corpo = texto;
     let mut traco = false;
@@ -2124,7 +2137,9 @@ fn forma_que_a_leitura_nao_le(texto: &str) -> Option<&'static str> {
         Some(b'"' | b'\'') => {
             return match fim_das_aspas(corpo) {
                 None => Some("um texto entre aspas que não fecha na linha"),
-                Some(fim) if sem_comentario(corpo[fim..].trim()).is_empty() => None,
+                Some(fim) if sem_comentario(corpo[fim..].trim()).is_empty() => {
+                    escape_entre_aspas_duplas(corpo).then_some(ESCAPE_ENTRE_ASPAS)
+                }
                 Some(_) => Some("uma chave entre aspas"),
             };
         }
@@ -2154,8 +2169,10 @@ fn forma_que_a_leitura_nao_le(texto: &str) -> Option<&'static str> {
     match v.first() {
         None => None,
         Some(b'|' | b'>') if bloco(valor) => None,
-        Some(b'"' | b'\'') => (fim_das_aspas(valor) != Some(valor.len()))
-            .then_some("um texto entre aspas que não fecha na linha"),
+        Some(b'"' | b'\'') if fim_das_aspas(valor) != Some(valor.len()) => {
+            Some("um texto entre aspas que não fecha na linha")
+        }
+        Some(b'"' | b'\'') => escape_entre_aspas_duplas(valor).then_some(ESCAPE_ENTRE_ASPAS),
         Some(b'[') => {
             let simples = valor
                 .strip_prefix('[')
@@ -2181,6 +2198,17 @@ fn forma_que_a_leitura_nao_le(texto: &str) -> Option<&'static str> {
         }
         _ => None,
     }
+}
+
+/// A forma do texto entre aspas duplas com um escape
+/// ([`forma_que_a_leitura_nao_le`]).
+const ESCAPE_ENTRE_ASPAS: &str = "um texto entre aspas duplas com um escape (`\\`) — para o YAML, o \
+     `\\n` é uma quebra de linha, e o `\\x52`, um `R`";
+
+/// O texto entre aspas duplas do começo de `valor`, que fecha na linha, tem
+/// uma `\`: o YAML a lê como o começo de um escape. Desde o lote A17.
+fn escape_entre_aspas_duplas(valor: &str) -> bool {
+    valor.starts_with('"') && fim_das_aspas(valor).is_some_and(|fim| valor[..fim].contains('\\'))
 }
 
 /// Os marcadores de documento do YAML de `linhas` — as de código de um
@@ -9500,6 +9528,51 @@ jobs:
                 "{nome}"
             );
         }
+    }
+
+    /// O escape num texto entre aspas duplas (o B2 do adversário do lote
+    /// A16): a chave de restauração do job de lints com o `\n` do YAML levava
+    /// o canal para a regra das chaves de cache e, para o `actions/cache`, uma
+    /// segunda chave sem ele; e o `\x52` escondia um nome das sobreposições.
+    /// Reprovam, uma vez cada, pela forma; o texto entre aspas simples e o
+    /// entre aspas duplas sem `\` passam, e os workflows do repositório
+    /// também.
+    #[test]
+    fn adversario_a16_o_escape_num_texto_entre_aspas_duplas() {
+        let ci = include_str!("../../.github/workflows/ci.yml");
+        let chave = "          restore-keys: lints-${{ steps.compilador.outputs.canal }}-\n";
+        assert_eq!(ci.matches(chave).count(), 1);
+        for (rotulo, novo) in [
+            (
+                "a chave de restauração com o \\n",
+                "          restore-keys: \"lints-${{ steps.compilador.outputs.canal }}-\\nlints-\"\n",
+            ),
+            (
+                "o nome com o \\x52 num run",
+                "          restore-keys: lints-${{ steps.compilador.outputs.canal }}-\n      - run: \"\\x52USTC_WRAPPER=sccache cargo build\"\n",
+            ),
+            (
+                "um item com o \\t",
+                "          restore-keys: lints-${{ steps.compilador.outputs.canal }}-\n          lista:\n            - \"a\\tb\"\n",
+            ),
+        ] {
+            let texto = ci.replacen(chave, novo, 1);
+            assert_ne!(texto, ci, "{rotulo}");
+            let fora = um(CI, &texto);
+            assert_eq!(fora.len(), 1, "{rotulo}: {fora:#?}");
+            assert!(fora[0].contains(ESCAPE_ENTRE_ASPAS), "{rotulo}: {fora:#?}");
+        }
+        for passa in [
+            "          restore-keys: \"lints-${{ steps.compilador.outputs.canal }}-\"\n",
+            "          restore-keys: 'lints-${{ steps.compilador.outputs.canal }}-\\n'\n",
+        ] {
+            assert_eq!(
+                um(CI, &ci.replacen(chave, passa, 1)),
+                Vec::<String>::new(),
+                "{passa}"
+            );
+        }
+        assert_eq!(um(CI, ci), Vec::<String>::new());
     }
 
     /// O canal na chave de cache pela expressão (o B2 do adversário do lote
