@@ -71,8 +71,12 @@
 //!     compilador, nem o executor, nem o apelido, e fica na lista — na
 //!     raiz, só o apelido, como na ação —; o `xtask` não chama o cargo nem
 //!     o rustc com outro toolchain;
-//!   - a leitura de todo workflow e ação — a do compilador inclusive —,
-//!     linha a linha, antes das outras regras: reprovam as quebras de linha
+//!   - a leitura de todo workflow e ação — a do compilador inclusive; desde
+//!     o lote A16, cada `.yml` e `.yaml` de `.github/workflows/` e de
+//!     `.github/actions/` que o git lista, pelo caminho como ele é e com a
+//!     extensão em qualquer caixa ([`arquivos_do_repositorio`],
+//!     [`da_definicao_da_ci`]) —, linha a linha, antes das outras regras:
+//!     reprovam as quebras de linha
 //!     que só o YAML vê e, desde o lote A14, os espaços que ele não toma por
 //!     espaço e os caracteres que ele não imprime
 //!     ([`quebras_que_a_leitura_nao_ve`]); fora do conteúdo dos blocos, as
@@ -1556,9 +1560,7 @@ pub(crate) fn conferir_o_canal() -> Result<ExitCode, String> {
         {
             com_config.push(dir.to_string());
         }
-        if (arquivo.starts_with(".github/workflows/") || arquivo.starts_with(".github/actions/"))
-            && (arquivo.ends_with(".yml") || arquivo.ends_with(".yaml"))
-        {
+        if da_definicao_da_ci(arquivo) {
             workflows.push((arquivo.clone(), ler(arquivo)?));
         }
         if arquivo.starts_with("xtask/src/")
@@ -1622,12 +1624,50 @@ fn citada_no_texto(canal: &str, texto: &str) -> bool {
     texto.contains(&format!("`{canal}`"))
 }
 
+/// Se `arquivo` — um caminho do repositório — é um workflow ou uma ação de
+/// `.github/`, que as regras dos workflows leem: o `.yml` ou o `.yaml` de
+/// `.github/workflows/` ou de `.github/actions/`, com a extensão em
+/// qualquer caixa.
+///
+/// # A extensão em qualquer caixa, desde o lote A16
+///
+/// Um workflow com a extensão em maiúsculas (`publicacao.YML`) ficava fora
+/// da leitura (com o nome que o git cita, o M1 do adversário do lote A15).
+/// Se o GitHub o roda, não se rodou aqui — a documentação dele só diz que
+/// um workflow tem a extensão `.yml` ou `.yaml` —; o arquivo a mais que se
+/// lê passa pelas regras dos workflows, e o que não passa reprova.
+fn da_definicao_da_ci(arquivo: &str) -> bool {
+    let minusculo = arquivo.to_ascii_lowercase();
+    (arquivo.starts_with(".github/workflows/") || arquivo.starts_with(".github/actions/"))
+        && (minusculo.ends_with(".yml") || minusculo.ends_with(".yaml"))
+}
+
 /// Os arquivos do repositório, versionados ou não, menos os ignorados —
-/// pelo git, que já sabe o que é do repositório e o que é de build.
+/// pelo git, que já sabe o que é do repositório e o que é de build —, cada
+/// um pelo caminho como ele é: a lista separada pelo NUL (`-z`).
+///
+/// # O caminho como ele é, desde o lote A16
+///
+/// Sem o `-z`, o git cita o caminho que tem um byte fora do ASCII, uma
+/// aspa, uma barra invertida ou um controle (o `core.quotePath`, ligado por
+/// padrão): `.github/workflows/publicação.yml` saía como
+/// `".github/workflows/publica\303\247\303\243o.yml"`, que não é um arquivo
+/// da árvore, e a lista o pulava em silêncio. Um workflow, ou uma ação
+/// local, com um nome assim não passava por regra nenhuma dos workflows — e
+/// a documentação do GitHub só pede a extensão a um workflow (o M1 do
+/// adversário do lote A15; o efeito no GitHub não foi rodado aqui). O passo
+/// do ambiente da ação já lia o índice com o `-z`. Um caminho que não é
+/// UTF-8 reprova a lista inteira: a leitura daqui não o lê.
 fn arquivos_do_repositorio(raiz: &Path) -> Result<Vec<String>, String> {
     let saida = Command::new("git")
         .current_dir(raiz)
-        .args(["ls-files", "--cached", "--others", "--exclude-standard"])
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
         .output()
         .map_err(|e| format!("o git não rodou: {e}"))?;
     if !saida.status.success() {
@@ -1636,11 +1676,19 @@ fn arquivos_do_repositorio(raiz: &Path) -> Result<Vec<String>, String> {
             String::from_utf8_lossy(&saida.stderr).trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&saida.stdout)
-        .lines()
-        .filter(|a| raiz.join(a).is_file())
-        .map(String::from)
-        .collect())
+    let mut arquivos = Vec::new();
+    for caminho in saida.stdout.split(|&b| b == 0).filter(|c| !c.is_empty()) {
+        let caminho = String::from_utf8(caminho.to_vec()).map_err(|e| {
+            format!(
+                "o git listou um caminho que não é UTF-8, `{}`: a leitura do repositório não o lê",
+                String::from_utf8_lossy(e.as_bytes())
+            )
+        })?;
+        if raiz.join(&caminho).is_file() {
+            arquivos.push(caminho);
+        }
+    }
+    Ok(arquivos)
 }
 
 /// As linhas de uma fonte do `xtask` que chamariam o cargo ou o rustc com
@@ -8105,5 +8153,82 @@ jobs:
                 "      - name: Um texto\n        shell: python3 -I {0}\n        run: |\n          print(\"cargo xtask invariantes\")\n\n      - name: O veredito\n",
             );
         assert_eq!(o_canario_repete_os_lints(ci, &so_no_python, ACAO).len(), 1);
+    }
+
+    /// O nome que o git cita (o M1 do adversário do lote A15): sem o `-z`, o
+    /// `git ls-files` punha entre aspas, com os bytes em octal, o caminho com
+    /// um acento — e com uma aspa ou uma barra invertida —, e a lista dos
+    /// arquivos do repositório o pulava: um workflow `publicação.yml`, no
+    /// índice ou fora dele, não passava por regra nenhuma. A lista tem cada
+    /// caminho como ele é, e o workflow, lido, reprova pelas regras dele; a
+    /// extensão em maiúsculas conta; um caminho que não é UTF-8 reprova a
+    /// lista inteira.
+    #[test]
+    fn adversario_a15_o_nome_que_o_git_cita() {
+        use std::os::unix::ffi::OsStrExt;
+        let arvore =
+            std::env::temp_dir().join(format!("xtask-nomes-citados-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&arvore);
+        std::fs::create_dir_all(arvore.join(".github/workflows")).expect("a pasta");
+        let git = |args: &[&str]| {
+            let feito = Command::new("git")
+                .args(["-c", "init.defaultBranch=x"])
+                .args(args)
+                .current_dir(&arvore)
+                .output()
+                .expect("o git");
+            assert!(feito.status.success(), "git {args:?}: {feito:?}");
+        };
+        git(&["init", "-q"]);
+        let fora = "jobs:\n  publicar:\n    steps:\n      - uses: actions/checkout@main\n";
+        let nomes = [
+            ".github/workflows/publicação.yml",
+            ".github/workflows/aspas\"no nome.yml",
+            ".github/workflows/barra\\invertida.yml",
+            ".github/workflows/ci.yml",
+        ];
+        for nome in nomes {
+            std::fs::write(arvore.join(nome), fora).expect(nome);
+        }
+        git(&["add", "--", "."]);
+        // Um fora do índice, com acento também: o `--others` o lista.
+        std::fs::write(arvore.join(".github/workflows/rascunho-ação.yml"), fora).expect("o novo");
+        let lista = arquivos_do_repositorio(&arvore).expect("a lista");
+        for nome in nomes
+            .iter()
+            .copied()
+            .chain([".github/workflows/rascunho-ação.yml"])
+        {
+            assert!(lista.iter().any(|a| a == nome), "{nome}: {lista:?}");
+            let texto = std::fs::read_to_string(arvore.join(nome)).expect(nome);
+            assert!(
+                um(nome, &texto)
+                    .iter()
+                    .any(|f| f.contains("`actions/checkout@main` — ")),
+                "{nome}"
+            );
+        }
+        assert!(!lista.iter().any(|a| a.starts_with('"')), "{lista:?}");
+        // A lista dos workflows, da lista do repositório: o nome citado e a
+        // extensão em maiúsculas também.
+        for nome in nomes.iter().copied().chain([
+            ".github/workflows/maiusculas.YML",
+            ".github/actions/ação/action.Yaml",
+        ]) {
+            assert!(da_definicao_da_ci(nome), "{nome}");
+        }
+        for nome in [
+            ".github/workflows/notas.md",
+            "docs/ci.yml",
+            ".github/ci.yml",
+        ] {
+            assert!(!da_definicao_da_ci(nome), "{nome}");
+        }
+        // Um caminho que não é UTF-8 reprova a lista.
+        let latino = std::ffi::OsStr::from_bytes(b".github/workflows/publica\xe7\xe3o.yml");
+        std::fs::write(arvore.join(latino), fora).expect("o latino");
+        let erro = arquivos_do_repositorio(&arvore).expect_err("o caminho que não é UTF-8");
+        assert!(erro.contains("não é UTF-8"), "{erro}");
+        let _ = std::fs::remove_dir_all(&arvore);
     }
 }
