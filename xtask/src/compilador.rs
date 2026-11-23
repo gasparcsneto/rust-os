@@ -109,9 +109,13 @@
 //!     com as marcas dele no script, só com as chaves que a leitura lê nele
 //!     ([`linhas_que_o_passo_da_acao_nao_le`]) e, desde o lote A14, o item
 //!     de `runs.steps` com o `id` dele; desde o lote A15, no passo que
-//!     confere o canal, o nome `canal`, fora da expansão, só aparece na
-//!     linha que o lê do arquivo e na que escreve a saída, e só esta cita o
-//!     `GITHUB_OUTPUT` ([`o_canal_do_passo_conferir`]); e nenhuma linha dela
+//!     confere o canal, as duas primeiras linhas de código são o `set -euo
+//!     pipefail` e a que lê o canal do arquivo, o nome `canal`, fora da
+//!     expansão, só aparece em linhas iguais a ela ou à que escreve a saída,
+//!     e só esta cita o `GITHUB_OUTPUT` — e, desde o lote A16, a da leitura
+//!     aparece uma vez, a da saída é a última, nenhuma linha define uma
+//!     função ou um apelido, nem tem o `enable`, e as linhas de comentário
+//!     também contam ([`o_canal_do_passo_conferir`]); e nenhuma linha dela
 //!     cita o
 //!     `GITHUB_ENV`, o `GITHUB_PATH` nem, desde o lote A15, os
 //!     [`COMANDOS_DO_RUNNER`];
@@ -261,13 +265,14 @@ const PASSO_DO_EXECUTOR: &str = "executor";
 /// A linha do passo `conferir` da ação do compilador que lê o canal: o
 /// `channel` do `rust-toolchain.toml` da raiz, o arquivo que o passo confere
 /// contra o do commit logo depois ([`o_canal_do_passo_conferir`]). Desde o
-/// lote A15.
+/// lote A15 — e, desde o lote A16, uma vez só no script.
 const LEITURA_DO_CANAL: &str = "canal=$(python3 -I -c 'import tomllib; \
      print(tomllib.load(open(\"rust-toolchain.toml\", \"rb\"))[\"toolchain\"][\"channel\"])')";
 
 /// A linha do passo `conferir` da ação do compilador que escreve a saída
 /// `canal`, a de toda chave de cache: uma marca do passo ([`PASSOS_DA_ACAO`])
-/// e a única que cita o `GITHUB_OUTPUT` nele ([`o_canal_do_passo_conferir`]).
+/// e a única que cita o `GITHUB_OUTPUT` nele — e, desde o lote A16, a
+/// última do script ([`o_canal_do_passo_conferir`]).
 const SAIDA_DO_CANAL: &str = "echo \"canal=$canal\" >> \"$GITHUB_OUTPUT\"";
 
 /// Os passos da ação do compilador, na ordem ([`conferir_a_acao`]): o do
@@ -325,8 +330,13 @@ const SAIDA_DO_CANAL: &str = "echo \"canal=$canal\" >> \"$GITHUB_OUTPUT\"";
 /// o encheu" deixaria de valer, com o `cargo xtask invariantes` passando (o
 /// M2 do adversário do lote A13, e o N3 do revisor da rodada 6). A marca
 /// prova que a linha existe, e não o valor: desde o lote A15, a regra do
-/// canal ([`o_canal_do_passo_conferir`]) confere que o valor é o que o
-/// passo lê do `rust-toolchain.toml` (o B1 do adversário do lote A14).
+/// canal ([`o_canal_do_passo_conferir`]) confere, pelo texto do script, que
+/// o nome só recebe valor em linhas iguais à que o lê do
+/// `rust-toolchain.toml` (o B1 do adversário do lote A14) — e, desde o lote
+/// A16, que essa linha aparece uma vez, que a da saída é a última, que
+/// nenhuma linha define uma função ou um apelido, nem tem o `enable`, e que
+/// as linhas de comentário também contam (o E1 do revisor da rodada 8 e o
+/// B1 do adversário do lote A15). O que ela não segue está no doc dela.
 ///
 /// # O git sem o ambiente do job, desde o lote A14
 ///
@@ -3349,12 +3359,15 @@ fn conferir_a_acao(texto: &str) -> Vec<String> {
 }
 
 /// A regra do canal do passo `conferir` da ação do compilador — `script`, o
-/// dele ([`passo_da_acao`]) —, nas linhas de código do script (sem as de
-/// comentário): as duas primeiras são o `set -euo pipefail` e a que lê o
-/// canal do `rust-toolchain.toml` ([`LEITURA_DO_CANAL`]); o nome `canal`,
-/// fora da expansão (`$canal`, `${canal}`), só aparece nessa linha e na que
-/// escreve a saída ([`SAIDA_DO_CANAL`]) ([`cita_o_nome`]); e o
-/// `GITHUB_OUTPUT` aparece uma vez, nesta.
+/// dele ([`passo_da_acao`]) —, pelo texto das linhas do script: as duas
+/// primeiras de código são o `set -euo pipefail` e a que lê o canal do
+/// `rust-toolchain.toml` ([`LEITURA_DO_CANAL`]), e esta aparece uma vez só;
+/// o nome `canal`, fora da expansão (`$canal`, `${canal}`), só aparece
+/// nela e na que escreve a saída ([`SAIDA_DO_CANAL`]) ([`cita_o_nome`]); o
+/// `GITHUB_OUTPUT` aparece uma vez, nesta, que é a última linha do script;
+/// e nenhuma linha define uma função ou um apelido, nem tem o `enable`
+/// ([`troca_um_comando`]). Desde o lote A16, as três últimas partes leem
+/// também as linhas de comentário.
 ///
 /// # Por quê, desde o lote A15
 ///
@@ -3362,17 +3375,46 @@ fn conferir_a_acao(texto: &str) -> Vec<String> {
 /// o valor que ela escreve: `canal=nightly-2000-01-01` numa linha antes
 /// dela, ou um segundo `echo` depois, que vence o primeiro, punham na chave
 /// de todo cache um canal que não é o do compilador que a encheu, e o
-/// `cargo xtask invariantes` passava (o B1 do adversário do lote A14). Com a
-/// regra, o valor da saída é o da linha que lê o arquivo — que o passo
-/// confere contra o do commit logo depois —, menos o que ela não vê: o nome
-/// montado em pedaços, ou executado de um texto (o `eval`, o `source`), que
-/// é o limite de toda regra de texto. O script da ação é a raiz da
-/// confiança, com a revisão.
+/// `cargo xtask invariantes` passava (o B1 do adversário do lote A14).
+///
+/// # A linha da leitura uma vez, as linhas de comentário e as funções, desde o lote A16
+///
+/// A regra do lote A15 conferia pela posição só as duas primeiras linhas de
+/// código, e as outras pelo texto: uma cópia exata da linha da leitura, mais
+/// abaixo — depois de uma função `python3`, de um `PATH` ou de um `cd` —,
+/// passava, e o valor da saída era o dessa cópia (o E1 do revisor da rodada
+/// 8). E ela tirava as linhas que começam por `#`, que, num texto entre aspas
+/// em várias linhas ou num heredoc, o bash roda: `: "` e, embaixo,
+/// `#"; canal=nightly-2000-01-01; : "` davam outro valor ao nome, e
+/// `#$(echo canal=… >> "$GITHUB_OUTPUT")"` escrevia a saída de novo — com a
+/// ação rodada como o runner, o canal falso chegou à saída do passo (o B1 do
+/// adversário do lote A15). A regra não sabe onde um texto começa: lê toda
+/// linha, e o comentário do passo não cita o nome nem o `GITHUB_OUTPUT`
+/// (o `$canal` passa). E uma função `echo` — ou um apelido, ou o `enable -n
+/// echo` com outro `echo` no PATH — trocava, sem citar o nome, o que a linha
+/// da saída escreve.
+///
+/// # O que ela não segue
+///
+/// Pelo texto, a regra não segue o nome montado em pedaços, o texto
+/// executado (o `eval`, o `source` e o `.`, outro `bash` sobre o script) nem
+/// o caminho do script: um `exit`, um `exec`, um heredoc ou um `trap` antes
+/// da linha da saída, ou uma linha que continua nela, a pulariam — a saída
+/// ficaria vazia, e a chave de todo cache, sem o canal. É o limite de toda
+/// regra de texto: o script da ação é a raiz da confiança, com a revisão.
 fn o_canal_do_passo_conferir(script: &str) -> Vec<String> {
-    let codigo: Vec<&str> = script
+    // Toda linha, as de comentário inclusive: num texto em várias linhas, o
+    // bash roda a que começa por `#` (desde o lote A16); a posição das duas
+    // primeiras se confere nas de código.
+    let todas: Vec<&str> = script
         .lines()
         .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter(|l| !l.is_empty())
+        .collect();
+    let codigo: Vec<&str> = todas
+        .iter()
+        .copied()
+        .filter(|l| !l.starts_with('#'))
         .collect();
     let mut fora = Vec::new();
     if codigo.get(..2) != Some(&["set -euo pipefail", LEITURA_DO_CANAL][..]) {
@@ -3382,28 +3424,78 @@ fn o_canal_do_passo_conferir(script: &str) -> Vec<String> {
              dela — uma função, um `PATH`, um `cd` — escolhe o valor que ela lê"
         ));
     }
-    for linha in &codigo {
+    let leituras = todas.iter().filter(|l| **l == LEITURA_DO_CANAL).count();
+    if leituras != 1 {
+        fora.push(format!(
+            "{ACAO_DO_COMPILADOR}: o passo `conferir` tem {leituras} linha(s) iguais à que lê o canal \
+             do `rust-toolchain.toml` — uma só, a segunda de código: uma cópia mais abaixo, depois \
+             de uma função, de um `PATH` ou de um `cd`, leria outro valor"
+        ));
+    }
+    for linha in &todas {
         if *linha != LEITURA_DO_CANAL && *linha != SAIDA_DO_CANAL && cita_o_nome(linha, "canal") {
             fora.push(format!(
                 "{ACAO_DO_COMPILADOR}: `{linha}` no passo `conferir` — o nome `canal`, fora da \
                  expansão (`$canal`), só na linha que o lê do `rust-toolchain.toml` e na que o \
-                 escreve na saída: noutra, ele pode receber outro valor, e a chave de todo cache \
-                 levaria um canal que não é o do compilador que a encheu"
+                 escreve na saída, também nas linhas que começam por `#`, que o bash roda num \
+                 texto em várias linhas: noutra, ele pode receber outro valor, e a chave de todo \
+                 cache levaria um canal que não é o do compilador que a encheu"
             ));
         }
     }
-    let citacoes: usize = codigo
+    let citacoes: usize = todas
         .iter()
         .map(|l| l.matches("GITHUB_OUTPUT").count())
         .sum();
-    if citacoes != 1 || !codigo.contains(&SAIDA_DO_CANAL) {
+    if citacoes != 1 || todas.last().copied() != Some(SAIDA_DO_CANAL) {
         fora.push(format!(
-            "{ACAO_DO_COMPILADOR}: o passo `conferir` cita o `GITHUB_OUTPUT` {citacoes} vez(es) — só \
-             a linha `{SAIDA_DO_CANAL}`, uma vez, escreve a saída: uma segunda escrita do canal \
-             vence a primeira"
+            "{ACAO_DO_COMPILADOR}: o passo `conferir` cita o `GITHUB_OUTPUT` {citacoes} vez(es), ou \
+             não termina pela linha da saída — só a linha `{SAIDA_DO_CANAL}`, uma vez e na última \
+             linha do script, escreve a saída: uma segunda escrita do canal vence a primeira"
         ));
     }
+    // A função, o apelido e o `enable` (desde o lote A16), nas linhas como o
+    // bash as junta: a `\` do fim de uma linha a continua na de baixo.
+    for linha in script.replace("\\\n", "").lines().map(str::trim) {
+        if let Some(qual) = troca_um_comando(linha) {
+            fora.push(format!(
+                "{ACAO_DO_COMPILADOR}: `{linha}` no passo `conferir` — {qual}: troca, sem citar o \
+                 nome `canal`, o comando que outra linha roda — o `echo` da saída, o `python3` da \
+                 leitura —, e a regra do canal lê o script pelo texto"
+            ));
+        }
+    }
     fora
+}
+
+/// O que, numa linha do script do passo `conferir`, troca o comando que
+/// outra linha roda — o `echo` da saída, o `python3` da leitura
+/// ([`o_canal_do_passo_conferir`]): a definição de uma função — um par de
+/// parênteses vazio, com espaços ou não entre eles, ou a palavra
+/// `function` —, um apelido — o `alias`, e também o `expand_aliases` e o
+/// `BASH_ALIASES`, em qualquer caixa — e o `enable`, que desliga um comando
+/// interno do bash e deixa o do PATH no lugar dele. Nenhum, sem nada disso.
+/// Desde o lote A16.
+fn troca_um_comando(linha: &str) -> Option<&'static str> {
+    let da_palavra = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let palavra = |p: &str| {
+        linha.match_indices(p).any(|(i, _)| {
+            !linha[..i].ends_with(da_palavra) && !linha[i + p.len()..].starts_with(da_palavra)
+        })
+    };
+    let b = linha.as_bytes();
+    let parenteses_vazios = b.iter().enumerate().any(|(i, &c)| {
+        c == b'(' && b[i + 1..].iter().find(|&&d| d != b' ' && d != b'\t') == Some(&b')')
+    });
+    if parenteses_vazios || palavra("function") {
+        Some("a definição de uma função")
+    } else if linha.to_ascii_lowercase().contains("alias") {
+        Some("um apelido do bash")
+    } else if palavra("enable") {
+        Some("o `enable`, que troca um comando interno do bash pelo do PATH")
+    } else {
+        None
+    }
 }
 
 /// `linha` cita `nome` — a palavra inteira, de letras, dígitos e `_` — fora
@@ -7594,8 +7686,9 @@ jobs:
     /// saída escrita pelo `tee` ou na mesma linha da marca, o canal
     /// reatribuído na linha da marca ou numa cópia da linha da leitura — as
     /// duas só valem inteiras —, e uma função, o `PATH` ou a leitura de outro
-    /// arquivo antes da linha que lê o canal. Os comentários com a palavra, e
-    /// as expansões, passam; e a ação do repositório também.
+    /// arquivo antes da linha que lê o canal. As expansões passam, e a ação
+    /// do repositório também; os comentários com a palavra, desde o lote A16,
+    /// reprovam (`adversario_a15_o_canal_do_passo_conferir_em_toda_linha`).
     #[test]
     fn adversario_a14_o_canal_que_o_passo_conferir_escreve() {
         let saida = format!("        {SAIDA_DO_CANAL}\n");
@@ -7711,15 +7804,10 @@ jobs:
             }
         }
         assert!(cegos.is_empty(), "{cegos:#?}");
-        // Passam: os comentários com a palavra, e as expansões do nome.
-        for texto in [
-            antes_da_saida("# o canal do arquivo, conferido acima"),
-            antes_da_leitura("# o canal sai da linha de baixo"),
-            antes_da_saida("echo \"conferido: $canal ${canal} ${#canal} ${canal:-x}\""),
-        ] {
-            assert_ne!(texto, ACAO);
-            assert_eq!(conferir_a_acao(&texto), Vec::<String>::new(), "{texto}");
-        }
+        // Passam as expansões do nome.
+        let texto = antes_da_saida("echo \"conferido: $canal ${canal} ${#canal} ${canal:-x}\"");
+        assert_ne!(texto, ACAO);
+        assert_eq!(conferir_a_acao(&texto), Vec::<String>::new(), "{texto}");
         assert_eq!(conferir_a_acao(ACAO), Vec::<String>::new());
         // As peças: o nome inteiro, fora da expansão.
         assert!(cita_o_nome("canal=x", "canal"));
@@ -7729,6 +7817,165 @@ jobs:
             "canal"
         ));
         assert!(!cita_o_nome("x $canal_novo canais o_canal", "canal"));
+    }
+
+    /// O canal do passo `conferir` em toda linha (o E1 do revisor da rodada 8
+    /// e o B1 do adversário do lote A15): a regra do lote A15 conferia pela
+    /// posição só as duas primeiras linhas de código — uma cópia exata da
+    /// linha da leitura, mais abaixo, passava — e tirava as que começam por
+    /// `#`, que o bash roda num texto em várias linhas. Reprovam agora, cada
+    /// um uma vez, pela parte da regra dele: a cópia exata da leitura, depois
+    /// de um `cd` ou sozinha; as duas formas do adversário, com a linha que
+    /// começa por `#` dentro de um texto; o comentário com a palavra ou com o
+    /// `GITHUB_OUTPUT`; a saída que não é a última linha; e a função — com os
+    /// parênteses, com espaços entre eles, numa linha continuada, com a
+    /// palavra `function` —, o apelido — o `alias`, o `expand_aliases`, o
+    /// `BASH_ALIASES` — e o `enable`, que trocam o `echo` da saída sem citar
+    /// o nome. O comentário com o `$canal` passa, e a ação do repositório
+    /// também.
+    #[test]
+    fn adversario_a15_o_canal_do_passo_conferir_em_toda_linha() {
+        let saida = format!("        {SAIDA_DO_CANAL}\n");
+        let leitura = format!("        {LEITURA_DO_CANAL}\n");
+        assert_eq!(ACAO.matches(&saida).count(), 1);
+        assert_eq!(ACAO.matches(&leitura).count(), 1);
+        let antes_da_saida = |linhas: &str| ACAO.replacen(&saida, &format!("{linhas}{saida}"), 1);
+        let uma = |linha: &str| format!("        {linha}\n");
+        let nome = "no passo `conferir` — o nome `canal`, fora da expansão";
+        let copia = "linha(s) iguais à que lê o canal";
+        let escrita = "o passo `conferir` cita o `GITHUB_OUTPUT`";
+        let funcao = "a definição de uma função";
+        let apelido = "um apelido do bash";
+        let enable = "o `enable`, que troca um comando interno";
+        let casos: Vec<(&str, String, &str)> = vec![
+            (
+                "a cópia exata da leitura antes da saída",
+                antes_da_saida(&leitura),
+                copia,
+            ),
+            (
+                "um cd e a cópia da leitura",
+                antes_da_saida(&format!("{}{leitura}", uma("cd /tmp/outro"))),
+                copia,
+            ),
+            (
+                "a linha que começa por # num texto, depois da saída",
+                ACAO.replacen(
+                    &saida,
+                    &format!(
+                        "{saida}{}{}",
+                        uma(": \""),
+                        uma("#$(echo canal=nightly-2000-01-01 >> \"$GITHUB_OUTPUT\")\"")
+                    ),
+                    1,
+                ),
+                nome,
+            ),
+            (
+                "a atribuição numa linha que começa por # num texto",
+                antes_da_saida(&format!(
+                    "{}{}{}",
+                    uma(": \""),
+                    uma("#\"; canal=nightly-2000-01-01; : \""),
+                    uma("\"")
+                )),
+                nome,
+            ),
+            (
+                "o comentário com a palavra",
+                antes_da_saida(&uma("# o canal do arquivo, conferido acima")),
+                nome,
+            ),
+            (
+                "o comentário com a palavra, antes da leitura",
+                ACAO.replacen(
+                    &leitura,
+                    &format!("{}{leitura}", uma("# o canal sai da linha de baixo")),
+                    1,
+                ),
+                nome,
+            ),
+            (
+                "o comentário com o GITHUB_OUTPUT",
+                antes_da_saida(&uma("# a linha de baixo escreve no GITHUB_OUTPUT")),
+                escrita,
+            ),
+            (
+                "a saída antes da última linha",
+                ACAO.replacen(&saida, &format!("{saida}{}", uma("true")), 1),
+                escrita,
+            ),
+            (
+                "uma função echo",
+                antes_da_saida(&uma(
+                    "echo() { printf '%s=nightly-2000-01-01\\n' \"${1%%=*}\"; }",
+                )),
+                funcao,
+            ),
+            (
+                "os parênteses com espaços",
+                antes_da_saida(&uma("echo ( ) { printf '%s\\n' x; }")),
+                funcao,
+            ),
+            (
+                "a função numa linha continuada",
+                antes_da_saida(&format!("{}{}", uma("echo (\\"), uma(") { printf x; }"))),
+                funcao,
+            ),
+            (
+                "a palavra function",
+                antes_da_saida(&uma("function echo { printf x; }")),
+                funcao,
+            ),
+            (
+                "o alias",
+                antes_da_saida(&uma("alias echo='printf x'")),
+                apelido,
+            ),
+            (
+                "o expand_aliases",
+                antes_da_saida(&uma("shopt -s expand_aliases")),
+                apelido,
+            ),
+            (
+                "o BASH_ALIASES",
+                antes_da_saida(&uma("BASH_ALIASES[echo]='printf x'")),
+                apelido,
+            ),
+            ("o enable", antes_da_saida(&uma("enable -n echo")), enable),
+        ];
+        let mut cegos = Vec::new();
+        for (rotulo, texto, esperado) in &casos {
+            assert_ne!(texto, ACAO, "{rotulo}");
+            let fora = conferir_a_acao(texto);
+            if fora.iter().filter(|f| f.contains(*esperado)).count() != 1 {
+                cegos.push(format!("{rotulo}: {fora:#?}"));
+            }
+        }
+        assert!(cegos.is_empty(), "{cegos:#?}");
+        // Passam: o comentário com o `$canal`, e a ação do repositório.
+        let com_expansao = antes_da_saida(&uma("# o $canal, conferido acima, vai para a saída"));
+        assert_ne!(com_expansao, ACAO);
+        assert_eq!(conferir_a_acao(&com_expansao), Vec::<String>::new());
+        assert_eq!(conferir_a_acao(ACAO), Vec::<String>::new());
+        // As peças da função, do apelido e do `enable`.
+        for linha in [
+            "f() {",
+            "f ( ) {",
+            "function f {",
+            "\\alias x=y",
+            "enable -n echo",
+        ] {
+            assert!(troca_um_comando(linha).is_some(), "{linha}");
+        }
+        for linha in [
+            "x=$(rustc -V)",
+            "print(open(\"a\", \"rb\"))",
+            "functions enabled",
+            "# (o core.fsmonitor)",
+        ] {
+            assert_eq!(troca_um_comando(linha), None, "{linha}");
+        }
     }
 
     /// O passo da ação como o texto de um bloco (no lote A13, o M2 do

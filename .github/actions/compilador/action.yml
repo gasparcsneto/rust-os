@@ -457,10 +457,13 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        # O canal sai do arquivo, nesta linha, e só a última escreve a saída:
-        # o `cargo xtask invariantes` confere que o nome `canal`, fora da
-        # expansão, só aparece nas duas, e o `GITHUB_OUTPUT`, só na última.
-        # Desde o lote A15.
+        # Esta linha lê o `$canal` do arquivo, e a última do script o escreve
+        # na saída do passo: o `cargo xtask invariantes` confere que cada uma
+        # aparece uma vez, que o nome da variável, fora da expansão, só
+        # aparece nelas, e o arquivo da saída, só na última; e que nenhuma
+        # linha define uma função ou um apelido, nem desliga um comando
+        # interno do bash. Ele lê também as linhas que começam por `#`, que,
+        # num texto em várias linhas, o bash roda. Desde o lote A15 (e o A16).
         canal=$(python3 -I -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
         if ! [[ "$canal" =~ ^nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
           echo "::error file=rust-toolchain.toml::o valor '$canal' do channel não é um nightly com data"
@@ -479,7 +482,7 @@ runs:
         # `rust-toolchain.toml` da raiz — que o passo `ambiente` conferiu —,
         # com os componentes e os alvos, na primeira chamada.
         rustc -V > /dev/null
-        # Daqui em diante, o toolchain fixado pelo canal, e não o que o
+        # Daqui em diante, o toolchain fixado pelo `$canal`, e não o que o
         # diretório escolhe.
         export RUSTUP_TOOLCHAIN="$canal"
         rustc -Vv
